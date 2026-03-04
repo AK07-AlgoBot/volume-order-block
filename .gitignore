@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+ENV/
+*.egg-info/
+dist/
+build/
+
+# Trading Bot Files
+trading_state.json
+trading_bot.log
+trading_log.txt
+live_status.log
+*.log
+
+# Old files
+old/
+backup/
+archive/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Sensitive
+config.json
+.env
+*.key
+*.token
