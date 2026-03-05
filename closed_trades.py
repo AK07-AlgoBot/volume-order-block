@@ -1,5 +1,7 @@
 import re
+import argparse
 from collections import defaultdict, deque
+from datetime import datetime
 from pathlib import Path
 
 ORDER_LOG_FILE = Path("orders.log")
@@ -122,12 +124,40 @@ def print_report(closed, open_positions):
 
 
 def main():
+    parser = argparse.ArgumentParser(description="Generate closed trades report from orders.log")
+    parser.add_argument(
+        "--all",
+        action="store_true",
+        help="Include all dates from orders.log (default: only today's date).",
+    )
+    parser.add_argument(
+        "--date",
+        type=str,
+        default=None,
+        help="Filter by specific date in YYYY-MM-DD format.",
+    )
+    args = parser.parse_args()
+
     if not ORDER_LOG_FILE.exists():
         print("orders.log not found.")
         return
 
     lines = ORDER_LOG_FILE.read_text(encoding="utf-8", errors="ignore").splitlines()
-    closed, open_positions = parse_orders(lines)
+
+    if args.all:
+        filtered_lines = lines
+        selected_date = "ALL"
+    else:
+        selected_date = args.date or datetime.now().strftime("%Y-%m-%d")
+        filtered_lines = [line for line in lines if line.startswith(selected_date)]
+
+    print(f"Report Date Filter : {selected_date}")
+
+    if not filtered_lines:
+        print("No log entries found for selected date filter.")
+        return
+
+    closed, open_positions = parse_orders(filtered_lines)
     print_report(closed, open_positions)
 
 

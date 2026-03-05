@@ -9,6 +9,7 @@ import logging
 import json
 import sys
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 from pathlib import Path
 import pandas as pd
 import numpy as np
@@ -24,7 +25,7 @@ init(autoreset=True)
 
 # Upstox API Configuration
 API_CONFIG = {
-    "access_token": "eyJ0eXAiOiJKV1QiLCJrZXlfaWQiOiJza192MS4wIiwiYWxnIjoiSFMyNTYifQ.eyJzdWIiOiI2RUJBVTQiLCJqdGkiOiI2OWE3YTYyZDJjZWVlZDc1MjAwNGJmOTkiLCJpc011bHRpQ2xpZW50IjpmYWxzZSwiaXNQbHVzUGxhbiI6ZmFsc2UsImlhdCI6MTc3MjU5NDczMywiaXNzIjoidWRhcGktZ2F0ZXdheS1zZXJ2aWNlIiwiZXhwIjoxNzcyNjYxNjAwfQ.f-XDPUS3a8q5ycehtlonJiGvIBtRYxX0KWxl88qHxpw",
+    "access_token": "eyJ0eXAiOiJKV1QiLCJrZXlfaWQiOiJza192MS4wIiwiYWxnIjoiSFMyNTYifQ.eyJzdWIiOiI2RUJBVTQiLCJqdGkiOiI2OWE4ZjM1NmI3OGQ4YzYxOGY5MjIxNGUiLCJpc011bHRpQ2xpZW50IjpmYWxzZSwiaXNQbHVzUGxhbiI6ZmFsc2UsImlhdCI6MTc3MjY4MDAyMiwiaXNzIjoidWRhcGktZ2F0ZXdheS1zZXJ2aWNlIiwiZXhwIjoxNzcyNzQ4MDAwfQ.tbU1bxqY0cfobJuO4e3WZkr8geZGuAmSOQAiofEpuSQ",
     "api_key": "d9df59d8-e3c8-491e-9a7a-0bd19805ba8d",
     "api_secret": "wu5npsei6y",
     "base_url": "https://api.upstox.com/v2"
@@ -65,8 +66,17 @@ TRADING_CONFIG = {
     "trailing_stop_loss_percent": 1.0,  # 1%
     "trail_step_percent": 0.5,  # After 1:1, trail SL by 0.5% for every 0.5% favorable move
     "target_percent": 2.0,  # Book profit at +2% move (or -2% for SELL)
+    "order_block_lookback_candles": 12,  # Search depth for latest opposite candle (5m) as order block
     "loop_interval": 10,  # seconds between each check
-    "quantity": 1  # Quantity per order
+    "quantity": 1,  # Number of lots per order
+    "segment_scripts": {
+        "NSE": ["NIFTY", "BANKNIFTY", "SENSEX"],
+        "MCX": ["CRUDE", "GOLDMINI", "SILVERMINI"]
+    },
+    "eod_squareoff_times": {
+        "NSE": "15:20",
+        "MCX": "23:20"
+    }
 }
 
 # File paths
@@ -175,35 +185,71 @@ class UpstoxClient:
     
     def place_order(self, instrument_key, quantity, transaction_type, order_type="MARKET", price=None):
         """Place an order"""
-        try:
-            url = "https://api-hft.upstox.com/v2/order/place"
-            payload = {
-                "quantity": quantity,
-                "product": "I",  # Intraday for MCX, use "I" for futures
-                "validity": "DAY",
-                "price": price if price else 0,
-                "tag": "trading_bot",
-                "instrument_token": instrument_key,
-                "order_type": order_type,
-                "transaction_type": transaction_type,
-                "disclosed_quantity": 0,
-                "trigger_price": 0,
-                "is_amo": False
-            }
-            
-            response = self.session.post(url, json=payload)
-            response.raise_for_status()
-            data = response.json()
-            
-            if data.get('status') == 'success':
-                logger.info(f" Order placed: {transaction_type} {quantity} of {instrument_key}")
-                return data.get('data')
-            else:
-                logger.error(f"ERROR: Order failed: {data}")
-                return None
-        except Exception as e:
-            logger.error(f"ERROR: Error placing order: {e}")
-            return None
+        payload = {
+            "quantity": quantity,
+            "product": "I",  # Intraday for futures/commodities
+            "validity": "DAY",
+            "price": price if price else 0,
+            "tag": "trading_bot",
+            "instrument_token": instrument_key,
+            "order_type": order_type,
+            "transaction_type": transaction_type,
+            "disclosed_quantity": 0,
+            "trigger_price": 0,
+            "is_amo": False
+        }
+
+        if instrument_key.startswith(("NSE_", "BSE_")):
+            endpoint_candidates = [
+                f"{self.base_url}/order/place",
+                "https://api-hft.upstox.com/v2/order/place",
+            ]
+        else:
+            endpoint_candidates = [
+                "https://api-hft.upstox.com/v2/order/place",
+                f"{self.base_url}/order/place",
+            ]
+
+        last_error = "Unknown order placement error"
+        last_endpoint = ""
+
+        for url in endpoint_candidates:
+            last_endpoint = url
+            try:
+                response = self.session.post(url, json=payload)
+                response_data = response.json() if response.text else {}
+
+                if response.status_code == 200 and response_data.get('status') == 'success':
+                    logger.info(f" Order placed via {url}: {transaction_type} {quantity} of {instrument_key}")
+                    return {
+                        "status": "success",
+                        "data": response_data.get('data', {}),
+                        "endpoint": url
+                    }
+
+                broker_error = ""
+                if isinstance(response_data, dict):
+                    errors = response_data.get('errors') or []
+                    if errors and isinstance(errors, list):
+                        first = errors[0] if isinstance(errors[0], dict) else {"message": str(errors[0])}
+                        broker_error = first.get('message') or str(first)
+                    broker_error = broker_error or response_data.get('message', '')
+
+                last_error = (
+                    f"HTTP {response.status_code} - {broker_error or response.text[:250]}"
+                )
+            except Exception as e:
+                last_error = str(e)
+
+        logger.error(
+            f"ERROR: Order failed on all endpoints for {instrument_key} {transaction_type} qty={quantity}. "
+            f"Last endpoint={last_endpoint}, error={last_error}"
+        )
+        return {
+            "status": "error",
+            "error": last_error,
+            "endpoint": last_endpoint
+        }
 
 # ============================================================================
 # TECHNICAL ANALYSIS
@@ -255,6 +301,8 @@ class TradingBot:
         self.entry_warmup_done = False
         self.entry_warmup_timestamps = {}
         self.last_entry_candle_processed = {}
+        self.last_position_eval_logged = {}
+        self.eod_squareoff_done = {}
         
     def load_state(self):
         """Load saved trading state"""
@@ -264,6 +312,7 @@ class TradingBot:
                     state = json.load(f)
                     self.positions = state.get('positions', {})
                     self.total_pnl = state.get('total_pnl', 0)
+                    self.eod_squareoff_done = state.get('eod_squareoff_done', {})
                     logger.info(f"STATE LOADED: {len(self.positions)} positions")
         except Exception as e:
             logger.warning(f"WARNING: Could not load state: {e}")
@@ -274,6 +323,7 @@ class TradingBot:
             state = {
                 'positions': self.positions,
                 'total_pnl': self.total_pnl,
+                'eod_squareoff_done': self.eod_squareoff_done,
                 'timestamp': datetime.now().isoformat()
             }
             with open(STATE_FILE, 'w') as f:
@@ -315,10 +365,124 @@ class TradingBot:
             + (f" | {extra}" if extra else "")
         )
 
+    def _log_order_failure(self, script_name, side, price, reason, error_text, endpoint=""):
+        fail_extra = f"error={error_text}"
+        if endpoint:
+            fail_extra += f"; endpoint={endpoint}"
+        order_logger.info(
+            f"{script_name} | ACTION=ORDER_FAILED | SIDE={side} | PRICE={price:.2f} | REASON={reason} | {fail_extra}"
+        )
+
+    def _place_order_with_result(self, script_name, side, price, reason):
+        order_token = self._get_order_token(script_name)
+        order_qty = self._get_order_quantity(script_name)
+        result = self.client.place_order(order_token, order_qty, side)
+        if result and result.get('status') == 'success':
+            return True, result
+
+        error_text = (result or {}).get('error', 'Unknown error')
+        endpoint = (result or {}).get('endpoint', '')
+        logger.error(
+            f"ORDER FAILED: {script_name} {side} qty={order_qty} @ Rs{price:.2f} | reason={reason} | error={error_text}"
+        )
+        self._log_order_failure(script_name, side, price, reason, error_text, endpoint)
+        return False, result
+
     def _get_order_token(self, script_name):
         """Get the order token for placing orders (FUTURES/COMMODITIES)"""
         order_tokens = self.config.get('order_tokens', {})
         return order_tokens.get(script_name, self.config['scripts'].get(script_name, ''))
+
+    def _get_order_quantity(self, script_name):
+        """Get exchange quantity as lots multiplied by contract lot size."""
+        lots = int(self.config.get('quantity', 1))
+        lot_size = int(self.config.get('lot_sizes', {}).get(script_name, 1))
+        return max(1, lots * lot_size)
+
+    def _now_ist(self):
+        return datetime.now(ZoneInfo("Asia/Kolkata"))
+
+    def _script_segment(self, script_name):
+        segment_scripts = self.config.get('segment_scripts', {})
+        for segment, scripts in segment_scripts.items():
+            if script_name in scripts:
+                return segment
+        return None
+
+    def _segment_cutoff_dt(self, segment, now_ist):
+        squareoff_times = self.config.get('eod_squareoff_times', {})
+        cutoff_text = squareoff_times.get(segment)
+        if not cutoff_text or ':' not in cutoff_text:
+            return None
+
+        hour_text, minute_text = cutoff_text.split(':', 1)
+        hour = int(hour_text)
+        minute = int(minute_text)
+        return now_ist.replace(hour=hour, minute=minute, second=0, microsecond=0)
+
+    def _is_after_segment_cutoff(self, script_name, now_ist):
+        segment = self._script_segment(script_name)
+        if not segment:
+            return False
+
+        cutoff_dt = self._segment_cutoff_dt(segment, now_ist)
+        if cutoff_dt is None:
+            return False
+
+        return now_ist >= cutoff_dt
+
+    def _run_eod_squareoff(self, now_ist):
+        segment_scripts = self.config.get('segment_scripts', {})
+        today_text = now_ist.strftime('%Y-%m-%d')
+
+        for segment, scripts in segment_scripts.items():
+            cutoff_dt = self._segment_cutoff_dt(segment, now_ist)
+            if cutoff_dt is None or now_ist < cutoff_dt:
+                continue
+
+            if self.eod_squareoff_done.get(segment) == today_text:
+                continue
+
+            logger.info(f"EOD: Square-off check for {segment} at {now_ist.strftime('%H:%M:%S')}")
+            any_closed = False
+
+            for script_name in scripts:
+                if script_name not in self.positions:
+                    continue
+
+                position = self.positions[script_name]
+                exit_side = "SELL" if position.get('type') == 'BUY' else "BUY"
+                market_price = position.get('entry_price', 0.0)
+
+                success, order_result = self._place_order_with_result(
+                    script_name,
+                    exit_side,
+                    market_price,
+                    "EOD_SQUAREOFF"
+                )
+                if not success:
+                    continue
+
+                order_id = (order_result.get('data') or {}).get('order_id', 'NA')
+                self._log_order_event(
+                    script_name,
+                    action="EXIT",
+                    side=exit_side,
+                    price=market_price,
+                    reason="EOD_SQUAREOFF",
+                    extra=f"cutoff={cutoff_dt.strftime('%H:%M')}; order_id={order_id}"
+                )
+                del self.positions[script_name]
+                any_closed = True
+
+            remaining = [s for s in scripts if s in self.positions]
+            if not remaining:
+                self.eod_squareoff_done[segment] = today_text
+                logger.info(f"EOD: {segment} square-off completed for {today_text}")
+                self.save_state()
+            elif any_closed:
+                self.save_state()
+                logger.warning(f"EOD: {segment} square-off partial. Remaining: {remaining}")
 
     def _favorable_move_percent(self, position_type, entry_price, current_price):
         if position_type == 'BUY':
@@ -331,10 +495,92 @@ class TradingBot:
             return entry_price * (1 + step_percent * steps)
         return entry_price * (1 - step_percent * steps)
 
+    def _get_entry_swing_sl(self, df, entry_candle_timestamp, side):
+        """Return swing-based SL from 5-minute candles before entry candle.
+
+        BUY  -> most recent swing low before entry candle.
+        SELL -> most recent swing high before entry candle.
+        Fallback -> previous candle low/high.
+        """
+        if df is None or df.empty or entry_candle_timestamp is None:
+            return None
+
+        required_cols = {'timestamp', 'high', 'low'}
+        if not required_cols.issubset(df.columns):
+            return None
+
+        working = df.sort_values('timestamp').reset_index(drop=True)
+        eligible = working[working['timestamp'] <= entry_candle_timestamp]
+        if eligible.empty:
+            return None
+
+        entry_idx = int(eligible.index[-1])
+        prev_idx = entry_idx - 1
+        if prev_idx < 0:
+            return None
+
+        pivot_indices = []
+        search_end = prev_idx
+        if search_end >= 2:
+            for idx in range(1, search_end):
+                prev_row = working.iloc[idx - 1]
+                row = working.iloc[idx]
+                next_row = working.iloc[idx + 1]
+
+                if side == 'BUY' and row['low'] < prev_row['low'] and row['low'] < next_row['low']:
+                    pivot_indices.append(idx)
+                elif side == 'SELL' and row['high'] > prev_row['high'] and row['high'] > next_row['high']:
+                    pivot_indices.append(idx)
+
+        if pivot_indices:
+            pivot_idx = pivot_indices[-1]
+            return float(working.iloc[pivot_idx]['low'] if side == 'BUY' else working.iloc[pivot_idx]['high'])
+
+        prev_row = working.iloc[prev_idx]
+        return float(prev_row['low'] if side == 'BUY' else prev_row['high'])
+
+    def _get_entry_order_block_sl(self, df, entry_candle_timestamp, side):
+        """Return order-block based SL from 5-minute candles before entry candle.
+
+        BUY  -> low of latest bearish candle (close < open) before entry candle.
+        SELL -> high of latest bullish candle (close > open) before entry candle.
+        """
+        if df is None or df.empty or entry_candle_timestamp is None:
+            return None
+
+        required_cols = {'timestamp', 'open', 'close', 'high', 'low'}
+        if not required_cols.issubset(df.columns):
+            return None
+
+        working = df.sort_values('timestamp').reset_index(drop=True)
+        eligible = working[working['timestamp'] <= entry_candle_timestamp]
+        if eligible.empty:
+            return None
+
+        entry_idx = int(eligible.index[-1])
+        prev_idx = entry_idx - 1
+        if prev_idx < 0:
+            return None
+
+        lookback = max(1, int(self.config.get('order_block_lookback_candles', 12)))
+        start_idx = max(0, prev_idx - lookback + 1)
+
+        for idx in range(prev_idx, start_idx - 1, -1):
+            row = working.iloc[idx]
+            is_bearish = row['close'] < row['open']
+            is_bullish = row['close'] > row['open']
+
+            if side == 'BUY' and is_bearish:
+                return float(row['low'])
+            if side == 'SELL' and is_bullish:
+                return float(row['high'])
+
+        return None
+
     def _update_position_sl(self, script_name, position, current_price):
         """
         Rule:
-        - Initial risk = trailing_stop_loss_percent (default 1%)
+        - Initial risk = entry to initial SL distance
         - At 1:1 (favorable move >= risk%), SL moves to cost
         - For every extra 0.5% favorable move, SL moves by +0.5% (BUY) / -0.5% (SELL)
         """
@@ -342,7 +588,14 @@ class TradingBot:
         entry_price = position['entry_price']
         position_type = position['type']
 
-        risk_percent = self.config['trailing_stop_loss_percent']
+        initial_sl = position.get('initial_sl', position.get('stop_loss', entry_price))
+        if entry_price > 0:
+            risk_percent = abs((entry_price - initial_sl) / entry_price) * 100
+        else:
+            risk_percent = 0
+        if risk_percent <= 0:
+            risk_percent = self.config['trailing_stop_loss_percent']
+
         step_percent = self.config['trail_step_percent']
         favorable_move = self._favorable_move_percent(position_type, entry_price, current_price)
 
@@ -580,8 +833,11 @@ class TradingBot:
                 print(f"   - {script}: {pos['type']} @ Rs{pos['entry_price']:.2f} | SL: Rs{sl:.2f}")
         print("="*110 + "\n")
     
-    def execute_trading_logic(self, script_data, allow_new_entries=True):
+    def execute_trading_logic(self, script_data, allow_new_entries=True, now_ist=None):
         """Execute trading logic based on signals"""
+        if now_ist is None:
+            now_ist = self._now_ist()
+
         for data in script_data:
             if not data:
                 continue
@@ -600,6 +856,16 @@ class TradingBot:
                 position = self.positions[script_name]
                 self._ensure_position_fields(position)
 
+                confirmed_time_text = confirmed_candle_timestamp.isoformat() if hasattr(confirmed_candle_timestamp, 'isoformat') else 'NA'
+                last_eval_ts = self.last_position_eval_logged.get(script_name)
+                if confirmed_time_text != 'NA' and last_eval_ts != confirmed_time_text:
+                    logger.info(
+                        f"VERIFY: {script_name} open={position['type']} | entry={position['entry_price']:.2f} | "
+                        f"closed_signal={confirmed_signal} | closed_crossover={bool(confirmed_crossover)} | "
+                        f"closed_time={confirmed_time_text}"
+                    )
+                    self.last_position_eval_logged[script_name] = confirmed_time_text
+
                 # Update stepped trailing SL as per strategy
                 self._update_position_sl(script_name, position, current_price)
 
@@ -610,16 +876,20 @@ class TradingBot:
                         f"ALERT: SL hit for {script_name}. Closing BUY @ Rs{current_price:.2f} "
                         f"(SL: Rs{stop_loss:.2f})"
                     )
+                    success, order_result = self._place_order_with_result(
+                        script_name, "SELL", current_price, "STOP_LOSS_HIT"
+                    )
+                    if not success:
+                        continue
+                    order_id = (order_result.get('data') or {}).get('order_id', 'NA')
                     self._log_order_event(
                         script_name,
                         action="EXIT",
                         side="SELL",
                         price=current_price,
                         reason="STOP_LOSS_HIT",
-                        extra=f"entry={position['entry_price']:.2f}; sl={stop_loss:.2f}"
+                        extra=f"entry={position['entry_price']:.2f}; sl={stop_loss:.2f}; order_id={order_id}"
                     )
-                    order_token = self._get_order_token(script_name)
-                    self.client.place_order(order_token, self.config['quantity'], "SELL")
                     del self.positions[script_name]
                     self.save_state()
                     continue
@@ -629,16 +899,20 @@ class TradingBot:
                         f"ALERT: SL hit for {script_name}. Closing SELL @ Rs{current_price:.2f} "
                         f"(SL: Rs{stop_loss:.2f})"
                     )
+                    success, order_result = self._place_order_with_result(
+                        script_name, "BUY", current_price, "STOP_LOSS_HIT"
+                    )
+                    if not success:
+                        continue
+                    order_id = (order_result.get('data') or {}).get('order_id', 'NA')
                     self._log_order_event(
                         script_name,
                         action="EXIT",
                         side="BUY",
                         price=current_price,
                         reason="STOP_LOSS_HIT",
-                        extra=f"entry={position['entry_price']:.2f}; sl={stop_loss:.2f}"
+                        extra=f"entry={position['entry_price']:.2f}; sl={stop_loss:.2f}; order_id={order_id}"
                     )
-                    order_token = self._get_order_token(script_name)
-                    self.client.place_order(order_token, self.config['quantity'], "BUY")
                     del self.positions[script_name]
                     self.save_state()
                     continue
@@ -651,17 +925,20 @@ class TradingBot:
                         f"(move: {favorable_move:.2f}%)"
                     )
                     exit_side = "SELL" if position['type'] == 'BUY' else "BUY"
+                    success, order_result = self._place_order_with_result(
+                        script_name, exit_side, current_price, "TARGET_HIT"
+                    )
+                    if not success:
+                        continue
+                    order_id = (order_result.get('data') or {}).get('order_id', 'NA')
                     self._log_order_event(
                         script_name,
                         action="EXIT",
                         side=exit_side,
                         price=current_price,
                         reason="TARGET_HIT",
-                        extra=f"entry={position['entry_price']:.2f}; target={position.get('target_price', 0):.2f}"
+                        extra=f"entry={position['entry_price']:.2f}; target={position.get('target_price', 0):.2f}; order_id={order_id}"
                     )
-                    order_token = self._get_order_token(script_name)
-                    exit_side = "SELL" if position['type'] == 'BUY' else "BUY"
-                    self.client.place_order(order_token, self.config['quantity'], exit_side)
                     del self.positions[script_name]
                     self.save_state()
                     continue
@@ -669,32 +946,34 @@ class TradingBot:
                 # Exit on opposite signal crossover
                 if (position['type'] == 'BUY' and confirmed_signal == -1 and confirmed_crossover) or \
                    (position['type'] == 'SELL' and confirmed_signal == 1 and confirmed_crossover):
-                    if hasattr(confirmed_candle_timestamp, 'isoformat'):
-                        confirmed_time_text = confirmed_candle_timestamp.isoformat()
-                    else:
-                        confirmed_time_text = 'NA'
                     logger.info(
                         f"EXIT: Confirmed crossover exit for {script_name}. Closing {position['type']} position "
                         f"(signal_time={confirmed_time_text})."
                     )
                     exit_side = "SELL" if position['type'] == 'BUY' else "BUY"
+                    success, order_result = self._place_order_with_result(
+                        script_name, exit_side, current_price, "OPPOSITE_CROSSOVER"
+                    )
+                    if not success:
+                        continue
+                    order_id = (order_result.get('data') or {}).get('order_id', 'NA')
                     self._log_order_event(
                         script_name,
                         action="EXIT",
                         side=exit_side,
                         price=current_price,
                         reason="OPPOSITE_CROSSOVER",
-                        extra=f"signal_time={confirmed_time_text}"
+                        extra=f"signal_time={confirmed_time_text}; order_id={order_id}"
                     )
-                    order_token = self._get_order_token(script_name)
-                    opposite_type = "SELL" if position['type'] == 'BUY' else "BUY"
-                    self.client.place_order(order_token, self.config['quantity'], opposite_type)
                     del self.positions[script_name]
                     self.save_state()
             
             else:
                 # Enter new position on crossover
                 if not allow_new_entries:
+                    continue
+
+                if self._is_after_segment_cutoff(script_name, now_ist):
                     continue
 
                 latest_timestamp = data.get('entry_candle_timestamp')
@@ -715,16 +994,26 @@ class TradingBot:
                 entry_ema_short = float(data.get('entry_ema_short', data.get('ema_short', 0.0)))
                 entry_ema_long = float(data.get('entry_ema_long', data.get('ema_long', 0.0)))
                 entry_price = current_price
+                signal_df = data.get('df')
 
                 if entry_crossover:
                     if entry_signal == 1:
                         logger.info(f"BUY signal for {script_name} at {entry_price:.2f}")
-                        order_token = self._get_order_token(script_name)
-                        self.client.place_order(order_token, self.config['quantity'], "BUY")
-                        initial_sl = entry_price * (1 - self.config['trailing_stop_loss_percent'] / 100)
+                        success, order_result = self._place_order_with_result(
+                            script_name, "BUY", entry_price, "EMA_CROSSOVER"
+                        )
+                        if not success:
+                            self.last_entry_candle_processed[script_name] = entry_candle_timestamp
+                            continue
+                        initial_sl = self._get_entry_order_block_sl(signal_df, entry_candle_timestamp, 'BUY')
+                        if initial_sl is None:
+                            initial_sl = self._get_entry_swing_sl(signal_df, entry_candle_timestamp, 'BUY')
+                        if initial_sl is None or initial_sl >= entry_price:
+                            initial_sl = entry_price * (1 - self.config['trailing_stop_loss_percent'] / 100)
                         target_price = entry_price * (1 + self.config['target_percent'] / 100)
                         signal_timestamp = entry_candle_timestamp
                         signal_timestamp_str = signal_timestamp.isoformat() if signal_timestamp is not None else datetime.now().isoformat()
+                        order_id = (order_result.get('data') or {}).get('order_id', 'NA')
                         self.positions[script_name] = {
                             'type': 'BUY',
                             'entry_price': entry_price,
@@ -748,6 +1037,7 @@ class TradingBot:
                             extra=(
                                 f"sl={initial_sl:.2f}; target={target_price:.2f}; "
                                 f"signal_time={signal_timestamp_str}; "
+                                f"order_id={order_id}; "
                                 f"ema{self.config['ema_short']}={entry_ema_short:.2f}; "
                                 f"ema{self.config['ema_long']}={entry_ema_long:.2f}"
                             )
@@ -757,12 +1047,21 @@ class TradingBot:
                     
                     elif entry_signal == -1:
                         logger.info(f"SELL signal for {script_name} at {entry_price:.2f}")
-                        order_token = self._get_order_token(script_name)
-                        self.client.place_order(order_token, self.config['quantity'], "SELL")
-                        initial_sl = entry_price * (1 + self.config['trailing_stop_loss_percent'] / 100)
+                        success, order_result = self._place_order_with_result(
+                            script_name, "SELL", entry_price, "EMA_CROSSOVER"
+                        )
+                        if not success:
+                            self.last_entry_candle_processed[script_name] = entry_candle_timestamp
+                            continue
+                        initial_sl = self._get_entry_order_block_sl(signal_df, entry_candle_timestamp, 'SELL')
+                        if initial_sl is None:
+                            initial_sl = self._get_entry_swing_sl(signal_df, entry_candle_timestamp, 'SELL')
+                        if initial_sl is None or initial_sl <= entry_price:
+                            initial_sl = entry_price * (1 + self.config['trailing_stop_loss_percent'] / 100)
                         target_price = entry_price * (1 - self.config['target_percent'] / 100)
                         signal_timestamp = entry_candle_timestamp
                         signal_timestamp_str = signal_timestamp.isoformat() if signal_timestamp is not None else datetime.now().isoformat()
+                        order_id = (order_result.get('data') or {}).get('order_id', 'NA')
                         self.positions[script_name] = {
                             'type': 'SELL',
                             'entry_price': entry_price,
@@ -786,6 +1085,7 @@ class TradingBot:
                             extra=(
                                 f"sl={initial_sl:.2f}; target={target_price:.2f}; "
                                 f"signal_time={signal_timestamp_str}; "
+                                f"order_id={order_id}; "
                                 f"ema{self.config['ema_short']}={entry_ema_short:.2f}; "
                                 f"ema{self.config['ema_long']}={entry_ema_long:.2f}"
                             )
@@ -830,9 +1130,12 @@ class TradingBot:
                                 self.entry_warmup_timestamps[data['script_name']] = data.get('entry_candle_timestamp')
                         self.entry_warmup_done = True
                         logger.info("ENTRY WARMUP: Startup snapshot captured. New entries will trigger only on fresh crossover candles.")
+
+                    now_ist = self._now_ist()
+                    self._run_eod_squareoff(now_ist)
                     
                     # Execute trading logic
-                    self.execute_trading_logic(script_data, allow_new_entries=allow_new_entries)
+                    self.execute_trading_logic(script_data, allow_new_entries=allow_new_entries, now_ist=now_ist)
                     
                     # Check global stop loss
                     if self.total_pnl < -self.config['portfolio_stop_loss']:
