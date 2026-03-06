@@ -25,7 +25,7 @@ init(autoreset=True)
 
 # Upstox API Configuration
 API_CONFIG = {
-    "access_token": "eyJ0eXAiOiJKV1QiLCJrZXlfaWQiOiJza192MS4wIiwiYWxnIjoiSFMyNTYifQ.eyJzdWIiOiI2RUJBVTQiLCJqdGkiOiI2OWE4ZjM1NmI3OGQ4YzYxOGY5MjIxNGUiLCJpc011bHRpQ2xpZW50IjpmYWxzZSwiaXNQbHVzUGxhbiI6ZmFsc2UsImlhdCI6MTc3MjY4MDAyMiwiaXNzIjoidWRhcGktZ2F0ZXdheS1zZXJ2aWNlIiwiZXhwIjoxNzcyNzQ4MDAwfQ.tbU1bxqY0cfobJuO4e3WZkr8geZGuAmSOQAiofEpuSQ",
+    "access_token": "eyJ0eXAiOiJKV1QiLCJrZXlfaWQiOiJza192MS4wIiwiYWxnIjoiSFMyNTYifQ.eyJzdWIiOiI2RUJBVTQiLCJqdGkiOiI2OWFhNGNmODZiNmFjNTcxZGJkYjExNzkiLCJpc011bHRpQ2xpZW50IjpmYWxzZSwiaXNQbHVzUGxhbiI6ZmFsc2UsImlhdCI6MTc3Mjc2ODUwNCwiaXNzIjoidWRhcGktZ2F0ZXdheS1zZXJ2aWNlIiwiZXhwIjoxNzcyODM0NDAwfQ.hOMkEdyZxW7t4fXNnFqSKRvndXRORT64Wjc5M-jgOFI",
     "api_key": "d9df59d8-e3c8-491e-9a7a-0bd19805ba8d",
     "api_secret": "wu5npsei6y",
     "base_url": "https://api.upstox.com/v2"
@@ -431,9 +431,10 @@ class TradingBot:
 
         return now_ist >= cutoff_dt
 
-    def _run_eod_squareoff(self, now_ist):
+    def _run_eod_squareoff(self, now_ist, latest_prices=None):
         segment_scripts = self.config.get('segment_scripts', {})
         today_text = now_ist.strftime('%Y-%m-%d')
+        latest_prices = latest_prices or {}
 
         for segment, scripts in segment_scripts.items():
             cutoff_dt = self._segment_cutoff_dt(segment, now_ist)
@@ -452,7 +453,11 @@ class TradingBot:
 
                 position = self.positions[script_name]
                 exit_side = "SELL" if position.get('type') == 'BUY' else "BUY"
-                market_price = position.get('entry_price', 0.0)
+                market_price = latest_prices.get(script_name)
+                price_source = "ltp"
+                if market_price is None:
+                    market_price = position.get('entry_price', 0.0)
+                    price_source = "entry_fallback"
 
                 success, order_result = self._place_order_with_result(
                     script_name,
@@ -470,7 +475,11 @@ class TradingBot:
                     side=exit_side,
                     price=market_price,
                     reason="EOD_SQUAREOFF",
-                    extra=f"cutoff={cutoff_dt.strftime('%H:%M')}; order_id={order_id}"
+                    extra=(
+                        f"cutoff={cutoff_dt.strftime('%H:%M')}; "
+                        f"price_source={price_source}; "
+                        f"order_id={order_id}"
+                    )
                 )
                 del self.positions[script_name]
                 any_closed = True
@@ -1131,8 +1140,14 @@ class TradingBot:
                         self.entry_warmup_done = True
                         logger.info("ENTRY WARMUP: Startup snapshot captured. New entries will trigger only on fresh crossover candles.")
 
+                    latest_prices = {
+                        data['script_name']: data['current_price']
+                        for data in script_data
+                        if data and data.get('current_price') is not None
+                    }
+
                     now_ist = self._now_ist()
-                    self._run_eod_squareoff(now_ist)
+                    self._run_eod_squareoff(now_ist, latest_prices=latest_prices)
                     
                     # Execute trading logic
                     self.execute_trading_logic(script_data, allow_new_entries=allow_new_entries, now_ist=now_ist)
