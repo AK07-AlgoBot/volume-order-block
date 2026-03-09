@@ -25,7 +25,7 @@ init(autoreset=True)
 
 # Upstox API Configuration
 API_CONFIG = {
-    "access_token": "eyJ0eXAiOiJKV1QiLCJrZXlfaWQiOiJza192MS4wIiwiYWxnIjoiSFMyNTYifQ.eyJzdWIiOiI2RUJBVTQiLCJqdGkiOiI2OWFhNGNmODZiNmFjNTcxZGJkYjExNzkiLCJpc011bHRpQ2xpZW50IjpmYWxzZSwiaXNQbHVzUGxhbiI6ZmFsc2UsImlhdCI6MTc3Mjc2ODUwNCwiaXNzIjoidWRhcGktZ2F0ZXdheS1zZXJ2aWNlIiwiZXhwIjoxNzcyODM0NDAwfQ.hOMkEdyZxW7t4fXNnFqSKRvndXRORT64Wjc5M-jgOFI",
+    "access_token": "eyJ0eXAiOiJKV1QiLCJrZXlfaWQiOiJza192MS4wIiwiYWxnIjoiSFMyNTYifQ.eyJzdWIiOiI2RUJBVTQiLCJqdGkiOiI2OWFlM2FlMDQyODZjYzJiOGE3MDcyOTEiLCJpc011bHRpQ2xpZW50IjpmYWxzZSwiaXNQbHVzUGxhbiI6ZmFsc2UsImlhdCI6MTc3MzAyNjAxNiwiaXNzIjoidWRhcGktZ2F0ZXdheS1zZXJ2aWNlIiwiZXhwIjoxNzczMDkzNjAwfQ.TAWFRh00tOvI_d_oOSuueX0EOapntZFsBzb9P9n6oDQ",
     "api_key": "d9df59d8-e3c8-491e-9a7a-0bd19805ba8d",
     "api_secret": "wu5npsei6y",
     "base_url": "https://api.upstox.com/v2"
@@ -66,12 +66,24 @@ TRADING_CONFIG = {
     "trailing_stop_loss_percent": 1.0,  # 1%
     "trail_step_percent": 0.5,  # After 1:1, trail SL by 0.5% for every 0.5% favorable move
     "target_percent": 2.0,  # Book profit at +2% move (or -2% for SELL)
+    "min_ob_percent_by_script": {
+        "NIFTY": 0.44,
+        "BANKNIFTY": 0.26,
+        "SENSEX": 0.11,
+        "CRUDE": 0.60,
+        "GOLDMINI": 0.25,
+        "SILVERMINI": 0.68
+    },
     "order_block_lookback_candles": 12,  # Search depth for latest opposite candle (5m) as order block
     "loop_interval": 10,  # seconds between each check
     "quantity": 1,  # Number of lots per order
     "segment_scripts": {
         "NSE": ["NIFTY", "BANKNIFTY", "SENSEX"],
         "MCX": ["CRUDE", "GOLDMINI", "SILVERMINI"]
+    },
+    "entry_start_times": {
+        "NSE": "09:20",
+        "MCX": "09:05"
     },
     "eod_squareoff_times": {
         "NSE": "15:20",
@@ -399,6 +411,15 @@ class TradingBot:
         lot_size = int(self.config.get('lot_sizes', {}).get(script_name, 1))
         return max(1, lots * lot_size)
 
+    @staticmethod
+    def _calculate_ob_percent(entry_price, stop_loss):
+        if entry_price is None or stop_loss is None or entry_price <= 0:
+            return 0.0
+        return abs((entry_price - stop_loss) / entry_price) * 100
+
+    def _get_min_ob_percent(self, script_name):
+        return float(self.config.get('min_ob_percent_by_script', {}).get(script_name, 0.0))
+
     def _now_ist(self):
         return datetime.now(ZoneInfo("Asia/Kolkata"))
 
@@ -419,6 +440,28 @@ class TradingBot:
         hour = int(hour_text)
         minute = int(minute_text)
         return now_ist.replace(hour=hour, minute=minute, second=0, microsecond=0)
+
+    def _segment_entry_start_dt(self, segment, now_ist):
+        start_times = self.config.get('entry_start_times', {})
+        start_text = start_times.get(segment)
+        if not start_text or ':' not in start_text:
+            return None
+
+        hour_text, minute_text = start_text.split(':', 1)
+        hour = int(hour_text)
+        minute = int(minute_text)
+        return now_ist.replace(hour=hour, minute=minute, second=0, microsecond=0)
+
+    def _is_before_segment_entry_start(self, script_name, now_ist):
+        segment = self._script_segment(script_name)
+        if not segment:
+            return False
+
+        start_dt = self._segment_entry_start_dt(segment, now_ist)
+        if start_dt is None:
+            return False
+
+        return now_ist < start_dt
 
     def _is_after_segment_cutoff(self, script_name, now_ist):
         segment = self._script_segment(script_name)
@@ -982,6 +1025,9 @@ class TradingBot:
                 if not allow_new_entries:
                     continue
 
+                if self._is_before_segment_entry_start(script_name, now_ist):
+                    continue
+
                 if self._is_after_segment_cutoff(script_name, now_ist):
                     continue
 
@@ -1007,6 +1053,20 @@ class TradingBot:
 
                 if entry_crossover:
                     if entry_signal == 1:
+                        initial_sl = self._get_entry_order_block_sl(signal_df, entry_candle_timestamp, 'BUY')
+                        if initial_sl is None:
+                            initial_sl = self._get_entry_swing_sl(signal_df, entry_candle_timestamp, 'BUY')
+                        if initial_sl is None or initial_sl >= entry_price:
+                            initial_sl = entry_price * (1 - self.config['trailing_stop_loss_percent'] / 100)
+                        ob_percent = self._calculate_ob_percent(entry_price, initial_sl)
+                        min_ob_percent = self._get_min_ob_percent(script_name)
+                        if ob_percent < min_ob_percent:
+                            logger.info(
+                                f"SKIP: {script_name} BUY ignored due to low OB% "
+                                f"(ob_pct={ob_percent:.2f}% < min_ob_pct={min_ob_percent:.2f}%)"
+                            )
+                            self.last_entry_candle_processed[script_name] = entry_candle_timestamp
+                            continue
                         logger.info(f"BUY signal for {script_name} at {entry_price:.2f}")
                         success, order_result = self._place_order_with_result(
                             script_name, "BUY", entry_price, "EMA_CROSSOVER"
@@ -1014,11 +1074,6 @@ class TradingBot:
                         if not success:
                             self.last_entry_candle_processed[script_name] = entry_candle_timestamp
                             continue
-                        initial_sl = self._get_entry_order_block_sl(signal_df, entry_candle_timestamp, 'BUY')
-                        if initial_sl is None:
-                            initial_sl = self._get_entry_swing_sl(signal_df, entry_candle_timestamp, 'BUY')
-                        if initial_sl is None or initial_sl >= entry_price:
-                            initial_sl = entry_price * (1 - self.config['trailing_stop_loss_percent'] / 100)
                         target_price = entry_price * (1 + self.config['target_percent'] / 100)
                         signal_timestamp = entry_candle_timestamp
                         signal_timestamp_str = signal_timestamp.isoformat() if signal_timestamp is not None else datetime.now().isoformat()
@@ -1030,6 +1085,7 @@ class TradingBot:
                             'signal_time': signal_timestamp_str,
                             'signal_ema_short': entry_ema_short,
                             'signal_ema_long': entry_ema_long,
+                            'ob_percent': ob_percent,
                             'initial_sl': initial_sl,
                             'stop_loss': initial_sl,
                             'target_price': target_price,
@@ -1045,6 +1101,7 @@ class TradingBot:
                             reason="EMA_CROSSOVER",
                             extra=(
                                 f"sl={initial_sl:.2f}; target={target_price:.2f}; "
+                                f"ob_pct={ob_percent:.2f}; "
                                 f"signal_time={signal_timestamp_str}; "
                                 f"order_id={order_id}; "
                                 f"ema{self.config['ema_short']}={entry_ema_short:.2f}; "
@@ -1055,6 +1112,20 @@ class TradingBot:
                         self.save_state()
                     
                     elif entry_signal == -1:
+                        initial_sl = self._get_entry_order_block_sl(signal_df, entry_candle_timestamp, 'SELL')
+                        if initial_sl is None:
+                            initial_sl = self._get_entry_swing_sl(signal_df, entry_candle_timestamp, 'SELL')
+                        if initial_sl is None or initial_sl <= entry_price:
+                            initial_sl = entry_price * (1 + self.config['trailing_stop_loss_percent'] / 100)
+                        ob_percent = self._calculate_ob_percent(entry_price, initial_sl)
+                        min_ob_percent = self._get_min_ob_percent(script_name)
+                        if ob_percent < min_ob_percent:
+                            logger.info(
+                                f"SKIP: {script_name} SELL ignored due to low OB% "
+                                f"(ob_pct={ob_percent:.2f}% < min_ob_pct={min_ob_percent:.2f}%)"
+                            )
+                            self.last_entry_candle_processed[script_name] = entry_candle_timestamp
+                            continue
                         logger.info(f"SELL signal for {script_name} at {entry_price:.2f}")
                         success, order_result = self._place_order_with_result(
                             script_name, "SELL", entry_price, "EMA_CROSSOVER"
@@ -1062,11 +1133,6 @@ class TradingBot:
                         if not success:
                             self.last_entry_candle_processed[script_name] = entry_candle_timestamp
                             continue
-                        initial_sl = self._get_entry_order_block_sl(signal_df, entry_candle_timestamp, 'SELL')
-                        if initial_sl is None:
-                            initial_sl = self._get_entry_swing_sl(signal_df, entry_candle_timestamp, 'SELL')
-                        if initial_sl is None or initial_sl <= entry_price:
-                            initial_sl = entry_price * (1 + self.config['trailing_stop_loss_percent'] / 100)
                         target_price = entry_price * (1 - self.config['target_percent'] / 100)
                         signal_timestamp = entry_candle_timestamp
                         signal_timestamp_str = signal_timestamp.isoformat() if signal_timestamp is not None else datetime.now().isoformat()
@@ -1078,6 +1144,7 @@ class TradingBot:
                             'signal_time': signal_timestamp_str,
                             'signal_ema_short': entry_ema_short,
                             'signal_ema_long': entry_ema_long,
+                            'ob_percent': ob_percent,
                             'initial_sl': initial_sl,
                             'stop_loss': initial_sl,
                             'target_price': target_price,
@@ -1093,6 +1160,7 @@ class TradingBot:
                             reason="EMA_CROSSOVER",
                             extra=(
                                 f"sl={initial_sl:.2f}; target={target_price:.2f}; "
+                                f"ob_pct={ob_percent:.2f}; "
                                 f"signal_time={signal_timestamp_str}; "
                                 f"order_id={order_id}; "
                                 f"ema{self.config['ema_short']}={entry_ema_short:.2f}; "
