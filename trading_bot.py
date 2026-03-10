@@ -25,7 +25,7 @@ init(autoreset=True)
 
 # Upstox API Configuration
 API_CONFIG = {
-    "access_token": "eyJ0eXAiOiJKV1QiLCJrZXlfaWQiOiJza192MS4wIiwiYWxnIjoiSFMyNTYifQ.eyJzdWIiOiI2RUJBVTQiLCJqdGkiOiI2OWFlM2FlMDQyODZjYzJiOGE3MDcyOTEiLCJpc011bHRpQ2xpZW50IjpmYWxzZSwiaXNQbHVzUGxhbiI6ZmFsc2UsImlhdCI6MTc3MzAyNjAxNiwiaXNzIjoidWRhcGktZ2F0ZXdheS1zZXJ2aWNlIiwiZXhwIjoxNzczMDkzNjAwfQ.TAWFRh00tOvI_d_oOSuueX0EOapntZFsBzb9P9n6oDQ",
+    "access_token": "eyJ0eXAiOiJKV1QiLCJrZXlfaWQiOiJza192MS4wIiwiYWxnIjoiSFMyNTYifQ.eyJzdWIiOiI2RUJBVTQiLCJqdGkiOiI2OWFmOGRkMDBmYWRlNDU2ZjYxZTZiN2UiLCJpc011bHRpQ2xpZW50IjpmYWxzZSwiaXNQbHVzUGxhbiI6ZmFsc2UsImlhdCI6MTc3MzExMjc4NCwiaXNzIjoidWRhcGktZ2F0ZXdheS1zZXJ2aWNlIiwiZXhwIjoxNzczMTgwMDAwfQ.p49ygnji_z5FUvwXZb3JVaTI36Jr4cQM-pr0OWZgDX4",
     "api_key": "d9df59d8-e3c8-491e-9a7a-0bd19805ba8d",
     "api_secret": "wu5npsei6y",
     "base_url": "https://api.upstox.com/v2"
@@ -71,8 +71,8 @@ TRADING_CONFIG = {
         "BANKNIFTY": 0.26,
         "SENSEX": 0.11,
         "CRUDE": 0.60,
-        "GOLDMINI": 0.25,
-        "SILVERMINI": 0.68
+        "GOLDMINI": 0.20,
+        "SILVERMINI": 0.55
     },
     "order_block_lookback_candles": 12,  # Search depth for latest opposite candle (5m) as order block
     "loop_interval": 10,  # seconds between each check
@@ -82,8 +82,8 @@ TRADING_CONFIG = {
         "MCX": ["CRUDE", "GOLDMINI", "SILVERMINI"]
     },
     "entry_start_times": {
-        "NSE": "09:20",
-        "MCX": "09:05"
+        "NSE": "09:25",
+        "MCX": "09:10"
     },
     "eod_squareoff_times": {
         "NSE": "15:20",
@@ -1053,11 +1053,14 @@ class TradingBot:
 
                 if entry_crossover:
                     if entry_signal == 1:
-                        initial_sl = self._get_entry_order_block_sl(signal_df, entry_candle_timestamp, 'BUY')
-                        if initial_sl is None:
-                            initial_sl = self._get_entry_swing_sl(signal_df, entry_candle_timestamp, 'BUY')
+                        initial_sl = self._get_entry_swing_sl(signal_df, entry_candle_timestamp, 'BUY')
                         if initial_sl is None or initial_sl >= entry_price:
-                            initial_sl = entry_price * (1 - self.config['trailing_stop_loss_percent'] / 100)
+                            logger.info(
+                                f"SKIP: {script_name} BUY ignored due to invalid swing SL "
+                                f"(sl={initial_sl}, entry={entry_price:.2f})"
+                            )
+                            self.last_entry_candle_processed[script_name] = entry_candle_timestamp
+                            continue
                         ob_percent = self._calculate_ob_percent(entry_price, initial_sl)
                         min_ob_percent = self._get_min_ob_percent(script_name)
                         if ob_percent < min_ob_percent:
@@ -1112,11 +1115,14 @@ class TradingBot:
                         self.save_state()
                     
                     elif entry_signal == -1:
-                        initial_sl = self._get_entry_order_block_sl(signal_df, entry_candle_timestamp, 'SELL')
-                        if initial_sl is None:
-                            initial_sl = self._get_entry_swing_sl(signal_df, entry_candle_timestamp, 'SELL')
+                        initial_sl = self._get_entry_swing_sl(signal_df, entry_candle_timestamp, 'SELL')
                         if initial_sl is None or initial_sl <= entry_price:
-                            initial_sl = entry_price * (1 + self.config['trailing_stop_loss_percent'] / 100)
+                            logger.info(
+                                f"SKIP: {script_name} SELL ignored due to invalid swing SL "
+                                f"(sl={initial_sl}, entry={entry_price:.2f})"
+                            )
+                            self.last_entry_candle_processed[script_name] = entry_candle_timestamp
+                            continue
                         ob_percent = self._calculate_ob_percent(entry_price, initial_sl)
                         min_ob_percent = self._get_min_ob_percent(script_name)
                         if ob_percent < min_ob_percent:
