@@ -6,6 +6,7 @@ from datetime import datetime
 
 STATE_FILE = Path("trading_state.json")
 BOT_FILE = Path("trading_bot.py")
+ORDER_LOG_FILE = Path("orders.log")
 
 API_BASE_URL = "https://api.upstox.com/v2"
 INTERVAL = "1minute"
@@ -20,13 +21,79 @@ SCRIPT_TO_INSTRUMENT = {
 }
 
 LOT_SIZES = {
-    "NIFTY": 25,
+    "NIFTY": 65,
     "BANKNIFTY": 30,
     "SENSEX": 20,
     "CRUDE": 100,
     "GOLDMINI": 1,
     "SILVERMINI": 5
 }
+
+
+def _load_realized_pnl_from_orders(log_date_text=None):
+    if not ORDER_LOG_FILE.exists():
+        return 0.0
+
+    if log_date_text is None:
+        log_date_text = datetime.now().strftime("%Y-%m-%d")
+
+    open_positions = {}
+    realized = 0.0
+
+    for line in ORDER_LOG_FILE.read_text(encoding="utf-8", errors="ignore").splitlines():
+        if not line.startswith(log_date_text):
+            continue
+        if " | ACTION=ENTRY | " in line:
+            parts = line.split(" - ", 1)
+            if len(parts) < 2:
+                continue
+            script = parts[1].split(" | ", 1)[0].strip()
+            side_marker = "| SIDE="
+            price_marker = "| PRICE="
+            side_idx = line.find(side_marker)
+            price_idx = line.find(price_marker)
+            if side_idx == -1 or price_idx == -1:
+                continue
+            side = line[side_idx + len(side_marker):].split(" | ", 1)[0].strip()
+            price_text = line[price_idx + len(price_marker):].split(" | ", 1)[0].strip()
+            try:
+                entry_price = float(price_text)
+            except Exception:
+                continue
+            open_positions[script] = (side, entry_price)
+            continue
+
+        if " | ACTION=EXIT | " in line:
+            parts = line.split(" - ", 1)
+            if len(parts) < 2:
+                continue
+            script = parts[1].split(" | ", 1)[0].strip()
+            if script not in open_positions:
+                continue
+            side_marker = "| SIDE="
+            price_marker = "| PRICE="
+            side_idx = line.find(side_marker)
+            price_idx = line.find(price_marker)
+            if side_idx == -1 or price_idx == -1:
+                continue
+            exit_side = line[side_idx + len(side_marker):].split(" | ", 1)[0].strip()
+            price_text = line[price_idx + len(price_marker):].split(" | ", 1)[0].strip()
+            try:
+                exit_price = float(price_text)
+            except Exception:
+                continue
+
+            entry_side, entry_price = open_positions.pop(script)
+            if entry_side == "BUY" and exit_side == "SELL":
+                points = exit_price - entry_price
+            elif entry_side == "SELL" and exit_side == "BUY":
+                points = entry_price - exit_price
+            else:
+                continue
+
+            realized += points * LOT_SIZES.get(script, 1)
+
+    return realized
 
 
 def _extract_access_token():
@@ -108,6 +175,7 @@ def main():
         return
 
     _print_header()
+    total_open_pnl = 0.0
 
     for script, pos in positions.items():
         entry = float(pos.get("entry_price", 0.0))
@@ -133,6 +201,7 @@ def main():
         if ltp is not None:
             points = (ltp - entry) if side == "BUY" else (entry - ltp)
             pnl = points * lot_size
+            total_open_pnl += pnl
             row = f"{script:<10} {entry:<12.2f} {sl:<12.2f} {target:<12.2f} {ltp_text:<12} {side:<8} {points:<12.2f} {pnl:<12.2f}"
             print(row)
         else:

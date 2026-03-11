@@ -25,7 +25,7 @@ init(autoreset=True)
 
 # Upstox API Configuration
 API_CONFIG = {
-    "access_token": "eyJ0eXAiOiJKV1QiLCJrZXlfaWQiOiJza192MS4wIiwiYWxnIjoiSFMyNTYifQ.eyJzdWIiOiI2RUJBVTQiLCJqdGkiOiI2OWFmOGRkMDBmYWRlNDU2ZjYxZTZiN2UiLCJpc011bHRpQ2xpZW50IjpmYWxzZSwiaXNQbHVzUGxhbiI6ZmFsc2UsImlhdCI6MTc3MzExMjc4NCwiaXNzIjoidWRhcGktZ2F0ZXdheS1zZXJ2aWNlIiwiZXhwIjoxNzczMTgwMDAwfQ.p49ygnji_z5FUvwXZb3JVaTI36Jr4cQM-pr0OWZgDX4",
+    "access_token": "eyJ0eXAiOiJKV1QiLCJrZXlfaWQiOiJza192MS4wIiwiYWxnIjoiSFMyNTYifQ.eyJzdWIiOiI2RUJBVTQiLCJqdGkiOiI2OWIwZGQ2ZWY4NTI4NzE1NGUyYTZmOTgiLCJpc011bHRpQ2xpZW50IjpmYWxzZSwiaXNQbHVzUGxhbiI6ZmFsc2UsImlhdCI6MTc3MzE5ODcwMiwiaXNzIjoidWRhcGktZ2F0ZXdheS1zZXJ2aWNlIiwiZXhwIjoxNzczMjY2NDAwfQ.VpDPbPQBIbjN-4WQKNM18cskWfLTQrdUcCuBZUzPJ20",
     "api_key": "d9df59d8-e3c8-491e-9a7a-0bd19805ba8d",
     "api_secret": "wu5npsei6y",
     "base_url": "https://api.upstox.com/v2"
@@ -66,6 +66,12 @@ TRADING_CONFIG = {
     "trailing_stop_loss_percent": 1.0,  # 1%
     "trail_step_percent": 0.5,  # After 1:1, trail SL by 0.5% for every 0.5% favorable move
     "target_percent": 2.0,  # Book profit at +2% move (or -2% for SELL)
+    "trailing_overrides_by_script": {
+        "CRUDE": {
+            "breakeven_trigger_percent": 1.0,
+            "trail_step_percent": 0.2
+        }
+    },
     "min_ob_percent_by_script": {
         "NIFTY": 0.44,
         "BANKNIFTY": 0.26,
@@ -547,6 +553,21 @@ class TradingBot:
             return entry_price * (1 + step_percent * steps)
         return entry_price * (1 - step_percent * steps)
 
+    def _trailing_rule_for_script(self, script_name, risk_percent):
+        overrides = self.config.get('trailing_overrides_by_script', {})
+        script_rule = overrides.get(script_name, {})
+
+        breakeven_trigger_percent = float(script_rule.get('breakeven_trigger_percent', risk_percent))
+        trail_step_percent = float(script_rule.get('trail_step_percent', self.config['trail_step_percent']))
+
+        return breakeven_trigger_percent, trail_step_percent
+
+    def _calculate_stepped_sl_with_percent(self, position_type, entry_price, steps, step_percent):
+        step_fraction = step_percent / 100
+        if position_type == 'BUY':
+            return entry_price * (1 + step_fraction * steps)
+        return entry_price * (1 - step_fraction * steps)
+
     def _get_entry_swing_sl(self, df, entry_candle_timestamp, side):
         """Return swing-based SL from 5-minute candles before entry candle.
 
@@ -648,33 +669,40 @@ class TradingBot:
         if risk_percent <= 0:
             risk_percent = self.config['trailing_stop_loss_percent']
 
-        step_percent = self.config['trail_step_percent']
+        breakeven_trigger_percent, step_percent = self._trailing_rule_for_script(script_name, risk_percent)
         favorable_move = self._favorable_move_percent(position_type, entry_price, current_price)
 
-        if favorable_move < risk_percent:
-            return
+        sl_updated = False
+
+        if favorable_move < breakeven_trigger_percent:
+            return sl_updated
 
         if not position['breakeven_done']:
             position['stop_loss'] = entry_price
             position['breakeven_done'] = True
+            sl_updated = True
             logger.info(f"INFO: {script_name}: 1:1 reached. SL moved to cost @ Rs{entry_price:.2f}")
 
-        extra_move = max(0.0, favorable_move - risk_percent)
+        extra_move = max(0.0, favorable_move - breakeven_trigger_percent)
         new_steps = int(extra_move // step_percent)
 
         if new_steps > position['trail_steps_locked']:
             position['trail_steps_locked'] = new_steps
-            stepped_sl = self._calculate_stepped_sl(position_type, entry_price, new_steps)
+            stepped_sl = self._calculate_stepped_sl_with_percent(position_type, entry_price, new_steps, step_percent)
 
             if position_type == 'BUY':
                 position['stop_loss'] = max(position['stop_loss'], stepped_sl)
             else:
                 position['stop_loss'] = min(position['stop_loss'], stepped_sl)
 
+            sl_updated = True
+
             logger.info(
                 f"UPDATE: {script_name}: Trailing SL updated to Rs{position['stop_loss']:.2f} "
                 f"(favorable move: {favorable_move:.2f}%, steps: {new_steps})"
             )
+
+        return sl_updated
 
     def _resample_for_signal(self, df):
         """Resample API candles to strategy timeframe for signal generation."""
@@ -919,7 +947,9 @@ class TradingBot:
                     self.last_position_eval_logged[script_name] = confirmed_time_text
 
                 # Update stepped trailing SL as per strategy
-                self._update_position_sl(script_name, position, current_price)
+                sl_updated = self._update_position_sl(script_name, position, current_price)
+                if sl_updated:
+                    self.save_state()
 
                 # Stop loss check
                 stop_loss = position['stop_loss']
