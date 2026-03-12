@@ -25,7 +25,7 @@ init(autoreset=True)
 
 # Upstox API Configuration
 API_CONFIG = {
-    "access_token": "eyJ0eXAiOiJKV1QiLCJrZXlfaWQiOiJza192MS4wIiwiYWxnIjoiSFMyNTYifQ.eyJzdWIiOiI2RUJBVTQiLCJqdGkiOiI2OWIwZGQ2ZWY4NTI4NzE1NGUyYTZmOTgiLCJpc011bHRpQ2xpZW50IjpmYWxzZSwiaXNQbHVzUGxhbiI6ZmFsc2UsImlhdCI6MTc3MzE5ODcwMiwiaXNzIjoidWRhcGktZ2F0ZXdheS1zZXJ2aWNlIiwiZXhwIjoxNzczMjY2NDAwfQ.VpDPbPQBIbjN-4WQKNM18cskWfLTQrdUcCuBZUzPJ20",
+    "access_token": "eyJ0eXAiOiJKV1QiLCJrZXlfaWQiOiJza192MS4wIiwiYWxnIjoiSFMyNTYifQ.eyJzdWIiOiI2RUJBVTQiLCJqdGkiOiI2OWIyMmMyNmE5YzAwZDAwNWIzMWIxNjciLCJpc011bHRpQ2xpZW50IjpmYWxzZSwiaXNQbHVzUGxhbiI6ZmFsc2UsImlhdCI6MTc3MzI4NDM5MCwiaXNzIjoidWRhcGktZ2F0ZXdheS1zZXJ2aWNlIiwiZXhwIjoxNzczMzUyODAwfQ.aNMKoBcXz6t7QKloqwfWGTa5m62tvpXZ5FNNLvQyv1s",
     "api_key": "d9df59d8-e3c8-491e-9a7a-0bd19805ba8d",
     "api_secret": "wu5npsei6y",
     "base_url": "https://api.upstox.com/v2"
@@ -79,6 +79,16 @@ TRADING_CONFIG = {
         "CRUDE": 0.60,
         "GOLDMINI": 0.20,
         "SILVERMINI": 0.55
+    },
+    # Minimum EMA5-EMA18 gap as % of price at crossover — blocks flat/choppy crossovers
+    "min_ema_separation_percent": 0.03,
+    "min_ema_separation_percent_by_script": {
+        "NIFTY": 0.03,
+        "BANKNIFTY": 0.03,
+        "SENSEX": 0.03,
+        "CRUDE": 0.03,
+        "GOLDMINI": 0.03,
+        "SILVERMINI": 0.03
     },
     "order_block_lookback_candles": 12,  # Search depth for latest opposite candle (5m) as order block
     "loop_interval": 10,  # seconds between each check
@@ -426,6 +436,12 @@ class TradingBot:
     def _get_min_ob_percent(self, script_name):
         return float(self.config.get('min_ob_percent_by_script', {}).get(script_name, 0.0))
 
+    def _get_min_ema_separation_percent(self, script_name):
+        per_script = self.config.get('min_ema_separation_percent_by_script', {})
+        if script_name in per_script:
+            return float(per_script[script_name])
+        return float(self.config.get('min_ema_separation_percent', 0.03))
+
     def _now_ist(self):
         return datetime.now(ZoneInfo("Asia/Kolkata"))
 
@@ -569,11 +585,14 @@ class TradingBot:
         return entry_price * (1 - step_fraction * steps)
 
     def _get_entry_swing_sl(self, df, entry_candle_timestamp, side):
-        """Return swing-based SL from 5-minute candles before entry candle.
+        """Return OB zone SL using BigBeluga Volume Order Blocks logic.
 
-        BUY  -> most recent swing low before entry candle.
-        SELL -> most recent swing high before entry candle.
-        Fallback -> previous candle low/high.
+        At EMA crossover:
+        BUY  -> lowest low of the last ema_long candles before entry = OB lower boundary = SL
+        SELL -> highest high of the last ema_long candles before entry = OB upper boundary = SL
+
+        This matches the BigBeluga 'ta.lowest(length2)' / 'ta.highest(length2)' logic
+        where length2 = ema_short + 13 = 18 (same as ema_long).
         """
         if df is None or df.empty or entry_candle_timestamp is None:
             return None
@@ -587,30 +606,15 @@ class TradingBot:
         if eligible.empty:
             return None
 
-        entry_idx = int(eligible.index[-1])
-        prev_idx = entry_idx - 1
-        if prev_idx < 0:
+        lookback = int(self.config.get('ema_long', 18))
+        lookback_rows = eligible.tail(lookback)
+        if lookback_rows.empty:
             return None
 
-        pivot_indices = []
-        search_end = prev_idx
-        if search_end >= 2:
-            for idx in range(1, search_end):
-                prev_row = working.iloc[idx - 1]
-                row = working.iloc[idx]
-                next_row = working.iloc[idx + 1]
-
-                if side == 'BUY' and row['low'] < prev_row['low'] and row['low'] < next_row['low']:
-                    pivot_indices.append(idx)
-                elif side == 'SELL' and row['high'] > prev_row['high'] and row['high'] > next_row['high']:
-                    pivot_indices.append(idx)
-
-        if pivot_indices:
-            pivot_idx = pivot_indices[-1]
-            return float(working.iloc[pivot_idx]['low'] if side == 'BUY' else working.iloc[pivot_idx]['high'])
-
-        prev_row = working.iloc[prev_idx]
-        return float(prev_row['low'] if side == 'BUY' else prev_row['high'])
+        if side == 'BUY':
+            return float(lookback_rows['low'].min())
+        else:
+            return float(lookback_rows['high'].max())
 
     def _get_entry_order_block_sl(self, df, entry_candle_timestamp, side):
         """Return order-block based SL from 5-minute candles before entry candle.
@@ -836,12 +840,20 @@ class TradingBot:
                 closed_ema_short = closed_row['ema_short']
                 closed_ema_long = closed_row['ema_long']
                 closed_timestamp = closed_row['timestamp']
+                # EMA18 of the candle immediately before closed_row (for slope check)
+                closed_row_idx = df.index[df['timestamp'] == closed_row['timestamp']]
+                if len(closed_row_idx) > 0 and closed_row_idx[0] > 0:
+                    prev_row = df.iloc[closed_row_idx[0] - 1]
+                    closed_ema_long_prev = float(prev_row['ema_long'])
+                else:
+                    closed_ema_long_prev = float(closed_ema_long)
             else:
                 closed_signal = signal
                 closed_crossover = False
                 closed_ema_short = ema_short
                 closed_ema_long = ema_long
                 closed_timestamp = None
+                closed_ema_long_prev = float(ema_long)
             
             # Determine signal status
             if signal == 1:
@@ -869,6 +881,7 @@ class TradingBot:
                 'entry_crossover': closed_crossover,
                 'entry_ema_short': closed_ema_short,
                 'entry_ema_long': closed_ema_long,
+                'entry_ema_long_prev': closed_ema_long_prev,
                 'entry_candle_timestamp': closed_timestamp,
                 'df': df
             }
@@ -1024,12 +1037,57 @@ class TradingBot:
                     del self.positions[script_name]
                     self.save_state()
                     continue
-                
-                # Exit on opposite signal crossover
-                if (position['type'] == 'BUY' and confirmed_signal == -1 and confirmed_crossover) or \
+
+                # Exit on OB zone breach (BigBeluga logic):
+                # BUY:  if a confirmed closed candle closes BELOW the OB lower boundary (initial_sl) -> zone broken
+                # SELL: if a confirmed closed candle closes ABOVE the OB upper boundary (initial_sl) -> zone broken
+                ob_zone_boundary = position.get('initial_sl')
+                last_closed_candle = self._get_last_closed_candle_row(data.get('df'))
+                if ob_zone_boundary is not None and last_closed_candle is not None:
+                    candle_close = float(last_closed_candle['close'])
+                    candle_ts = last_closed_candle['timestamp']
+                    candle_ts_str = candle_ts.isoformat() if hasattr(candle_ts, 'isoformat') else str(candle_ts)
+                    ob_breached = (
+                        (position['type'] == 'BUY' and candle_close < ob_zone_boundary) or
+                        (position['type'] == 'SELL' and candle_close > ob_zone_boundary)
+                    )
+                    if ob_breached:
+                        logger.info(
+                            f"EXIT: OB zone breached for {script_name}. "
+                            f"Closing {position['type']} @ Rs{current_price:.2f} "
+                            f"(candle_close={candle_close:.2f} vs ob_boundary={ob_zone_boundary:.2f}, candle={candle_ts_str})"
+                        )
+                        exit_side = "SELL" if position['type'] == 'BUY' else "BUY"
+                        success, order_result = self._place_order_with_result(
+                            script_name, exit_side, current_price, "OB_ZONE_BREACH"
+                        )
+                        if not success:
+                            continue
+                        order_id = (order_result.get('data') or {}).get('order_id', 'NA')
+                        self._log_order_event(
+                            script_name,
+                            action="EXIT",
+                            side=exit_side,
+                            price=current_price,
+                            reason="OB_ZONE_BREACH",
+                            extra=(
+                                f"candle_close={candle_close:.2f}; ob_boundary={ob_zone_boundary:.2f}; "
+                                f"candle={candle_ts_str}; entry={position['entry_price']:.2f}; order_id={order_id}"
+                            )
+                        )
+                        del self.positions[script_name]
+                        self.save_state()
+                        continue
+
+                # Exit on opposite signal crossover (only after breakeven is secured)
+                if not position.get('breakeven_done', False):
+                    logger.debug(
+                        f"HOLD: {script_name} crossover ignored — breakeven not yet reached."
+                    )
+                elif (position['type'] == 'BUY' and confirmed_signal == -1 and confirmed_crossover) or \
                    (position['type'] == 'SELL' and confirmed_signal == 1 and confirmed_crossover):
                     logger.info(
-                        f"EXIT: Confirmed crossover exit for {script_name}. Closing {position['type']} position "
+                        f"EXIT: Crossover exit (post-breakeven) for {script_name}. Closing {position['type']} position "
                         f"(signal_time={confirmed_time_text})."
                     )
                     exit_side = "SELL" if position['type'] == 'BUY' else "BUY"
@@ -1078,10 +1136,50 @@ class TradingBot:
                 entry_crossover = data.get('entry_crossover', crossover)
                 entry_ema_short = float(data.get('entry_ema_short', data.get('ema_short', 0.0)))
                 entry_ema_long = float(data.get('entry_ema_long', data.get('ema_long', 0.0)))
+                entry_ema_long_prev = float(data.get('entry_ema_long_prev', entry_ema_long))
                 entry_price = current_price
                 signal_df = data.get('df')
 
                 if entry_crossover:
+                    # --- EMA Slope filter: EMA18 must slope in trade direction ---
+                    # --- EMA Separation filter: EMA5-EMA18 gap must be meaningful ---
+                    min_sep_pct = self._get_min_ema_separation_percent(script_name)
+                    ema_sep_pct = abs(entry_ema_short - entry_ema_long) / entry_ema_long * 100 if entry_ema_long > 0 else 0.0
+
+                    if entry_signal == 1:
+                        ema_slope_ok = entry_ema_long > entry_ema_long_prev  # EMA18 rising
+                        if not ema_slope_ok:
+                            logger.info(
+                                f"SKIP: {script_name} BUY ignored — EMA18 not rising "
+                                f"(ema18={entry_ema_long:.4f}, prev={entry_ema_long_prev:.4f})"
+                            )
+                            self.last_entry_candle_processed[script_name] = entry_candle_timestamp
+                            continue
+                        if ema_sep_pct < min_sep_pct:
+                            logger.info(
+                                f"SKIP: {script_name} BUY ignored — EMA separation too small "
+                                f"(sep={ema_sep_pct:.4f}% < min={min_sep_pct:.4f}%)"
+                            )
+                            self.last_entry_candle_processed[script_name] = entry_candle_timestamp
+                            continue
+
+                    elif entry_signal == -1:
+                        ema_slope_ok = entry_ema_long < entry_ema_long_prev  # EMA18 falling
+                        if not ema_slope_ok:
+                            logger.info(
+                                f"SKIP: {script_name} SELL ignored — EMA18 not falling "
+                                f"(ema18={entry_ema_long:.4f}, prev={entry_ema_long_prev:.4f})"
+                            )
+                            self.last_entry_candle_processed[script_name] = entry_candle_timestamp
+                            continue
+                        if ema_sep_pct < min_sep_pct:
+                            logger.info(
+                                f"SKIP: {script_name} SELL ignored — EMA separation too small "
+                                f"(sep={ema_sep_pct:.4f}% < min={min_sep_pct:.4f}%)"
+                            )
+                            self.last_entry_candle_processed[script_name] = entry_candle_timestamp
+                            continue
+
                     if entry_signal == 1:
                         initial_sl = self._get_entry_swing_sl(signal_df, entry_candle_timestamp, 'BUY')
                         if initial_sl is None or initial_sl >= entry_price:
@@ -1092,14 +1190,6 @@ class TradingBot:
                             self.last_entry_candle_processed[script_name] = entry_candle_timestamp
                             continue
                         ob_percent = self._calculate_ob_percent(entry_price, initial_sl)
-                        min_ob_percent = self._get_min_ob_percent(script_name)
-                        if ob_percent < min_ob_percent:
-                            logger.info(
-                                f"SKIP: {script_name} BUY ignored due to low OB% "
-                                f"(ob_pct={ob_percent:.2f}% < min_ob_pct={min_ob_percent:.2f}%)"
-                            )
-                            self.last_entry_candle_processed[script_name] = entry_candle_timestamp
-                            continue
                         logger.info(f"BUY signal for {script_name} at {entry_price:.2f}")
                         success, order_result = self._place_order_with_result(
                             script_name, "BUY", entry_price, "EMA_CROSSOVER"
@@ -1135,10 +1225,13 @@ class TradingBot:
                             extra=(
                                 f"sl={initial_sl:.2f}; target={target_price:.2f}; "
                                 f"ob_pct={ob_percent:.2f}; "
+                                f"ema_sep_pct={ema_sep_pct:.4f}; "
+                                f"ema18_slope=UP({entry_ema_long - entry_ema_long_prev:+.4f}); "
                                 f"signal_time={signal_timestamp_str}; "
                                 f"order_id={order_id}; "
                                 f"ema{self.config['ema_short']}={entry_ema_short:.2f}; "
-                                f"ema{self.config['ema_long']}={entry_ema_long:.2f}"
+                                f"ema{self.config['ema_long']}={entry_ema_long:.2f}; "
+                                f"ema{self.config['ema_long']}_prev={entry_ema_long_prev:.2f}"
                             )
                         )
                         self.last_entry_candle_processed[script_name] = entry_candle_timestamp
@@ -1154,14 +1247,6 @@ class TradingBot:
                             self.last_entry_candle_processed[script_name] = entry_candle_timestamp
                             continue
                         ob_percent = self._calculate_ob_percent(entry_price, initial_sl)
-                        min_ob_percent = self._get_min_ob_percent(script_name)
-                        if ob_percent < min_ob_percent:
-                            logger.info(
-                                f"SKIP: {script_name} SELL ignored due to low OB% "
-                                f"(ob_pct={ob_percent:.2f}% < min_ob_pct={min_ob_percent:.2f}%)"
-                            )
-                            self.last_entry_candle_processed[script_name] = entry_candle_timestamp
-                            continue
                         logger.info(f"SELL signal for {script_name} at {entry_price:.2f}")
                         success, order_result = self._place_order_with_result(
                             script_name, "SELL", entry_price, "EMA_CROSSOVER"
@@ -1197,10 +1282,13 @@ class TradingBot:
                             extra=(
                                 f"sl={initial_sl:.2f}; target={target_price:.2f}; "
                                 f"ob_pct={ob_percent:.2f}; "
+                                f"ema_sep_pct={ema_sep_pct:.4f}; "
+                                f"ema18_slope=DOWN({entry_ema_long - entry_ema_long_prev:+.4f}); "
                                 f"signal_time={signal_timestamp_str}; "
                                 f"order_id={order_id}; "
                                 f"ema{self.config['ema_short']}={entry_ema_short:.2f}; "
-                                f"ema{self.config['ema_long']}={entry_ema_long:.2f}"
+                                f"ema{self.config['ema_long']}={entry_ema_long:.2f}; "
+                                f"ema{self.config['ema_long']}_prev={entry_ema_long_prev:.2f}"
                             )
                         )
                         self.last_entry_candle_processed[script_name] = entry_candle_timestamp
