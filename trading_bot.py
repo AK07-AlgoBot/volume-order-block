@@ -25,7 +25,7 @@ init(autoreset=True)
 
 # Upstox API Configuration
 API_CONFIG = {
-    "access_token": "eyJ0eXAiOiJKV1QiLCJrZXlfaWQiOiJza192MS4wIiwiYWxnIjoiSFMyNTYifQ.eyJzdWIiOiI2RUJBVTQiLCJqdGkiOiI2OWIyMmMyNmE5YzAwZDAwNWIzMWIxNjciLCJpc011bHRpQ2xpZW50IjpmYWxzZSwiaXNQbHVzUGxhbiI6ZmFsc2UsImlhdCI6MTc3MzI4NDM5MCwiaXNzIjoidWRhcGktZ2F0ZXdheS1zZXJ2aWNlIiwiZXhwIjoxNzczMzUyODAwfQ.aNMKoBcXz6t7QKloqwfWGTa5m62tvpXZ5FNNLvQyv1s",
+    "access_token": "eyJ0eXAiOiJKV1QiLCJrZXlfaWQiOiJza192MS4wIiwiYWxnIjoiSFMyNTYifQ.eyJzdWIiOiI2RUJBVTQiLCJqdGkiOiI2OWIzODI1MjZiNjcyYTYyYzU5ZGJkYWQiLCJpc011bHRpQ2xpZW50IjpmYWxzZSwiaXNQbHVzUGxhbiI6ZmFsc2UsImlhdCI6MTc3MzM3MTk4NiwiaXNzIjoidWRhcGktZ2F0ZXdheS1zZXJ2aWNlIiwiZXhwIjoxNzczNDM5MjAwfQ.62L4yBeig6lcPFeoPuo26sqE9F7e_eQioyKrDa0wmmI",
     "api_key": "d9df59d8-e3c8-491e-9a7a-0bd19805ba8d",
     "api_secret": "wu5npsei6y",
     "base_url": "https://api.upstox.com/v2"
@@ -1038,11 +1038,11 @@ class TradingBot:
                     self.save_state()
                     continue
 
-                # Exit on OB zone breach (BigBeluga logic):
-                # BUY:  if a confirmed closed candle closes BELOW the OB lower boundary (initial_sl) -> zone broken
-                # SELL: if a confirmed closed candle closes ABOVE the OB upper boundary (initial_sl) -> zone broken
+                # Exit on OB zone breach (BigBeluga logic) or on confirmed crossover (reversal) with OB present
                 ob_zone_boundary = position.get('initial_sl')
                 last_closed_candle = self._get_last_closed_candle_row(data.get('df'))
+                crossover_exit = False
+                ob_breached = False
                 if ob_zone_boundary is not None and last_closed_candle is not None:
                     candle_close = float(last_closed_candle['close'])
                     candle_ts = last_closed_candle['timestamp']
@@ -1051,48 +1051,22 @@ class TradingBot:
                         (position['type'] == 'BUY' and candle_close < ob_zone_boundary) or
                         (position['type'] == 'SELL' and candle_close > ob_zone_boundary)
                     )
-                    if ob_breached:
-                        logger.info(
-                            f"EXIT: OB zone breached for {script_name}. "
-                            f"Closing {position['type']} @ Rs{current_price:.2f} "
-                            f"(candle_close={candle_close:.2f} vs ob_boundary={ob_zone_boundary:.2f}, candle={candle_ts_str})"
-                        )
-                        exit_side = "SELL" if position['type'] == 'BUY' else "BUY"
-                        success, order_result = self._place_order_with_result(
-                            script_name, exit_side, current_price, "OB_ZONE_BREACH"
-                        )
-                        if not success:
-                            continue
-                        order_id = (order_result.get('data') or {}).get('order_id', 'NA')
-                        self._log_order_event(
-                            script_name,
-                            action="EXIT",
-                            side=exit_side,
-                            price=current_price,
-                            reason="OB_ZONE_BREACH",
-                            extra=(
-                                f"candle_close={candle_close:.2f}; ob_boundary={ob_zone_boundary:.2f}; "
-                                f"candle={candle_ts_str}; entry={position['entry_price']:.2f}; order_id={order_id}"
-                            )
-                        )
-                        del self.positions[script_name]
-                        self.save_state()
-                        continue
+                    # Crossover exit: always exit on confirmed crossover with OB present
+                    if (
+                        (position['type'] == 'BUY' and confirmed_signal == -1 and confirmed_crossover) or
+                        (position['type'] == 'SELL' and confirmed_signal == 1 and confirmed_crossover)
+                    ):
+                        crossover_exit = True
 
-                # Exit on opposite signal crossover (only after breakeven is secured)
-                if not position.get('breakeven_done', False):
-                    logger.debug(
-                        f"HOLD: {script_name} crossover ignored — breakeven not yet reached."
-                    )
-                elif (position['type'] == 'BUY' and confirmed_signal == -1 and confirmed_crossover) or \
-                   (position['type'] == 'SELL' and confirmed_signal == 1 and confirmed_crossover):
+                if ob_breached or crossover_exit:
+                    reason = "OB_ZONE_BREACH" if ob_breached else "OPPOSITE_CROSSOVER"
                     logger.info(
-                        f"EXIT: Crossover exit (post-breakeven) for {script_name}. Closing {position['type']} position "
-                        f"(signal_time={confirmed_time_text})."
+                        f"EXIT: {reason} for {script_name}. Closing {position['type']} @ Rs{current_price:.2f} "
+                        f"(candle_close={candle_close:.2f} vs ob_boundary={ob_zone_boundary:.2f}, candle={candle_ts_str})"
                     )
                     exit_side = "SELL" if position['type'] == 'BUY' else "BUY"
                     success, order_result = self._place_order_with_result(
-                        script_name, exit_side, current_price, "OPPOSITE_CROSSOVER"
+                        script_name, exit_side, current_price, reason
                     )
                     if not success:
                         continue
@@ -1102,11 +1076,24 @@ class TradingBot:
                         action="EXIT",
                         side=exit_side,
                         price=current_price,
-                        reason="OPPOSITE_CROSSOVER",
+                        reason=reason,
                         extra=f"signal_time={confirmed_time_text}; order_id={order_id}"
                     )
                     del self.positions[script_name]
                     self.save_state()
+                    # Immediately take reversal trade if crossover exit
+                    if crossover_exit:
+                        # Simulate reversal entry on this candle close
+                        # Set up entry_signal and entry_crossover for reversal
+                        reversal_signal = -1 if position['type'] == 'BUY' else 1
+                        reversal_crossover = True
+                        # Use the same data/candle for entry
+                        data['entry_signal'] = reversal_signal
+                        data['entry_crossover'] = reversal_crossover
+                        data['entry_candle_timestamp'] = last_closed_candle['timestamp']
+                        # Recursively call process_script to take reversal
+                        self.process_script(script_name, data['instrument_key'])
+                    continue
             
             else:
                 # Enter new position on crossover
