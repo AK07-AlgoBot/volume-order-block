@@ -20,12 +20,144 @@ from colorama import Fore, Style, init
 init(autoreset=True)
 
 # ============================================================================
+# TELEGRAM NOTIFICATIONS
+# ============================================================================
+
+TELEGRAM_BOT_TOKEN = "8376419713:AAENJb_Rta0qBA1ypZsHZvkfOqSWTGP256Y"
+TELEGRAM_API_URL = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+TELEGRAM_GROUP_CHAT_ID = -5105991026
+
+# Dashboard API
+DASHBOARD_CONFIG = {
+    "enabled": True,
+    "base_url": "http://localhost:8000",
+    "timeout_seconds": 2.0,
+    "batch_size": 50,
+}
+
+
+def send_trade_notification(trade: dict, chat_id: int | str = None) -> bool:
+    """
+    Send a trade dict to a Telegram group.
+
+    Expected trade format:
+    {
+        "symbol": str,
+        "action": str,      # "BUY"/"SELL"
+        "quantity": float | int,
+        "price": float | int,
+        "timestamp": datetime | str
+    }
+
+    Returns True on success, False on failure.
+    """
+    chat_id = chat_id or TELEGRAM_GROUP_CHAT_ID
+
+    symbol = trade.get("symbol")
+    action = trade.get("action")
+    quantity = trade.get("quantity")
+    price = trade.get("price")
+    timestamp = trade.get("timestamp")
+
+    if isinstance(timestamp, datetime):
+        ts_str = timestamp.strftime("%Y-%m-%d %H:%M:%S")
+    else:
+        ts_str = str(timestamp)
+
+    message = (
+        f"✅ *Trade Executed*\n"
+        f"*Symbol*: `{symbol}`\n"
+        f"*Action*: *{str(action).upper()}*\n"
+        f"*Quantity*: `{quantity}`\n"
+        f"*Price*: `{price}`\n"
+        f"*Time*: `{ts_str}`"
+    )
+
+    payload = {
+        "chat_id": chat_id,
+        "text": message,
+        "parse_mode": "Markdown"
+    }
+
+    try:
+        resp = requests.post(TELEGRAM_API_URL, json=payload, timeout=10)
+        return resp.ok
+    except Exception as e:
+        logging.getLogger(__name__).error(f"Failed to send Telegram trade notification: {e}")
+        return False
+
+
+def send_telegram_test_message(message: str = "Hi from VOLUME-ORDER-BLOCK bot") -> bool:
+    """
+    Send a simple test message to the configured Telegram group.
+    Returns True on success, False on failure.
+    """
+    payload = {
+        "chat_id": TELEGRAM_GROUP_CHAT_ID,
+        "text": message,
+        "parse_mode": "Markdown",
+    }
+
+    try:
+        resp = requests.post(TELEGRAM_API_URL, json=payload, timeout=10)
+        if not resp.ok:
+            logging.getLogger(__name__).error(
+                f"Failed to send Telegram test message: {resp.status_code} {resp.text}"
+            )
+        return resp.ok
+    except Exception as e:
+        logging.getLogger(__name__).error(f"Error sending Telegram test message: {e}")
+        return False
+
+
+class DashboardClient:
+    """Thin client for dashboard API with batch update support."""
+
+    def __init__(self, enabled=True, base_url="http://localhost:8000", timeout_seconds=2.0):
+        self.enabled = enabled
+        self.base_url = base_url.rstrip("/")
+        self.timeout_seconds = timeout_seconds
+        self.session = requests.Session()
+        self._logger = logging.getLogger(__name__)
+
+    def _post_json(self, endpoint, payload):
+        if not self.enabled:
+            return True
+
+        url = f"{self.base_url}{endpoint}"
+        try:
+            response = self.session.post(url, json=payload, timeout=self.timeout_seconds)
+            if not response.ok:
+                self._logger.error(
+                    f"Dashboard API failed [{endpoint}] {response.status_code}: {response.text[:300]}"
+                )
+                return False
+            return True
+        except Exception as e:
+            self._logger.error(f"Dashboard API error [{endpoint}]: {e}")
+            return False
+
+    def post_trade_open(self, trade):
+        return self._post_json("/api/trade/open", trade)
+
+    def post_trade_update(self, trade):
+        return self._post_json("/api/trade/update", trade)
+
+    def post_trade_update_batch(self, trades):
+        if not trades:
+            return True
+        return self._post_json("/api/trades/update-batch", trades)
+
+    def post_trade_close(self, trade):
+        return self._post_json("/api/trade/close", trade)
+
+# ============================================================================
 # CONFIGURATION
 # ============================================================================
 
 # Upstox API Configuration
 API_CONFIG = {
-    "access_token": "eyJ0eXAiOiJKV1QiLCJrZXlfaWQiOiJza192MS4wIiwiYWxnIjoiSFMyNTYifQ.eyJzdWIiOiI2RUJBVTQiLCJqdGkiOiI2OWIzODI1MjZiNjcyYTYyYzU5ZGJkYWQiLCJpc011bHRpQ2xpZW50IjpmYWxzZSwiaXNQbHVzUGxhbiI6ZmFsc2UsImlhdCI6MTc3MzM3MTk4NiwiaXNzIjoidWRhcGktZ2F0ZXdheS1zZXJ2aWNlIiwiZXhwIjoxNzczNDM5MjAwfQ.62L4yBeig6lcPFeoPuo26sqE9F7e_eQioyKrDa0wmmI",
+    "access_token": "eyJ0eXAiOiJKV1QiLCJrZXlfaWQiOiJza192MS4wIiwiYWxnIjoiSFMyNTYifQ.eyJzdWIiOiI2RUJBVTQiLCJqdGkiOiI2OWI1YjRhNmE4OGMzYTVkNmRiOGQwMTQiLCJpc011bHRpQ2xpZW50IjpmYWxzZSwiaXNQbHVzUGxhbiI6ZmFsc2UsImlhdCI6MTc3MzUxNTk0MiwiaXNzIjoidWRhcGktZ2F0ZXdheS1zZXJ2aWNlIiwiZXhwIjoxNzczNTI1NjAwfQ.4ffDTM5OzGcOOl-vAznoUQuL6Pm0M_lCM733zfyJor0",
     "api_key": "d9df59d8-e3c8-491e-9a7a-0bd19805ba8d",
     "api_secret": "wu5npsei6y",
     "base_url": "https://api.upstox.com/v2"
@@ -104,7 +236,9 @@ TRADING_CONFIG = {
     "eod_squareoff_times": {
         "NSE": "15:20",
         "MCX": "23:20"
-    }
+    },
+    "daily_shutdown_time": "23:21",
+    "auto_archive_on_shutdown": True
 }
 
 # File paths
@@ -331,6 +465,14 @@ class TradingBot:
         self.last_entry_candle_processed = {}
         self.last_position_eval_logged = {}
         self.eod_squareoff_done = {}
+        self.dashboard_client = DashboardClient(
+            enabled=DASHBOARD_CONFIG.get("enabled", True),
+            base_url=DASHBOARD_CONFIG.get("base_url", "http://localhost:8000"),
+            timeout_seconds=float(DASHBOARD_CONFIG.get("timeout_seconds", 2.0)),
+        )
+        self.dashboard_batch_size = int(DASHBOARD_CONFIG.get("batch_size", 50))
+        self.pending_live_updates = {}
+        self.archive_requested = False
         
     def load_state(self):
         """Load saved trading state"""
@@ -359,7 +501,7 @@ class TradingBot:
         except Exception as e:
             logger.error(f"ERROR: Could not save state: {e}")
 
-    def _ensure_position_fields(self, position):
+    def _ensure_position_fields(self, position, script_name=None):
         """Backfill position fields for older saved state compatibility."""
         entry_price = position.get('entry_price', 0)
         position_type = position.get('type')
@@ -387,6 +529,96 @@ class TradingBot:
             elif position_type == 'SELL':
                 position['target_price'] = entry_price * (1 - target_percent)
 
+        if 'entry_time' not in position:
+            position['entry_time'] = datetime.now().isoformat()
+
+        if 'quantity' not in position:
+            position['quantity'] = self._get_order_quantity(script_name) if script_name else 1
+
+        if 'trade_id' not in position:
+            script_for_id = script_name or "UNKNOWN"
+            position['trade_id'] = self._build_trade_id(script_for_id, position['entry_time'])
+
+    @staticmethod
+    def _build_trade_id(script_name, opened_at):
+        return f"{script_name}-{opened_at}"
+
+    @staticmethod
+    def _calculate_realized_pnl(side, entry_price, exit_price, quantity):
+        if side == "BUY":
+            return (exit_price - entry_price) * quantity
+        return (entry_price - exit_price) * quantity
+
+    def _build_dashboard_trade_payload(self, script_name, position, last_price=None, exit_price=None, closed_at=None):
+        self._ensure_position_fields(position, script_name)
+
+        side = position.get("type", "BUY")
+        quantity = float(position.get("quantity", self._get_order_quantity(script_name)))
+        entry_price = float(position.get("entry_price", 0.0))
+        opened_at = position.get("entry_time", datetime.now().isoformat())
+        trade_id = position.get("trade_id", self._build_trade_id(script_name, opened_at))
+
+        current_price = float(entry_price if last_price is None else last_price)
+        payload = {
+            "id": trade_id,
+            "symbol": script_name,
+            "side": side,
+            "quantity": quantity,
+            "entry_price": entry_price,
+            "exit_price": None,
+            "last_price": current_price,
+            "unrealized_pnl": self._calculate_realized_pnl(side, entry_price, current_price, quantity),
+            "realized_pnl": None,
+            "opened_at": opened_at,
+            "closed_at": None,
+        }
+
+        if exit_price is not None:
+            final_exit = float(exit_price)
+            final_closed_at = closed_at or datetime.now().isoformat()
+            payload["exit_price"] = final_exit
+            payload["last_price"] = final_exit
+            payload["unrealized_pnl"] = None
+            payload["realized_pnl"] = self._calculate_realized_pnl(side, entry_price, final_exit, quantity)
+            payload["closed_at"] = final_closed_at
+
+        return payload
+
+    def _notify_dashboard_trade_open(self, script_name, position, last_price):
+        payload = self._build_dashboard_trade_payload(script_name, position, last_price=last_price)
+        self.dashboard_client.post_trade_open(payload)
+
+    def _queue_dashboard_trade_update(self, script_name, position, last_price):
+        payload = self._build_dashboard_trade_payload(script_name, position, last_price=last_price)
+        self.pending_live_updates[payload["id"]] = payload
+
+    def _flush_dashboard_trade_updates(self):
+        if not self.pending_live_updates:
+            return
+
+        trades = list(self.pending_live_updates.values())
+        chunk_size = max(1, self.dashboard_batch_size)
+        all_ok = True
+        for start in range(0, len(trades), chunk_size):
+            chunk = trades[start:start + chunk_size]
+            ok = self.dashboard_client.post_trade_update_batch(chunk)
+            if not ok:
+                all_ok = False
+                break
+
+        if all_ok:
+            self.pending_live_updates.clear()
+
+    def _notify_dashboard_trade_close(self, script_name, position, exit_price):
+        payload = self._build_dashboard_trade_payload(
+            script_name,
+            position,
+            last_price=exit_price,
+            exit_price=exit_price,
+            closed_at=datetime.now().isoformat(),
+        )
+        self.dashboard_client.post_trade_close(payload)
+
     def _log_order_event(self, script_name, action, side, price, reason, extra=""):
         order_logger.info(
             f"{script_name} | ACTION={action} | SIDE={side} | PRICE={price:.2f} | REASON={reason}"
@@ -406,6 +638,18 @@ class TradingBot:
         order_qty = self._get_order_quantity(script_name)
         result = self.client.place_order(order_token, order_qty, side)
         if result and result.get('status') == 'success':
+            trade = {
+                "symbol": script_name,
+                "action": side,
+                "quantity": order_qty,
+                "price": price,
+                "timestamp": self._now_ist(),
+            }
+            if not send_trade_notification(trade):
+                logger.error(
+                    f"Failed to send Telegram notification for trade: "
+                    f"{script_name} {side} qty={order_qty} @ Rs{price:.2f}"
+                )
             return True, result
 
         error_text = (result or {}).get('error', 'Unknown error')
@@ -474,6 +718,32 @@ class TradingBot:
         minute = int(minute_text)
         return now_ist.replace(hour=hour, minute=minute, second=0, microsecond=0)
 
+    def _daily_shutdown_dt(self, now_ist):
+        shutdown_text = self.config.get('daily_shutdown_time', '23:21')
+        if not shutdown_text or ':' not in shutdown_text:
+            return None
+
+        hour_text, minute_text = shutdown_text.split(':', 1)
+        hour = int(hour_text)
+        minute = int(minute_text)
+        return now_ist.replace(hour=hour, minute=minute, second=0, microsecond=0)
+
+    def _is_after_daily_shutdown(self, now_ist):
+        shutdown_dt = self._daily_shutdown_dt(now_ist)
+        if shutdown_dt is None:
+            return False
+        return now_ist >= shutdown_dt
+
+    @staticmethod
+    def _run_daily_archive():
+        """Run archive_day.py safely after bot shutdown."""
+        try:
+            import archive_day
+            archive_day.main()
+        except Exception as e:
+            # logging might be shut down already, so fallback to stdout.
+            print(f"ERROR: Daily archive failed: {e}")
+
     def _is_before_segment_entry_start(self, script_name, now_ist):
         segment = self._script_segment(script_name)
         if not segment:
@@ -517,6 +787,7 @@ class TradingBot:
                     continue
 
                 position = self.positions[script_name]
+                self._ensure_position_fields(position, script_name)
                 exit_side = "SELL" if position.get('type') == 'BUY' else "BUY"
                 market_price = latest_prices.get(script_name)
                 price_source = "ltp"
@@ -546,6 +817,7 @@ class TradingBot:
                         f"order_id={order_id}"
                     )
                 )
+                self._notify_dashboard_trade_close(script_name, position, market_price)
                 del self.positions[script_name]
                 any_closed = True
 
@@ -661,7 +933,7 @@ class TradingBot:
         - At 1:1 (favorable move >= risk%), SL moves to cost
         - For every extra 0.5% favorable move, SL moves by +0.5% (BUY) / -0.5% (SELL)
         """
-        self._ensure_position_fields(position)
+        self._ensure_position_fields(position, script_name)
         entry_price = position['entry_price']
         position_type = position['type']
 
@@ -947,7 +1219,7 @@ class TradingBot:
             # Check if we have an open position
             if script_name in self.positions:
                 position = self.positions[script_name]
-                self._ensure_position_fields(position)
+                self._ensure_position_fields(position, script_name)
 
                 confirmed_time_text = confirmed_candle_timestamp.isoformat() if hasattr(confirmed_candle_timestamp, 'isoformat') else 'NA'
                 last_eval_ts = self.last_position_eval_logged.get(script_name)
@@ -985,6 +1257,7 @@ class TradingBot:
                         reason="STOP_LOSS_HIT",
                         extra=f"entry={position['entry_price']:.2f}; sl={stop_loss:.2f}; order_id={order_id}"
                     )
+                    self._notify_dashboard_trade_close(script_name, position, current_price)
                     del self.positions[script_name]
                     self.save_state()
                     continue
@@ -1008,6 +1281,7 @@ class TradingBot:
                         reason="STOP_LOSS_HIT",
                         extra=f"entry={position['entry_price']:.2f}; sl={stop_loss:.2f}; order_id={order_id}"
                     )
+                    self._notify_dashboard_trade_close(script_name, position, current_price)
                     del self.positions[script_name]
                     self.save_state()
                     continue
@@ -1034,6 +1308,7 @@ class TradingBot:
                         reason="TARGET_HIT",
                         extra=f"entry={position['entry_price']:.2f}; target={position.get('target_price', 0):.2f}; order_id={order_id}"
                     )
+                    self._notify_dashboard_trade_close(script_name, position, current_price)
                     del self.positions[script_name]
                     self.save_state()
                     continue
@@ -1079,6 +1354,7 @@ class TradingBot:
                         reason=reason,
                         extra=f"signal_time={confirmed_time_text}; order_id={order_id}"
                     )
+                    self._notify_dashboard_trade_close(script_name, position, current_price)
                     del self.positions[script_name]
                     self.save_state()
                     # Immediately take reversal trade if crossover exit
@@ -1192,6 +1468,7 @@ class TradingBot:
                             'type': 'BUY',
                             'entry_price': entry_price,
                             'entry_time': datetime.now().isoformat(),
+                            'quantity': self._get_order_quantity(script_name),
                             'signal_time': signal_timestamp_str,
                             'signal_ema_short': entry_ema_short,
                             'signal_ema_long': entry_ema_long,
@@ -1202,6 +1479,9 @@ class TradingBot:
                             'trail_steps_locked': 0,
                             'breakeven_done': False
                         }
+                        self.positions[script_name]['trade_id'] = self._build_trade_id(
+                            script_name, self.positions[script_name]['entry_time']
+                        )
                         logger.info(f" {script_name}: Initial SL set @ Rs{initial_sl:.2f}")
                         self._log_order_event(
                             script_name,
@@ -1223,6 +1503,9 @@ class TradingBot:
                         )
                         self.last_entry_candle_processed[script_name] = entry_candle_timestamp
                         self.save_state()
+                        self._notify_dashboard_trade_open(
+                            script_name, self.positions[script_name], entry_price
+                        )
                     
                     elif entry_signal == -1:
                         initial_sl = self._get_entry_swing_sl(signal_df, entry_candle_timestamp, 'SELL')
@@ -1249,6 +1532,7 @@ class TradingBot:
                             'type': 'SELL',
                             'entry_price': entry_price,
                             'entry_time': datetime.now().isoformat(),
+                            'quantity': self._get_order_quantity(script_name),
                             'signal_time': signal_timestamp_str,
                             'signal_ema_short': entry_ema_short,
                             'signal_ema_long': entry_ema_long,
@@ -1259,6 +1543,9 @@ class TradingBot:
                             'trail_steps_locked': 0,
                             'breakeven_done': False
                         }
+                        self.positions[script_name]['trade_id'] = self._build_trade_id(
+                            script_name, self.positions[script_name]['entry_time']
+                        )
                         logger.info(f" {script_name}: Initial SL set @ Rs{initial_sl:.2f}")
                         self._log_order_event(
                             script_name,
@@ -1280,6 +1567,9 @@ class TradingBot:
                         )
                         self.last_entry_candle_processed[script_name] = entry_candle_timestamp
                         self.save_state()
+                        self._notify_dashboard_trade_open(
+                            script_name, self.positions[script_name], entry_price
+                        )
     
     def run(self):
         """Main trading loop"""
@@ -1330,6 +1620,14 @@ class TradingBot:
                     
                     # Execute trading logic
                     self.execute_trading_logic(script_data, allow_new_entries=allow_new_entries, now_ist=now_ist)
+
+                    # Queue and flush live MTM updates in batch
+                    for script_name, position in self.positions.items():
+                        current_price = latest_prices.get(script_name)
+                        if current_price is None:
+                            continue
+                        self._queue_dashboard_trade_update(script_name, position, current_price)
+                    self._flush_dashboard_trade_updates()
                     
                     # Check global stop loss
                     if self.total_pnl < -self.config['portfolio_stop_loss']:
@@ -1338,6 +1636,17 @@ class TradingBot:
                         self.positions.clear()
                         self.save_state()
                         self.running = False
+                        break
+
+                    # Daily auto-shutdown after configured time (IST)
+                    if self._is_after_daily_shutdown(now_ist):
+                        shutdown_time_text = self.config.get('daily_shutdown_time', '23:21')
+                        logger.info(
+                            f"AUTO SHUTDOWN: Reached {shutdown_time_text} IST. "
+                            "Stopping bot and archiving runtime artifacts."
+                        )
+                        self.running = False
+                        self.archive_requested = bool(self.config.get('auto_archive_on_shutdown', True))
                         break
                     
                     # Wait for next iteration
@@ -1357,6 +1666,10 @@ class TradingBot:
             logger.info("="*80)
             logger.info(" Trading Bot Stopped")
             logger.info("="*80)
+            should_archive = self.archive_requested
+            logging.shutdown()
+            if should_archive:
+                self._run_daily_archive()
 
 # ============================================================================
 # MAIN ENTRY POINT
@@ -1378,7 +1691,13 @@ def main():
         print(f"{Fore.YELLOW} Public IP: {public_ip}{Style.RESET_ALL}\n")
     except:
         pass
-    
+
+    # Telegram test message
+    if not send_telegram_test_message():
+        print("Telegram test message failed – check bot token / chat ID.")
+    else:
+        print("Telegram test message sent successfully.")
+
     # Initialize client
     client = UpstoxClient(
         API_CONFIG['access_token'],

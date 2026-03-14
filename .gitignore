@@ -21,7 +21,9 @@ live_status.log
 # Old files
 old/
 backup/
-archive/
+archive/*
+!archive/unused/
+!archive/unused/**
 
 # IDE
 .vscode/
@@ -33,6 +35,11 @@ archive/
 # OS
 .DS_Store
 Thumbs.db
+
+# Local tooling/build
+.tools/
+dashboard-ui/node_modules/
+dashboard-ui/dist/
 
 # Sensitive
 config.json
