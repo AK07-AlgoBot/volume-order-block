@@ -1,5 +1,6 @@
 param(
-    [switch]$Force
+    [switch]$Force,
+    [switch]$UsePreviewUI = $true
 )
 
 $ErrorActionPreference = "Stop"
@@ -120,19 +121,39 @@ if ($uiUp -and -not $Force) {
     Write-Host "UI already running on http://localhost:5173 (use -Force to start another)."
 }
 else {
-    if ($npmCmd -eq "npm") {
-        $uiCommand = @"
+    if ($UsePreviewUI) {
+        if ($npmCmd -eq "npm") {
+            & npm run build --prefix $uiPath
+            $uiCommand = @"
+Set-Location '$uiPath'
+npm run preview -- --host 0.0.0.0 --port 5173
+"@
+        }
+        else {
+            $escapedNodeDir = Split-Path $npmCmd -Parent
+            & $npmCmd run build --prefix $uiPath
+            $uiCommand = @"
+Set-Location '$uiPath'
+\$env:Path = '$escapedNodeDir;' + \$env:Path
+& '$npmCmd' run preview -- --host 0.0.0.0 --port 5173
+"@
+        }
+    }
+    else {
+        if ($npmCmd -eq "npm") {
+            $uiCommand = @"
 Set-Location '$uiPath'
 npm run dev -- --host 0.0.0.0 --port 5173
 "@
-    }
-    else {
-        $escapedNodeDir = Split-Path $npmCmd -Parent
-        $uiCommand = @"
+        }
+        else {
+            $escapedNodeDir = Split-Path $npmCmd -Parent
+            $uiCommand = @"
 Set-Location '$uiPath'
 \$env:Path = '$escapedNodeDir;' + \$env:Path
 & '$npmCmd' run dev -- --host 0.0.0.0 --port 5173
 "@
+        }
     }
 
     Start-ManagedProcess -Name "Dashboard UI" -WorkingDirectory $uiPath -Command $uiCommand
@@ -155,3 +176,4 @@ Write-Host "Dashboard UI: http://localhost:5173"
 Write-Host "Dashboard API: http://localhost:8000"
 Write-Host ""
 Write-Host "Tip: Use .\run_all.ps1 -Force to start new API/UI instances even if ports are already active."
+Write-Host "Tip: Use .\run_all.ps1 -UsePreviewUI:\$false for Vite dev server."

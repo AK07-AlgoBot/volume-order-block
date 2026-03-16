@@ -1,9 +1,15 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { ClosedTradesTable } from "./components/ClosedTradesTable";
 import { LiveTradesTable } from "./components/LiveTradesTable";
 import { WeeklyPnlChart } from "./components/WeeklyPnlChart";
 
 const API_BASE = "http://localhost:8000";
+
+function getLocalDateIso() {
+  const now = new Date();
+  const offsetMs = now.getTimezoneOffset() * 60000;
+  return new Date(now.getTime() - offsetMs).toISOString().slice(0, 10);
+}
 
 function upsertTrade(list, trade) {
   const index = list.findIndex((item) => item.id === trade.id);
@@ -20,10 +26,27 @@ function removeTrade(list, tradeId) {
 }
 
 export default function App() {
+  const [todayDateText] = useState(getLocalDateIso);
   const [liveTrades, setLiveTrades] = useState([]);
   const [closedTrades, setClosedTrades] = useState([]);
+  const [closedTradeDates, setClosedTradeDates] = useState([]);
+  const [selectedClosedDate, setSelectedClosedDate] = useState(todayDateText);
   const [weeklyPnl, setWeeklyPnl] = useState([]);
   const [connected, setConnected] = useState(false);
+  const selectedClosedDateRef = useRef(selectedClosedDate);
+  const appReadySentRef = useRef(false);
+
+  const markAppReady = () => {
+    if (appReadySentRef.current) {
+      return;
+    }
+    appReadySentRef.current = true;
+    window.dispatchEvent(new Event("ak07-app-ready"));
+  };
+
+  useEffect(() => {
+    selectedClosedDateRef.current = selectedClosedDate;
+  }, [selectedClosedDate]);
 
   useEffect(() => {
     let active = true;
@@ -49,10 +72,15 @@ export default function App() {
         }
         setLiveTrades(payload.live_trades || []);
         setClosedTrades(payload.closed_trades || []);
+        setClosedTradeDates(payload.closed_trade_dates || []);
+        setSelectedClosedDate(payload.closed_trade_selected_date || todayDateText);
         setWeeklyPnl(payload.weekly_pnl || []);
+        markAppReady();
       })
       .catch((error) => {
         console.error("Failed initial load", error);
+        // Even on failure, remove boot splash so user sees fallback UI instead of blocked overlay.
+        markAppReady();
       });
 
     const socket = new WebSocket("ws://localhost:8000/ws/trades");
@@ -76,7 +104,15 @@ export default function App() {
 
         if (message.type === "trade_closed") {
           setLiveTrades((prev) => removeTrade(prev, message.trade.id));
-          setClosedTrades((prev) => upsertTrade(prev, message.trade));
+          const tradeDate = String(message.trade?.closed_at || "").slice(0, 10);
+          if (tradeDate) {
+            setClosedTradeDates((prev) =>
+              prev.includes(tradeDate) ? prev : [tradeDate, ...prev].sort((a, b) => b.localeCompare(a))
+            );
+          }
+          if (!tradeDate || tradeDate === selectedClosedDateRef.current) {
+            setClosedTrades((prev) => upsertTrade(prev, message.trade));
+          }
           loadWeeklyPnl();
           return;
         }
@@ -104,14 +140,30 @@ export default function App() {
       window.clearInterval(weeklyRefresh);
       socket.close();
     };
-  }, []);
+  }, [todayDateText]);
+
+  useEffect(() => {
+    let active = true;
+    fetch(`${API_BASE}/api/dashboard/closed-trades?date=${encodeURIComponent(selectedClosedDate)}`)
+      .then((response) => response.json())
+      .then((payload) => {
+        if (!active) {
+          return;
+        }
+        setClosedTrades(payload.closed_trades || []);
+        setClosedTradeDates(payload.closed_trade_dates || []);
+      })
+      .catch((error) => {
+        console.error("Failed closed trades load", error);
+      });
+    return () => {
+      active = false;
+    };
+  }, [selectedClosedDate]);
 
   const todayRealized = useMemo(
-    () =>
-      closedTrades
-        .filter((trade) => (trade.closed_at || "").startsWith(new Date().toISOString().slice(0, 10)))
-        .reduce((sum, trade) => sum + Number(trade.realized_pnl || 0), 0),
-    [closedTrades]
+    () => Number(weeklyPnl.find((point) => point.date === todayDateText)?.pnl || 0),
+    [weeklyPnl, todayDateText]
   );
 
   return (
@@ -141,7 +193,12 @@ export default function App() {
         </div>
 
         <div className="closed-section">
-          <ClosedTradesTable trades={closedTrades} />
+          <ClosedTradesTable
+            trades={closedTrades}
+            availableDates={closedTradeDates}
+            selectedDate={selectedClosedDate}
+            onDateChange={setSelectedClosedDate}
+          />
         </div>
 
         <div className="subtle" style={{ marginTop: "0.75rem", marginBottom: "1.5rem" }}>

@@ -3,23 +3,60 @@ function asNumber(value) {
   return Number.isFinite(numberValue) ? numberValue : 0;
 }
 
-export function ClosedTradesTable({ trades }) {
+function formatTimestamp(value) {
+  if (!value) return "-";
+  const normalized = String(value).replace("T", " ");
+  return normalized.length > 19 ? normalized.slice(0, 19) : normalized;
+}
+
+export function ClosedTradesTable({ trades, availableDates = [], selectedDate = "", onDateChange }) {
+  const dateOptions = availableDates.length > 0 ? availableDates : selectedDate ? [selectedDate] : [];
+
   return (
     <div className="card">
-      <h2>Closed Trades</h2>
+      <div className="closed-header">
+        <h2>Closed Trades</h2>
+        <div className="closed-filter">
+          <label htmlFor="closed-date-select" className="subtle">
+            Date
+          </label>
+          <select
+            id="closed-date-select"
+            className="closed-date-select"
+            value={selectedDate}
+            onChange={(event) => onDateChange?.(event.target.value)}
+          >
+            {dateOptions.map((dateValue) => (
+              <option key={dateValue} value={dateValue}>
+                {dateValue}
+              </option>
+            ))}
+          </select>
+        </div>
+      </div>
       <div className="subtle">{trades.length} completed positions</div>
-      <div className="table-wrap">
-        <table>
+      <div className="table-wrap closed-table-wrap">
+        <table className="trade-table closed-trades-table">
+          <colgroup>
+            <col className="col-symbol" />
+            <col className="col-side" />
+            <col className="col-qty" />
+            <col className="col-price" />
+            <col className="col-price" />
+            <col className="col-pnl" />
+            <col className="col-datetime" />
+            <col className="col-datetime" />
+          </colgroup>
           <thead>
             <tr>
-              <th>Symbol</th>
-              <th>Side</th>
-              <th>Qty</th>
-              <th>Entry</th>
-              <th>Exit</th>
-              <th>Realized P&L</th>
-              <th>Opened At</th>
-              <th>Closed At</th>
+              <th className="col-left">Symbol</th>
+              <th className="col-center">Side</th>
+              <th className="col-center-num">Qty</th>
+              <th className="col-center-num">Entry</th>
+              <th className="col-center-num">Exit</th>
+              <th className="col-center-num">Realized P&L</th>
+              <th className="col-left">Opened At</th>
+              <th className="col-left">Closed At</th>
             </tr>
           </thead>
           <tbody>
@@ -34,14 +71,14 @@ export function ClosedTradesTable({ trades }) {
                 const pnl = asNumber(trade.realized_pnl);
                 return (
                   <tr key={trade.id}>
-                    <td>{trade.symbol}</td>
-                    <td className={trade.side === "BUY" ? "buy" : "sell"}>{trade.side}</td>
-                    <td>{asNumber(trade.quantity).toFixed(2)}</td>
-                    <td>{asNumber(trade.entry_price).toFixed(2)}</td>
-                    <td>{asNumber(trade.exit_price).toFixed(2)}</td>
-                    <td className={pnl >= 0 ? "pnl-pos" : "pnl-neg"}>{pnl.toFixed(2)}</td>
-                    <td>{trade.opened_at || "-"}</td>
-                    <td>{trade.closed_at || "-"}</td>
+                    <td className="col-left">{trade.symbol}</td>
+                    <td className={`col-center ${trade.side === "BUY" ? "buy" : "sell"}`}>{trade.side}</td>
+                    <td className="col-center-num">{asNumber(trade.quantity).toFixed(2)}</td>
+                    <td className="col-center-num">{asNumber(trade.entry_price).toFixed(2)}</td>
+                    <td className="col-center-num">{asNumber(trade.exit_price).toFixed(2)}</td>
+                    <td className={`col-center-num ${pnl >= 0 ? "pnl-pos" : "pnl-neg"}`}>{pnl.toFixed(2)}</td>
+                    <td className="col-left date-cell">{formatTimestamp(trade.opened_at)}</td>
+                    <td className="col-left date-cell">{formatTimestamp(trade.closed_at)}</td>
                   </tr>
                 );
               })

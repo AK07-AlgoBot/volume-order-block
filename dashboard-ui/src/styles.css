@@ -89,6 +89,7 @@ body {
   grid-template-columns: 1.8fr 1fr;
   gap: 1rem;
   margin-top: 1rem;
+  align-items: start;
 }
 
 .card {
@@ -103,6 +104,28 @@ body {
   font-size: 0.95rem;
 }
 
+.closed-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.closed-filter {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+}
+
+.closed-date-select {
+  border: 1px solid #334155;
+  border-radius: 8px;
+  background: rgba(15, 23, 42, 0.95);
+  color: #e2e8f0;
+  padding: 0.25rem 0.45rem;
+  font-size: 0.78rem;
+}
+
 .table-wrap {
   overflow-x: auto;
 }
@@ -110,19 +133,56 @@ body {
 table {
   width: 100%;
   border-collapse: collapse;
-  font-size: 0.8rem;
+  font-size: 0.84rem;
+}
+
+.trade-table {
+  table-layout: fixed;
+}
+
+.trade-table .col-symbol {
+  width: 78px;
+}
+
+.trade-table .col-side {
+  width: 62px;
+}
+
+.trade-table .col-qty {
+  width: 72px;
+}
+
+.trade-table .col-price {
+  width: 78px;
+}
+
+.trade-table .col-pnl {
+  width: 116px;
+}
+
+.trade-table .col-datetime {
+  width: 168px;
 }
 
 th,
 td {
-  padding: 0.55rem 0.4rem;
+  padding: 0.62rem 0.45rem;
   border-bottom: 1px solid #1f2937;
   white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 th {
   color: #94a3b8;
   text-align: right;
+}
+
+.trade-table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: rgba(15, 23, 42, 0.98);
 }
 
 th:first-child,
@@ -167,6 +227,72 @@ tr:last-child td {
   color: #64748b;
   text-align: center;
   padding: 1rem 0;
+}
+
+.live-trades-table .col-left {
+  text-align: left;
+}
+
+.live-trades-table .col-center {
+  text-align: center;
+}
+
+.live-trades-table .col-center-num {
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+.live-trades-table .col-right {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.live-trades-table .date-cell {
+  font-variant-numeric: tabular-nums;
+}
+
+.closed-trades-table .col-left {
+  text-align: left;
+}
+
+.closed-trades-table .col-center {
+  text-align: center;
+}
+
+.closed-trades-table .col-center-num {
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+.closed-trades-table .col-right {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.closed-trades-table .date-cell {
+  font-variant-numeric: tabular-nums;
+}
+
+.closed-table-wrap {
+  max-height: 340px;
+  overflow-y: auto;
+}
+
+.sl-cell {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.35rem;
+}
+
+.lock-pill {
+  border: 1px solid #14532d;
+  border-radius: 999px;
+  color: #4ade80;
+  background: rgba(34, 197, 94, 0.12);
+  padding: 0.04rem 0.35rem;
+  font-size: 0.65rem;
+  line-height: 1.2;
 }
 
 @media (max-width: 980px) {

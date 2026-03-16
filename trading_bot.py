@@ -157,7 +157,7 @@ class DashboardClient:
 
 # Upstox API Configuration
 API_CONFIG = {
-    "access_token": "eyJ0eXAiOiJKV1QiLCJrZXlfaWQiOiJza192MS4wIiwiYWxnIjoiSFMyNTYifQ.eyJzdWIiOiI2RUJBVTQiLCJqdGkiOiI2OWI1YjRhNmE4OGMzYTVkNmRiOGQwMTQiLCJpc011bHRpQ2xpZW50IjpmYWxzZSwiaXNQbHVzUGxhbiI6ZmFsc2UsImlhdCI6MTc3MzUxNTk0MiwiaXNzIjoidWRhcGktZ2F0ZXdheS1zZXJ2aWNlIiwiZXhwIjoxNzczNTI1NjAwfQ.4ffDTM5OzGcOOl-vAznoUQuL6Pm0M_lCM733zfyJor0",
+    "access_token": "eyJ0eXAiOiJKV1QiLCJrZXlfaWQiOiJza192MS4wIiwiYWxnIjoiSFMyNTYifQ.eyJzdWIiOiI2RUJBVTQiLCJqdGkiOiI2OWI3NzM3ZTA4NDNlNjRmODU4ZDgwNTgiLCJpc011bHRpQ2xpZW50IjpmYWxzZSwiaXNQbHVzUGxhbiI6ZmFsc2UsImlhdCI6MTc3MzYzMDMzNCwiaXNzIjoidWRhcGktZ2F0ZXdheS1zZXJ2aWNlIiwiZXhwIjoxNzczNjk4NDAwfQ.A6Wfa3NAhbiFUmUIuVm5w4eIXoqU0PsecdI5SBPAahs",
     "api_key": "d9df59d8-e3c8-491e-9a7a-0bd19805ba8d",
     "api_secret": "wu5npsei6y",
     "base_url": "https://api.upstox.com/v2"
@@ -197,12 +197,69 @@ TRADING_CONFIG = {
     "portfolio_stop_loss": 10000,  # ₹10,000
     "trailing_stop_loss_percent": 1.0,  # 1%
     "trail_step_percent": 0.5,  # After 1:1, trail SL by 0.5% for every 0.5% favorable move
+    # Profit-lock ladder in R-multiples.
+    # trigger_r: when trade reaches this R, lock_r: guaranteed R to retain in SL.
+    "profit_lock_ladder": [
+        {"trigger_r": 1.0, "lock_r": 0.25},
+        {"trigger_r": 1.5, "lock_r": 0.75},
+        {"trigger_r": 2.0, "lock_r": 1.25},
+        {"trigger_r": 2.5, "lock_r": 1.75},
+    ],
     "target_percent": 2.0,  # Book profit at +2% move (or -2% for SELL)
     "trailing_overrides_by_script": {
         "CRUDE": {
             "breakeven_trigger_percent": 1.0,
             "trail_step_percent": 0.2
+        },
+        "SILVERMINI": {
+            "breakeven_trigger_percent": 1.0,
+            "trail_step_percent": 0.2
+        },
+        "NIFTY": {
+            "breakeven_trigger_percent": 1.0,
+            "trail_step_percent": 0.2
+        },
+        "BANKNIFTY": {
+            "breakeven_trigger_percent": 1.0,
+            "trail_step_percent": 0.2
+        },
+        "SENSEX": {
+            "breakeven_trigger_percent": 1.0,
+            "trail_step_percent": 0.2
         }
+    },
+    # Explicitly apply the same profit-lock ladder profile as CRUDE.
+    "profit_lock_ladder_by_script": {
+        "CRUDE": [
+            {"trigger_r": 1.0, "lock_r": 0.25},
+            {"trigger_r": 1.5, "lock_r": 0.75},
+            {"trigger_r": 2.0, "lock_r": 1.25},
+            {"trigger_r": 2.5, "lock_r": 1.75}
+        ],
+        "SILVERMINI": [
+            {"trigger_r": 1.0, "lock_r": 0.25},
+            {"trigger_r": 1.5, "lock_r": 0.75},
+            {"trigger_r": 2.0, "lock_r": 1.25},
+            {"trigger_r": 2.5, "lock_r": 1.75}
+        ],
+        "NIFTY": [
+            {"trigger_r": 1.0, "lock_r": 0.25},
+            {"trigger_r": 1.5, "lock_r": 0.75},
+            {"trigger_r": 2.0, "lock_r": 1.25},
+            {"trigger_r": 2.5, "lock_r": 1.75}
+        ],
+        "BANKNIFTY": [
+            {"trigger_r": 1.0, "lock_r": 0.25},
+            {"trigger_r": 1.5, "lock_r": 0.75},
+            {"trigger_r": 2.0, "lock_r": 1.25},
+            {"trigger_r": 2.5, "lock_r": 1.75}
+        ],
+        "SENSEX": [
+            {"trigger_r": 1.0, "lock_r": 0.25},
+            {"trigger_r": 1.5, "lock_r": 0.75},
+            {"trigger_r": 2.0, "lock_r": 1.25},
+            {"trigger_r": 2.5, "lock_r": 1.75}
+        ]
     },
     "min_ob_percent_by_script": {
         "NIFTY": 0.44,
@@ -522,6 +579,12 @@ class TradingBot:
         if 'breakeven_done' not in position:
             position['breakeven_done'] = False
 
+        if 'profit_lock_r_locked' not in position:
+            position['profit_lock_r_locked'] = 0.0
+
+        if 'profit_lock_trigger_r_locked' not in position:
+            position['profit_lock_trigger_r_locked'] = 0.0
+
         if 'target_price' not in position and entry_price > 0:
             target_percent = self.config['target_percent'] / 100
             if position_type == 'BUY':
@@ -565,6 +628,8 @@ class TradingBot:
             "side": side,
             "quantity": quantity,
             "entry_price": entry_price,
+            "stop_loss": float(position.get("stop_loss", entry_price)),
+            "target_price": float(position.get("target_price", entry_price)),
             "exit_price": None,
             "last_price": current_price,
             "unrealized_pnl": self._calculate_realized_pnl(side, entry_price, current_price, quantity),
@@ -856,6 +921,94 @@ class TradingBot:
             return entry_price * (1 + step_fraction * steps)
         return entry_price * (1 - step_fraction * steps)
 
+    def _profit_lock_ladder_for_script(self, script_name):
+        """Return validated/sorted profit-lock ladder rules for a script."""
+        script_overrides = self.config.get('profit_lock_ladder_by_script', {})
+        raw_ladder = script_overrides.get(script_name, self.config.get('profit_lock_ladder', []))
+
+        ladder = []
+        for rule in raw_ladder:
+            if not isinstance(rule, dict):
+                continue
+            try:
+                trigger_r = float(rule.get('trigger_r', 0))
+                lock_r = float(rule.get('lock_r', 0))
+            except (TypeError, ValueError):
+                continue
+
+            if trigger_r <= 0 or lock_r <= 0:
+                continue
+            # Do not lock more than trigger level itself.
+            lock_r = min(lock_r, trigger_r)
+            ladder.append((trigger_r, lock_r))
+
+        ladder.sort(key=lambda item: item[0])
+        return ladder
+
+    def _apply_profit_lock_ladder(
+        self,
+        script_name,
+        position,
+        favorable_move,
+        risk_percent,
+        trigger_basis_percent=None
+    ):
+        """
+        Move SL into profit based on configured R-multiple ladder.
+        Example for SELL: at 1.5R reached, lock 0.75R by shifting SL below entry.
+        """
+        if risk_percent <= 0:
+            return False
+
+        ladder = self._profit_lock_ladder_for_script(script_name)
+        if not ladder:
+            return False
+
+        entry_price = position['entry_price']
+        position_type = position['type']
+        initial_sl = position.get('initial_sl', position.get('stop_loss', entry_price))
+        risk_points = abs(entry_price - initial_sl)
+        if risk_points <= 0:
+            return False
+
+        basis_percent = float(trigger_basis_percent if trigger_basis_percent and trigger_basis_percent > 0 else risk_percent)
+        current_r = favorable_move / basis_percent
+        best_rule = None
+        for trigger_r, lock_r in ladder:
+            if current_r >= trigger_r:
+                best_rule = (trigger_r, lock_r)
+            else:
+                break
+
+        if best_rule is None:
+            return False
+
+        trigger_r, lock_r = best_rule
+        locked_r = float(position.get('profit_lock_r_locked', 0.0))
+        # If we are already at this lock (or tighter), no need to update.
+        if lock_r <= locked_r + 1e-9:
+            return False
+
+        if position_type == 'BUY':
+            lock_sl = entry_price + (lock_r * risk_points)
+            new_sl = max(position['stop_loss'], lock_sl)
+        else:
+            lock_sl = entry_price - (lock_r * risk_points)
+            new_sl = min(position['stop_loss'], lock_sl)
+
+        if abs(new_sl - position['stop_loss']) < 1e-9:
+            return False
+
+        position['stop_loss'] = new_sl
+        position['profit_lock_r_locked'] = lock_r
+        position['profit_lock_trigger_r_locked'] = trigger_r
+        logger.info(
+            f"LOCK: {script_name}: Profit-lock rung {trigger_r:.2f}R reached; "
+            f"locking {lock_r:.2f}R with SL @ Rs{position['stop_loss']:.2f} "
+            f"(favorable move: {favorable_move:.2f}%, current R: {current_r:.2f}, basis: {basis_percent:.2f}%)"
+        )
+        return True
+
     def _get_entry_swing_sl(self, df, entry_candle_timestamp, side):
         """Return OB zone SL using BigBeluga Volume Order Blocks logic.
 
@@ -931,6 +1084,7 @@ class TradingBot:
         Rule:
         - Initial risk = entry to initial SL distance
         - At 1:1 (favorable move >= risk%), SL moves to cost
+        - Profit-lock ladder shifts SL into profit at configured R milestones
         - For every extra 0.5% favorable move, SL moves by +0.5% (BUY) / -0.5% (SELL)
         """
         self._ensure_position_fields(position, script_name)
@@ -946,11 +1100,14 @@ class TradingBot:
             risk_percent = self.config['trailing_stop_loss_percent']
 
         breakeven_trigger_percent, step_percent = self._trailing_rule_for_script(script_name, risk_percent)
+        # Apply breakeven when either configured % (e.g., 1%) OR 1:1 (risk%) is hit.
+        # "Whichever matches first" means we use the lower threshold.
+        effective_breakeven_trigger_percent = min(float(breakeven_trigger_percent), float(risk_percent))
         favorable_move = self._favorable_move_percent(position_type, entry_price, current_price)
 
         sl_updated = False
 
-        if favorable_move < breakeven_trigger_percent:
+        if favorable_move < effective_breakeven_trigger_percent:
             return sl_updated
 
         if not position['breakeven_done']:
@@ -959,7 +1116,17 @@ class TradingBot:
             sl_updated = True
             logger.info(f"INFO: {script_name}: 1:1 reached. SL moved to cost @ Rs{entry_price:.2f}")
 
-        extra_move = max(0.0, favorable_move - breakeven_trigger_percent)
+        # Profit-lock ladder (R-based) runs after breakeven and before stepped trail.
+        if self._apply_profit_lock_ladder(
+            script_name,
+            position,
+            favorable_move,
+            risk_percent,
+            trigger_basis_percent=effective_breakeven_trigger_percent
+        ):
+            sl_updated = True
+
+        extra_move = max(0.0, favorable_move - effective_breakeven_trigger_percent)
         new_steps = int(extra_move // step_percent)
 
         if new_steps > position['trail_steps_locked']:

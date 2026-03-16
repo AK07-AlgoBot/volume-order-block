@@ -26,6 +26,8 @@ class Trade(BaseModel):
     side: Literal["BUY", "SELL"]
     quantity: float
     entry_price: float | None = None
+    stop_loss: float | None = None
+    target_price: float | None = None
     exit_price: float | None = None
     last_price: float | None = None
     unrealized_pnl: float | None = None
@@ -179,13 +181,171 @@ def _compute_weekly_pnl_from_orders(days: int = 5) -> list[dict]:
     ]
 
 
+def _build_closed_trades_from_orders(limit: int = 300) -> list[dict]:
+    """Reconstruct closed trades from order logs (active + archived)."""
+    order_files = _get_order_log_files()
+    if not order_files:
+        return []
+
+    parsed_events = []
+    for order_file in order_files:
+        lines = order_file.read_text(encoding="utf-8", errors="ignore").splitlines()
+        for raw in lines:
+            match = LINE_PATTERN.search(raw.strip())
+            if not match:
+                continue
+            parsed_events.append(
+                (
+                    _parse_ts(match.group("ts")),
+                    match.group("script").strip(),
+                    match.group("action"),
+                    match.group("side"),
+                    float(match.group("price")),
+                )
+            )
+
+    parsed_events.sort(key=lambda event: event[0])
+    entries = defaultdict(deque)
+    reconstructed: list[dict] = []
+    sequence = 0
+
+    for ts, script, action, side, price in parsed_events:
+        if action == "ENTRY":
+            entries[script].append({"side": side, "price": price, "ts": ts})
+            continue
+
+        if not entries[script]:
+            continue
+
+        entry = entries[script].popleft()
+        lot = float(LOT_SIZES.get(script, 1))
+        if entry["side"] == "BUY" and side == "SELL":
+            realized = (price - entry["price"]) * lot
+        elif entry["side"] == "SELL" and side == "BUY":
+            realized = (entry["price"] - price) * lot
+        else:
+            realized = 0.0
+
+        sequence += 1
+        reconstructed.append(
+            {
+                "id": f"{script}-{int(ts.timestamp() * 1000)}-{sequence}",
+                "symbol": script,
+                "side": entry["side"],
+                "quantity": lot,
+                "entry_price": float(entry["price"]),
+                "exit_price": float(price),
+                "last_price": float(price),
+                "unrealized_pnl": 0.0,
+                "realized_pnl": round(realized, 2),
+                "opened_at": entry["ts"].isoformat(),
+                "closed_at": ts.isoformat(),
+            }
+        )
+
+    # Newest first for UI table
+    reconstructed.reverse()
+    return reconstructed[:limit]
+
+
+def _trade_date_text(trade: dict) -> str:
+    closed_at = str(trade.get("closed_at") or "")
+    if len(closed_at) >= 10:
+        return closed_at[:10]
+    opened_at = str(trade.get("opened_at") or "")
+    if len(opened_at) >= 10:
+        return opened_at[:10]
+    return ""
+
+
+def _normalize_iso_second(value: str | None) -> str:
+    """
+    Normalize timestamp to second precision for dedupe stability.
+    Handles values like:
+    - 2026-03-16T17:20:38.981092
+    - 2026-03-16T17:20:38.980000
+    - 2026-03-16 17:20:38,980
+    """
+    text = str(value or "").strip()
+    if not text:
+        return ""
+
+    text = text.replace(",", ".")
+    # Keep up to seconds only; timezone/frac differences are ignored for dedupe key
+    if len(text) >= 19:
+        return text[:19]
+    return text
+
+
+def _dedupe_closed_trades(trades: list[dict]) -> list[dict]:
+    deduped = []
+    seen = set()
+    for trade in trades:
+        key = (
+            trade.get("symbol"),
+            trade.get("side"),
+            round(float(trade.get("entry_price", 0) or 0), 4),
+            round(float(trade.get("exit_price", 0) or 0), 4),
+            round(float(trade.get("quantity", 0) or 0), 4),
+            _normalize_iso_second(trade.get("opened_at")),
+            _normalize_iso_second(trade.get("closed_at")),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(trade)
+    return deduped
+
+
+def _effective_closed_trades(limit: int = 1000) -> list[dict]:
+    """
+    Source of truth for closed trades:
+    - reconstructed trades from orders.log + archive
+    - merged with in-memory closed trades for immediate UI freshness
+    """
+    reconstructed = _build_closed_trades_from_orders(limit=limit)
+    merged = _dedupe_closed_trades(closed_trades + reconstructed)
+    merged.sort(key=lambda t: t.get("closed_at") or "", reverse=True)
+    return merged[:limit]
+
+
+def _closed_trade_dates(trades: list[dict]) -> list[str]:
+    dates = {d for d in (_trade_date_text(trade) for trade in trades) if d}
+    return sorted(dates, reverse=True)
+
+
+def _filter_closed_trades_by_date(trades: list[dict], date_text: str | None) -> list[dict]:
+    if not date_text:
+        return trades
+    return [trade for trade in trades if _trade_date_text(trade) == date_text]
+
+
 @app.get("/api/dashboard/initial")
 async def dashboard_initial():
+    today_text = datetime.now().date().isoformat()
+    effective_closed = _effective_closed_trades(limit=2000)
+    date_filtered_closed = _filter_closed_trades_by_date(effective_closed, today_text)
     return {
         "live_trades": list(live_trades.values()),
-        "closed_trades": closed_trades,
+        "closed_trades": date_filtered_closed,
+        "closed_trade_dates": _closed_trade_dates(effective_closed),
+        "closed_trade_selected_date": today_text,
         "weekly_pnl": _compute_weekly_pnl_from_orders(days=5),
         "server_time": datetime.utcnow().isoformat(),
+    }
+
+
+@app.get("/api/dashboard/closed-trades")
+async def dashboard_closed_trades(date: str | None = None):
+    # date expected in YYYY-MM-DD format; invalid format returns empty set safely.
+    if date and not re.match(r"^\d{4}-\d{2}-\d{2}$", date):
+        return {"closed_trades": [], "closed_trade_dates": [], "selected_date": date}
+
+    effective_closed = _effective_closed_trades(limit=2000)
+    return {
+        "closed_trades": _filter_closed_trades_by_date(effective_closed, date),
+        "closed_trade_dates": _closed_trade_dates(effective_closed),
+        "selected_date": date,
     }
 
 
