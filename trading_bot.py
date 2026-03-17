@@ -59,10 +59,13 @@ def send_trade_notification(trade: dict, chat_id: int | str = None) -> bool:
     action = trade.get("action")
     quantity = trade.get("quantity")
     price = trade.get("price")
+    reason = str(trade.get("reason") or "").upper()
     stop_loss = trade.get("stop_loss")
     target_price = trade.get("target_price")
+    realized_pnl = trade.get("realized_pnl")
     win_percent = trade.get("win_percent")
     chart_percent = trade.get("chart_percent")
+    chart_volume = trade.get("chart_volume")
     timestamp = trade.get("timestamp")
 
     if isinstance(timestamp, datetime):
@@ -70,16 +73,37 @@ def send_trade_notification(trade: dict, chat_id: int | str = None) -> bool:
     else:
         ts_str = str(timestamp)
 
+    entry_reasons = {"EMA_CROSSOVER"}
+    exit_reasons = {
+        "STOP_LOSS_HIT",
+        "TARGET_HIT",
+        "OB_ZONE_BREACH",
+        "OPPOSITE_CROSSOVER",
+        "EOD_SQUAREOFF",
+        "PORTFOLIO_STOP_LOSS",
+        "PORTFOLIO_STOP",
+    }
+
+    if reason in exit_reasons:
+        title = "🔴 *Trade Closed*"
+    elif reason in entry_reasons:
+        title = "🟢 *New Trade Executed*"
+    else:
+        title = "✅ *Trade Update*"
+
     message = (
-        f"✅ *Trade Executed*\n"
+        f"{title}\n"
         f"*Symbol*: `{symbol}`\n"
         f"*Action*: *{str(action).upper()}*\n"
         f"*Quantity*: `{quantity}`\n"
         f"*Price*: `{price}`\n"
+        + (f"\n*Reason*: `{reason}`" if reason else "")
         + (f"\n*SL*: `{float(stop_loss):.2f}`" if stop_loss is not None else "")
         + (f"\n*Target*: `{float(target_price):.2f}`" if target_price is not None else "")
         + (f"\n*Chart %*: `{float(chart_percent):.2f}%`" if chart_percent is not None else "")
+        + (f"\n*Chart Vol*: `{float(chart_volume):.0f}`" if chart_volume is not None else "")
         + (f"\n*Win %*: `{float(win_percent):.1f}%`" if win_percent is not None else "")
+        + (f"\n*Trade P&L*: `{float(realized_pnl):.2f}`" if realized_pnl is not None else "")
         + "\n"
         f"*Time*: `{ts_str}`"
     )
@@ -299,6 +323,17 @@ TRADING_CONFIG = {
     },
     "trade_probability_reference_level_percent": 33.66,
     "order_block_lookback_candles": 12,  # Search depth for latest opposite candle (5m) as order block
+    "chart_ob_max_active_per_side": 5,   # Match TradingView "Volume Order Blocks 5" visible pool
+    # NSE-only rupee money-lock overlay:
+    # - At trigger_pnl, lock first lock_increment_pnl above cost.
+    # - For every step_pnl extra MFE, lock one more lock_increment_pnl.
+    "nse_money_lock": {
+        "enabled": True,
+        "scripts": ["NIFTY", "BANKNIFTY", "SENSEX"],
+        "trigger_pnl": 5000.0,
+        "step_pnl": 500.0,
+        "lock_increment_pnl": 500.0
+    },
     "loop_interval": 10,  # seconds between each check
     "quantity": 1,  # Number of lots per order
     "segment_scripts": {
@@ -605,6 +640,15 @@ class TradingBot:
         if 'profit_lock_trigger_r_locked' not in position:
             position['profit_lock_trigger_r_locked'] = 0.0
 
+        if 'max_favorable_pnl' not in position:
+            position['max_favorable_pnl'] = 0.0
+
+        if 'money_lock_steps_locked' not in position:
+            position['money_lock_steps_locked'] = 0
+
+        if 'money_lock_pnl_locked' not in position:
+            position['money_lock_pnl_locked'] = 0.0
+
         if 'target_price' not in position and entry_price > 0:
             target_percent = self.config['target_percent'] / 100
             if position_type == 'BUY':
@@ -616,6 +660,8 @@ class TradingBot:
             position['win_percent'] = None
         if 'chart_percent' not in position:
             position['chart_percent'] = None
+        if 'chart_volume' not in position:
+            position['chart_volume'] = None
         if 'win_percent_source' not in position:
             position['win_percent_source'] = "legacy_backfill_pending"
         if script_name and position.get('win_percent_source') in {
@@ -685,7 +731,10 @@ class TradingBot:
             if pd.isna(signal_ts):
                 return None
 
-            return self._compute_chart_ob_percent(signal_df, signal_ts, side)
+            chart_pct, chart_vol = self._compute_chart_ob_snapshot(signal_df, signal_ts, side)
+            if chart_vol is not None:
+                position['chart_volume'] = chart_vol
+            return chart_pct
         except Exception:
             return None
 
@@ -720,6 +769,11 @@ class TradingBot:
             "chart_percent": (
                 float(position.get("chart_percent"))
                 if position.get("chart_percent") is not None
+                else None
+            ),
+            "chart_volume": (
+                float(position.get("chart_volume"))
+                if position.get("chart_volume") is not None
                 else None
             ),
             "win_percent": (
@@ -815,6 +869,8 @@ class TradingBot:
         target_price=None,
         win_percent=None,
         chart_percent=None,
+        chart_volume=None,
+        realized_pnl=None,
     ):
         order_token = self._get_order_token(script_name)
         order_qty = self._get_order_quantity(script_name)
@@ -825,10 +881,13 @@ class TradingBot:
                 "action": side,
                 "quantity": order_qty,
                 "price": price,
+                "reason": reason,
                 "stop_loss": stop_loss,
                 "target_price": target_price,
                 "win_percent": win_percent,
                 "chart_percent": chart_percent,
+                "chart_volume": chart_volume,
+                "realized_pnl": realized_pnl,
                 "timestamp": self._now_ist(),
             }
             if not send_trade_notification(trade):
@@ -916,59 +975,110 @@ class TradingBot:
             "levels": level_rows,
         }
 
-    def _compute_chart_ob_percent(self, df, entry_candle_timestamp, side):
+    def _compute_chart_ob_snapshot(self, df, anchor_timestamp, side):
         """
-        Approximate chart-style OB percentage:
-        selected OB candle volume as % share of same-category OB candidate volumes
-        in the configured lookback window.
+        TradingView-style active OB volume share snapshot.
+        - Build bullish/bearish OBs on crossover candles.
+        - Invalidate OBs when close breaches their boundary.
+        - Selected OB = latest active OB of requested side at anchor time.
+        - Chart % = selected OB volume / sum(active same-side OB volumes) * 100
+        Returns: (chart_percent, selected_ob_volume)
         """
         if (
             df is None
             or df.empty
-            or entry_candle_timestamp is None
+            or anchor_timestamp is None
             or 'timestamp' not in df.columns
             or 'open' not in df.columns
             or 'close' not in df.columns
+            or 'high' not in df.columns
+            or 'low' not in df.columns
             or 'volume' not in df.columns
+            or 'crossover' not in df.columns
+            or 'signal' not in df.columns
         ):
-            return None
+            return None, None
 
         working = df.sort_values('timestamp').reset_index(drop=True)
-        eligible = working[working['timestamp'] <= entry_candle_timestamp]
+        eligible = working[working['timestamp'] <= anchor_timestamp]
         if eligible.empty:
-            return None
+            return None, None
 
-        entry_idx = int(eligible.index[-1])
-        prev_idx = entry_idx - 1
-        if prev_idx < 0:
-            return None
+        lookback = max(2, int(self.config.get('ema_long', 18)))
+        max_active = max(1, int(self.config.get('chart_ob_max_active_per_side', 5)))
+        active_bullish = []
+        active_bearish = []
 
-        lookback = max(1, int(self.config.get('order_block_lookback_candles', 12)))
-        start_idx = max(0, prev_idx - lookback + 1)
+        for idx in range(len(eligible)):
+            row = eligible.iloc[idx]
+            close_price = float(row['close'])
 
-        candidate_volumes = []
-        selected_volume = None
-        for idx in range(prev_idx, start_idx - 1, -1):
-            row = working.iloc[idx]
-            is_bearish = row['close'] < row['open']
-            is_bullish = row['close'] > row['open']
-            volume = abs(float(row.get('volume', 0.0) or 0.0))
-            if side == 'BUY' and is_bearish:
-                candidate_volumes.append(volume)
-                if selected_volume is None:
-                    selected_volume = volume
-            elif side == 'SELL' and is_bullish:
-                candidate_volumes.append(volume)
-                if selected_volume is None:
-                    selected_volume = volume
+            # Invalidation first (matches live OB lifecycle behavior).
+            active_bullish = [ob for ob in active_bullish if close_price >= ob['bottom']]
+            active_bearish = [ob for ob in active_bearish if close_price <= ob['top']]
+            if len(active_bullish) > max_active:
+                active_bullish = active_bullish[-max_active:]
+            if len(active_bearish) > max_active:
+                active_bearish = active_bearish[-max_active:]
 
-        if not candidate_volumes or selected_volume is None:
-            return None
+            if bool(row.get('crossover')):
+                signal = int(row.get('signal', 0) or 0)
+                start_idx = max(0, idx - lookback + 1)
+                win = eligible.iloc[start_idx:idx + 1]
+                if win.empty:
+                    continue
 
-        total_volume = sum(candidate_volumes)
-        if total_volume <= 0:
-            return None
-        return round((selected_volume / total_volume) * 100.0, 2)
+                if signal == 1:
+                    ref_idx = win['low'].idxmin()
+                    ref = eligible.loc[ref_idx]
+                    bottom = float(ref['low'])
+                    top = float(ref['high'])
+                    ref_pos = int(eligible.index.get_loc(ref_idx))
+                    segment_start = min(ref_pos, idx)
+                    segment_end = max(ref_pos, idx)
+                    segment = eligible.iloc[segment_start:segment_end + 1]
+                    ob_volume = float(segment['volume'].abs().sum())
+                    ob_time = ref['timestamp']
+                    active_bullish.append(
+                        {"time": ob_time, "top": top, "bottom": bottom, "volume": ob_volume}
+                    )
+                    if len(active_bullish) > max_active:
+                        active_bullish = active_bullish[-max_active:]
+                elif signal == -1:
+                    ref_idx = win['high'].idxmax()
+                    ref = eligible.loc[ref_idx]
+                    top = float(ref['high'])
+                    bottom = float(ref['low'])
+                    ref_pos = int(eligible.index.get_loc(ref_idx))
+                    segment_start = min(ref_pos, idx)
+                    segment_end = max(ref_pos, idx)
+                    segment = eligible.iloc[segment_start:segment_end + 1]
+                    ob_volume = float(segment['volume'].abs().sum())
+                    ob_time = ref['timestamp']
+                    active_bearish.append(
+                        {"time": ob_time, "top": top, "bottom": bottom, "volume": ob_volume}
+                    )
+                    if len(active_bearish) > max_active:
+                        active_bearish = active_bearish[-max_active:]
+
+        wanted = str(side).upper()
+        same_side_obs = active_bullish if wanted == "BUY" else active_bearish
+        same_side_obs = same_side_obs[-max_active:]
+        if not same_side_obs:
+            return None, None
+
+        selected = same_side_obs[-1]
+        selected_volume = float(selected.get('volume', 0.0) or 0.0)
+        total_volume = float(sum(ob.get('volume', 0.0) or 0.0 for ob in same_side_obs))
+        if selected_volume <= 0 or total_volume <= 0:
+            return None, None
+
+        chart_percent = round((selected_volume / total_volume) * 100.0, 2)
+        return chart_percent, selected_volume
+
+    def _compute_chart_ob_percent(self, df, entry_candle_timestamp, side):
+        chart_percent, _ = self._compute_chart_ob_snapshot(df, entry_candle_timestamp, side)
+        return chart_percent
 
     def _build_percent_levels_context(self, level_metrics):
         """
@@ -1162,7 +1272,13 @@ class TradingBot:
                     script_name,
                     exit_side,
                     market_price,
-                    "EOD_SQUAREOFF"
+                    "EOD_SQUAREOFF",
+                    realized_pnl=self._calculate_realized_pnl(
+                        position.get('type', 'BUY'),
+                        float(position.get('entry_price', market_price)),
+                        float(market_price),
+                        float(position.get('quantity', self._get_order_quantity(script_name)))
+                    ),
                 )
                 if not success:
                     continue
@@ -1402,14 +1518,26 @@ class TradingBot:
         # "Whichever matches first" means we use the lower threshold.
         effective_breakeven_trigger_percent = min(float(breakeven_trigger_percent), float(risk_percent))
         favorable_move = self._favorable_move_percent(position_type, entry_price, current_price)
+        quantity = float(position.get('quantity', self._get_order_quantity(script_name)))
+        favorable_pnl = self._calculate_realized_pnl(position_type, entry_price, current_price, quantity)
 
         sl_updated = False
 
-        if favorable_move < effective_breakeven_trigger_percent:
+        if favorable_pnl > float(position.get('max_favorable_pnl', 0.0)):
+            position['max_favorable_pnl'] = favorable_pnl
+
+        if self._apply_nse_money_lock(script_name, position):
+            sl_updated = True
+
+        # If neither money-lock nor % trigger moved us to breakeven yet, wait.
+        if favorable_move < effective_breakeven_trigger_percent and not position['breakeven_done']:
             return sl_updated
 
         if not position['breakeven_done']:
-            position['stop_loss'] = entry_price
+            if position_type == 'BUY':
+                position['stop_loss'] = max(position['stop_loss'], entry_price)
+            else:
+                position['stop_loss'] = min(position['stop_loss'], entry_price)
             position['breakeven_done'] = True
             sl_updated = True
             logger.info(f"INFO: {script_name}: 1:1 reached. SL moved to cost @ Rs{entry_price:.2f}")
@@ -1444,6 +1572,62 @@ class TradingBot:
             )
 
         return sl_updated
+
+    def _apply_nse_money_lock(self, script_name, position):
+        cfg = self.config.get('nse_money_lock', {}) or {}
+        if not bool(cfg.get('enabled', False)):
+            return False
+
+        scripts = cfg.get('scripts') or self.config.get('segment_scripts', {}).get('NSE', [])
+        if script_name not in scripts:
+            return False
+
+        trigger_pnl = float(cfg.get('trigger_pnl', 5000.0))
+        step_pnl = float(cfg.get('step_pnl', 500.0))
+        lock_increment = float(cfg.get('lock_increment_pnl', 500.0))
+        if trigger_pnl <= 0 or step_pnl <= 0 or lock_increment <= 0:
+            return False
+
+        max_favorable_pnl = float(position.get('max_favorable_pnl', 0.0))
+        if max_favorable_pnl < trigger_pnl:
+            return False
+
+        rung = int((max_favorable_pnl - trigger_pnl) // step_pnl) + 1
+        if rung <= 0:
+            return False
+
+        target_lock_pnl = rung * lock_increment
+        prev_locked_pnl = float(position.get('money_lock_pnl_locked', 0.0))
+        if target_lock_pnl <= prev_locked_pnl:
+            return False
+
+        qty = float(position.get('quantity', self._get_order_quantity(script_name)))
+        if qty <= 0:
+            return False
+
+        entry = float(position.get('entry_price', 0.0))
+        side = str(position.get('type', '')).upper()
+        if side == 'BUY':
+            lock_sl = entry + (target_lock_pnl / qty)
+            new_sl = max(float(position.get('stop_loss', entry)), lock_sl)
+        elif side == 'SELL':
+            lock_sl = entry - (target_lock_pnl / qty)
+            new_sl = min(float(position.get('stop_loss', entry)), lock_sl)
+        else:
+            return False
+
+        if abs(new_sl - float(position.get('stop_loss', entry))) < 1e-9:
+            return False
+
+        position['stop_loss'] = new_sl
+        position['money_lock_steps_locked'] = max(int(position.get('money_lock_steps_locked', 0)), rung)
+        position['money_lock_pnl_locked'] = target_lock_pnl
+        position['breakeven_done'] = True
+        logger.info(
+            f"MONEY-LOCK: {script_name} rung={rung} | max_favorable_pnl={max_favorable_pnl:.2f} | "
+            f"locked_pnl={target_lock_pnl:.2f} | SL @ Rs{new_sl:.2f}"
+        )
+        return True
 
     def _resample_for_signal(self, df):
         """Resample API candles to strategy timeframe for signal generation."""
@@ -1607,6 +1791,8 @@ class TradingBot:
                 'script_name': script_name,
                 'instrument_key': instrument_key,
                 'current_price': current_price,
+                'current_high': float(latest.get('high', current_price)),
+                'current_low': float(latest.get('low', current_price)),
                 'signal': signal,
                 'signal_status': signal_status,
                 'color': color,
@@ -1675,6 +1861,8 @@ class TradingBot:
             script_name = data['script_name']
             signal = data['signal']
             current_price = data['current_price']
+            current_high = float(data.get('current_high', current_price) or current_price)
+            current_low = float(data.get('current_low', current_price) or current_price)
             crossover = data['crossover']
             instrument_key = data['instrument_key']
             confirmed_signal = data.get('entry_signal', signal)
@@ -1712,13 +1900,22 @@ class TradingBot:
 
                 # Stop loss check
                 stop_loss = position['stop_loss']
-                if position['type'] == 'BUY' and current_price <= stop_loss:
+                if position['type'] == 'BUY' and current_low <= stop_loss:
                     logger.warning(
                         f"ALERT: SL hit for {script_name}. Closing BUY @ Rs{current_price:.2f} "
-                        f"(SL: Rs{stop_loss:.2f})"
+                        f"(SL: Rs{stop_loss:.2f}, low: Rs{current_low:.2f})"
                     )
                     success, order_result = self._place_order_with_result(
-                        script_name, "SELL", current_price, "STOP_LOSS_HIT"
+                        script_name,
+                        "SELL",
+                        current_price,
+                        "STOP_LOSS_HIT",
+                        realized_pnl=self._calculate_realized_pnl(
+                            position['type'],
+                            float(position['entry_price']),
+                            float(current_price),
+                            float(position.get('quantity', self._get_order_quantity(script_name)))
+                        ),
                     )
                     if not success:
                         continue
@@ -1736,13 +1933,22 @@ class TradingBot:
                     self.save_state()
                     continue
 
-                if position['type'] == 'SELL' and current_price >= stop_loss:
+                if position['type'] == 'SELL' and current_high >= stop_loss:
                     logger.warning(
                         f"ALERT: SL hit for {script_name}. Closing SELL @ Rs{current_price:.2f} "
-                        f"(SL: Rs{stop_loss:.2f})"
+                        f"(SL: Rs{stop_loss:.2f}, high: Rs{current_high:.2f})"
                     )
                     success, order_result = self._place_order_with_result(
-                        script_name, "BUY", current_price, "STOP_LOSS_HIT"
+                        script_name,
+                        "BUY",
+                        current_price,
+                        "STOP_LOSS_HIT",
+                        realized_pnl=self._calculate_realized_pnl(
+                            position['type'],
+                            float(position['entry_price']),
+                            float(current_price),
+                            float(position.get('quantity', self._get_order_quantity(script_name)))
+                        ),
                     )
                     if not success:
                         continue
@@ -1762,14 +1968,28 @@ class TradingBot:
 
                 # Target check
                 favorable_move = self._favorable_move_percent(position['type'], position['entry_price'], current_price)
-                if favorable_move >= self.config['target_percent']:
+                target_price = float(position.get('target_price', position['entry_price']))
+                target_hit = (
+                    (position['type'] == 'BUY' and current_high >= target_price) or
+                    (position['type'] == 'SELL' and current_low <= target_price)
+                )
+                if target_hit:
                     logger.info(
                         f" Target hit for {script_name}. Closing {position['type']} @ Rs{current_price:.2f} "
-                        f"(move: {favorable_move:.2f}%)"
+                        f"(target: Rs{target_price:.2f}, high: Rs{current_high:.2f}, low: Rs{current_low:.2f}, move: {favorable_move:.2f}%)"
                     )
                     exit_side = "SELL" if position['type'] == 'BUY' else "BUY"
                     success, order_result = self._place_order_with_result(
-                        script_name, exit_side, current_price, "TARGET_HIT"
+                        script_name,
+                        exit_side,
+                        current_price,
+                        "TARGET_HIT",
+                        realized_pnl=self._calculate_realized_pnl(
+                            position['type'],
+                            float(position['entry_price']),
+                            float(current_price),
+                            float(position.get('quantity', self._get_order_quantity(script_name)))
+                        ),
                     )
                     if not success:
                         continue
@@ -1815,7 +2035,16 @@ class TradingBot:
                     )
                     exit_side = "SELL" if position['type'] == 'BUY' else "BUY"
                     success, order_result = self._place_order_with_result(
-                        script_name, exit_side, current_price, reason
+                        script_name,
+                        exit_side,
+                        current_price,
+                        reason,
+                        realized_pnl=self._calculate_realized_pnl(
+                            position['type'],
+                            float(position['entry_price']),
+                            float(current_price),
+                            float(position.get('quantity', self._get_order_quantity(script_name)))
+                        ),
                     )
                     if not success:
                         continue
@@ -1883,10 +2112,15 @@ class TradingBot:
                 )
                 levels_ctx = self._build_percent_levels_context(level_metrics)
                 chart_percent = None
+                chart_volume = None
                 if entry_signal == 1:
-                    chart_percent = self._compute_chart_ob_percent(signal_df, entry_candle_timestamp, 'BUY')
+                    chart_percent, chart_volume = self._compute_chart_ob_snapshot(
+                        signal_df, entry_candle_timestamp, 'BUY'
+                    )
                 elif entry_signal == -1:
-                    chart_percent = self._compute_chart_ob_percent(signal_df, entry_candle_timestamp, 'SELL')
+                    chart_percent, chart_volume = self._compute_chart_ob_snapshot(
+                        signal_df, entry_candle_timestamp, 'SELL'
+                    )
 
                 if entry_crossover:
                     # --- EMA Slope filter: EMA18 must slope in trade direction ---
@@ -1903,7 +2137,8 @@ class TradingBot:
                             skip_extra = (
                                 f"ema18={entry_ema_long:.4f}; prev={entry_ema_long_prev:.4f}; "
                                 f"ema_sep_pct={ema_sep_pct:.4f}; trade_prob={trade_prob:.1f}; "
-                                f"trade_prob_bucket={trade_prob_bucket}; chart_pct={chart_percent}; {levels_ctx}"
+                                f"trade_prob_bucket={trade_prob_bucket}; chart_pct={chart_percent}; "
+                                f"chart_vol={chart_volume}; {levels_ctx}"
                             )
                             self._log_skip_event(
                                 script_name, "BUY", entry_price, "EMA18_NOT_RISING", skip_extra
@@ -1921,7 +2156,7 @@ class TradingBot:
                             skip_extra = (
                                 f"ema_sep_pct={ema_sep_pct:.4f}; min_sep_pct={min_sep_pct:.4f}; "
                                 f"trade_prob={trade_prob:.1f}; trade_prob_bucket={trade_prob_bucket}; "
-                                f"chart_pct={chart_percent}; {levels_ctx}"
+                                f"chart_pct={chart_percent}; chart_vol={chart_volume}; {levels_ctx}"
                             )
                             self._log_skip_event(
                                 script_name, "BUY", entry_price, "EMA_SEPARATION_TOO_SMALL", skip_extra
@@ -1942,7 +2177,8 @@ class TradingBot:
                             skip_extra = (
                                 f"ema18={entry_ema_long:.4f}; prev={entry_ema_long_prev:.4f}; "
                                 f"ema_sep_pct={ema_sep_pct:.4f}; trade_prob={trade_prob:.1f}; "
-                                f"trade_prob_bucket={trade_prob_bucket}; chart_pct={chart_percent}; {levels_ctx}"
+                                f"trade_prob_bucket={trade_prob_bucket}; chart_pct={chart_percent}; "
+                                f"chart_vol={chart_volume}; {levels_ctx}"
                             )
                             self._log_skip_event(
                                 script_name, "SELL", entry_price, "EMA18_NOT_FALLING", skip_extra
@@ -1960,7 +2196,7 @@ class TradingBot:
                             skip_extra = (
                                 f"ema_sep_pct={ema_sep_pct:.4f}; min_sep_pct={min_sep_pct:.4f}; "
                                 f"trade_prob={trade_prob:.1f}; trade_prob_bucket={trade_prob_bucket}; "
-                                f"chart_pct={chart_percent}; {levels_ctx}"
+                                f"chart_pct={chart_percent}; chart_vol={chart_volume}; {levels_ctx}"
                             )
                             self._log_skip_event(
                                 script_name, "SELL", entry_price, "EMA_SEPARATION_TOO_SMALL", skip_extra
@@ -1980,7 +2216,8 @@ class TradingBot:
                             )
                             skip_extra = (
                                 f"sl={initial_sl}; entry={entry_price:.2f}; trade_prob={trade_prob:.1f}; "
-                                f"trade_prob_bucket={trade_prob_bucket}; chart_pct={chart_percent}; {levels_ctx}"
+                                f"trade_prob_bucket={trade_prob_bucket}; chart_pct={chart_percent}; "
+                                f"chart_vol={chart_volume}; {levels_ctx}"
                             )
                             self._log_skip_event(
                                 script_name, "BUY", entry_price, "INVALID_SWING_SL", skip_extra
@@ -2006,6 +2243,7 @@ class TradingBot:
                             target_price=target_price,
                             win_percent=trade_prob,
                             chart_percent=chart_percent,
+                            chart_volume=chart_volume,
                         )
                         if not success:
                             self.last_entry_candle_processed[script_name] = entry_candle_timestamp
@@ -2022,6 +2260,7 @@ class TradingBot:
                             'signal_ema_short': entry_ema_short,
                             'signal_ema_long': entry_ema_long,
                             'chart_percent': chart_percent,
+                            'chart_volume': chart_volume,
                             'win_percent': trade_prob,
                             'win_percent_source': 'model_v2',
                             'ob_percent': ob_percent,
@@ -2045,6 +2284,7 @@ class TradingBot:
                                 f"sl={initial_sl:.2f}; target={target_price:.2f}; "
                                 f"ob_pct={ob_percent:.2f}; "
                                 f"chart_pct={chart_percent}; "
+                                f"chart_vol={chart_volume}; "
                                 f"ema_sep_pct={ema_sep_pct:.4f}; "
                                 f"trade_prob={trade_prob:.1f}; trade_prob_bucket={trade_prob_bucket}; "
                                 f"{levels_ctx}; "
@@ -2070,7 +2310,8 @@ class TradingBot:
                             )
                             skip_extra = (
                                 f"sl={initial_sl}; entry={entry_price:.2f}; trade_prob={trade_prob:.1f}; "
-                                f"trade_prob_bucket={trade_prob_bucket}; chart_pct={chart_percent}; {levels_ctx}"
+                                f"trade_prob_bucket={trade_prob_bucket}; chart_pct={chart_percent}; "
+                                f"chart_vol={chart_volume}; {levels_ctx}"
                             )
                             self._log_skip_event(
                                 script_name, "SELL", entry_price, "INVALID_SWING_SL", skip_extra
@@ -2096,6 +2337,7 @@ class TradingBot:
                             target_price=target_price,
                             win_percent=trade_prob,
                             chart_percent=chart_percent,
+                            chart_volume=chart_volume,
                         )
                         if not success:
                             self.last_entry_candle_processed[script_name] = entry_candle_timestamp
@@ -2112,6 +2354,7 @@ class TradingBot:
                             'signal_ema_short': entry_ema_short,
                             'signal_ema_long': entry_ema_long,
                             'chart_percent': chart_percent,
+                            'chart_volume': chart_volume,
                             'win_percent': trade_prob,
                             'win_percent_source': 'model_v2',
                             'ob_percent': ob_percent,
@@ -2135,6 +2378,7 @@ class TradingBot:
                                 f"sl={initial_sl:.2f}; target={target_price:.2f}; "
                                 f"ob_pct={ob_percent:.2f}; "
                                 f"chart_pct={chart_percent}; "
+                                f"chart_vol={chart_volume}; "
                                 f"ema_sep_pct={ema_sep_pct:.4f}; "
                                 f"trade_prob={trade_prob:.1f}; trade_prob_bucket={trade_prob_bucket}; "
                                 f"{levels_ctx}; "
