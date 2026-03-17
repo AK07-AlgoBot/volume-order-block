@@ -148,16 +148,20 @@ table {
   width: 62px;
 }
 
-.trade-table .col-qty {
-  width: 72px;
-}
-
 .trade-table .col-price {
   width: 78px;
 }
 
 .trade-table .col-pnl {
   width: 116px;
+}
+
+.trade-table .col-win {
+  width: 74px;
+}
+
+.trade-table .col-chart {
+  width: 82px;
 }
 
 .trade-table .col-datetime {
@@ -231,6 +235,26 @@ tr:last-child td {
 
 .live-trades-table .col-left {
   text-align: left;
+}
+
+.live-trades-table .col-price {
+  width: 74px;
+}
+
+.live-trades-table .col-pnl {
+  width: 106px;
+}
+
+.live-trades-table .col-win {
+  width: 64px;
+}
+
+.live-trades-table .col-chart {
+  width: 70px;
+}
+
+.live-trades-table .col-datetime {
+  width: 156px;
 }
 
 .live-trades-table .col-center {

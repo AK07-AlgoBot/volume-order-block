@@ -8,6 +8,8 @@ import time
 import logging
 import json
 import sys
+import os
+import atexit
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from pathlib import Path
@@ -57,6 +59,10 @@ def send_trade_notification(trade: dict, chat_id: int | str = None) -> bool:
     action = trade.get("action")
     quantity = trade.get("quantity")
     price = trade.get("price")
+    stop_loss = trade.get("stop_loss")
+    target_price = trade.get("target_price")
+    win_percent = trade.get("win_percent")
+    chart_percent = trade.get("chart_percent")
     timestamp = trade.get("timestamp")
 
     if isinstance(timestamp, datetime):
@@ -70,6 +76,11 @@ def send_trade_notification(trade: dict, chat_id: int | str = None) -> bool:
         f"*Action*: *{str(action).upper()}*\n"
         f"*Quantity*: `{quantity}`\n"
         f"*Price*: `{price}`\n"
+        + (f"\n*SL*: `{float(stop_loss):.2f}`" if stop_loss is not None else "")
+        + (f"\n*Target*: `{float(target_price):.2f}`" if target_price is not None else "")
+        + (f"\n*Chart %*: `{float(chart_percent):.2f}%`" if chart_percent is not None else "")
+        + (f"\n*Win %*: `{float(win_percent):.1f}%`" if win_percent is not None else "")
+        + "\n"
         f"*Time*: `{ts_str}`"
     )
 
@@ -157,7 +168,7 @@ class DashboardClient:
 
 # Upstox API Configuration
 API_CONFIG = {
-    "access_token": "eyJ0eXAiOiJKV1QiLCJrZXlfaWQiOiJza192MS4wIiwiYWxnIjoiSFMyNTYifQ.eyJzdWIiOiI2RUJBVTQiLCJqdGkiOiI2OWI3NzM3ZTA4NDNlNjRmODU4ZDgwNTgiLCJpc011bHRpQ2xpZW50IjpmYWxzZSwiaXNQbHVzUGxhbiI6ZmFsc2UsImlhdCI6MTc3MzYzMDMzNCwiaXNzIjoidWRhcGktZ2F0ZXdheS1zZXJ2aWNlIiwiZXhwIjoxNzczNjk4NDAwfQ.A6Wfa3NAhbiFUmUIuVm5w4eIXoqU0PsecdI5SBPAahs",
+    "access_token": "eyJ0eXAiOiJKV1QiLCJrZXlfaWQiOiJza192MS4wIiwiYWxnIjoiSFMyNTYifQ.eyJzdWIiOiI2RUJBVTQiLCJqdGkiOiI2OWI4YzU0Yjg2NmJlYzJiNjlkOGMxM2EiLCJpc011bHRpQ2xpZW50IjpmYWxzZSwiaXNQbHVzUGxhbiI6ZmFsc2UsImlhdCI6MTc3MzcxNjgxMSwiaXNzIjoidWRhcGktZ2F0ZXdheS1zZXJ2aWNlIiwiZXhwIjoxNzczNzg0ODAwfQ.2JnhQCpL0wimjino62wtjuhncazGK0SQMJu26vclGJ8",
     "api_key": "d9df59d8-e3c8-491e-9a7a-0bd19805ba8d",
     "api_secret": "wu5npsei6y",
     "base_url": "https://api.upstox.com/v2"
@@ -279,6 +290,14 @@ TRADING_CONFIG = {
         "GOLDMINI": 0.03,
         "SILVERMINI": 0.03
     },
+    # Heuristic confidence score (0-100) logged as trade_prob for ENTRY/SKIP analysis.
+    "trade_probability_weights": {
+        "ema_slope": 0.25,
+        "ema_sep": 0.25,
+        "ob_quality": 0.30,
+        "level_proximity": 0.20
+    },
+    "trade_probability_reference_level_percent": 33.66,
     "order_block_lookback_candles": 12,  # Search depth for latest opposite candle (5m) as order block
     "loop_interval": 10,  # seconds between each check
     "quantity": 1,  # Number of lots per order
@@ -303,6 +322,7 @@ STATE_FILE = Path("trading_state.json")
 LOG_FILE = Path("trading_bot.log")
 ORDER_LOG_FILE = Path("orders.log")
 MARKET_STATUS_LOG_FILE = Path("market_status.log")
+LOCK_FILE = Path("trading_bot.lock")
 
 # ============================================================================
 # LOGGING SETUP
@@ -592,6 +612,19 @@ class TradingBot:
             elif position_type == 'SELL':
                 position['target_price'] = entry_price * (1 - target_percent)
 
+        if 'win_percent' not in position:
+            position['win_percent'] = None
+        if 'chart_percent' not in position:
+            position['chart_percent'] = None
+        if 'win_percent_source' not in position:
+            position['win_percent_source'] = "legacy_backfill_pending"
+        if script_name and position.get('win_percent_source') in {
+            "legacy_backfill_pending",
+            "legacy_backfill_v1",
+        }:
+            position['win_percent'] = self._backfill_win_percent(script_name, position)
+            position['win_percent_source'] = "legacy_backfill_v2"
+
         if 'entry_time' not in position:
             position['entry_time'] = datetime.now().isoformat()
 
@@ -601,6 +634,60 @@ class TradingBot:
         if 'trade_id' not in position:
             script_for_id = script_name or "UNKNOWN"
             position['trade_id'] = self._build_trade_id(script_for_id, position['entry_time'])
+
+    def _backfill_win_percent(self, script_name, position):
+        """
+        Estimate win% for legacy live positions that were opened before win_percent
+        started getting stored explicitly.
+        """
+        try:
+            ema_short = float(position.get('signal_ema_short', 0.0) or 0.0)
+            ema_long = float(position.get('signal_ema_long', 0.0) or 0.0)
+            side = str(position.get('type', '')).upper()
+            if side == 'BUY':
+                ema_slope_ok = ema_short >= ema_long
+            elif side == 'SELL':
+                ema_slope_ok = ema_short <= ema_long
+            else:
+                ema_slope_ok = False
+
+            ema_sep_pct = abs(ema_short - ema_long) / ema_long * 100 if ema_long > 0 else 0.0
+            min_sep_pct = self._get_min_ema_separation_percent(script_name)
+            ob_percent = float(position.get('ob_percent', 0.0) or 0.0)
+
+            probability, _ = self._estimate_trade_probability(
+                script_name=script_name,
+                ema_slope_ok=ema_slope_ok,
+                ema_sep_pct=ema_sep_pct,
+                min_sep_pct=min_sep_pct,
+                ob_percent=ob_percent,
+                level_metrics=None,
+            )
+            return float(probability)
+        except Exception:
+            return None
+
+    def _backfill_chart_percent(self, script_name, position, signal_df):
+        """
+        Backfill chart_percent for legacy open positions using stored signal_time
+        and current signal dataframe.
+        """
+        try:
+            side = str(position.get('type', '')).upper()
+            if side not in {"BUY", "SELL"}:
+                return None
+
+            signal_time_raw = position.get('signal_time')
+            if not signal_time_raw:
+                return None
+
+            signal_ts = pd.to_datetime(signal_time_raw, errors='coerce')
+            if pd.isna(signal_ts):
+                return None
+
+            return self._compute_chart_ob_percent(signal_df, signal_ts, side)
+        except Exception:
+            return None
 
     @staticmethod
     def _build_trade_id(script_name, opened_at):
@@ -630,6 +717,16 @@ class TradingBot:
             "entry_price": entry_price,
             "stop_loss": float(position.get("stop_loss", entry_price)),
             "target_price": float(position.get("target_price", entry_price)),
+            "chart_percent": (
+                float(position.get("chart_percent"))
+                if position.get("chart_percent") is not None
+                else None
+            ),
+            "win_percent": (
+                float(position.get("win_percent"))
+                if position.get("win_percent") is not None
+                else None
+            ),
             "exit_price": None,
             "last_price": current_price,
             "unrealized_pnl": self._calculate_realized_pnl(side, entry_price, current_price, quantity),
@@ -690,6 +787,16 @@ class TradingBot:
             + (f" | {extra}" if extra else "")
         )
 
+    def _log_skip_event(self, script_name, side, price, reason, extra=""):
+        self._log_order_event(
+            script_name=script_name,
+            action="SKIP",
+            side=side,
+            price=price,
+            reason=reason,
+            extra=extra,
+        )
+
     def _log_order_failure(self, script_name, side, price, reason, error_text, endpoint=""):
         fail_extra = f"error={error_text}"
         if endpoint:
@@ -698,7 +805,17 @@ class TradingBot:
             f"{script_name} | ACTION=ORDER_FAILED | SIDE={side} | PRICE={price:.2f} | REASON={reason} | {fail_extra}"
         )
 
-    def _place_order_with_result(self, script_name, side, price, reason):
+    def _place_order_with_result(
+        self,
+        script_name,
+        side,
+        price,
+        reason,
+        stop_loss=None,
+        target_price=None,
+        win_percent=None,
+        chart_percent=None,
+    ):
         order_token = self._get_order_token(script_name)
         order_qty = self._get_order_quantity(script_name)
         result = self.client.place_order(order_token, order_qty, side)
@@ -708,6 +825,10 @@ class TradingBot:
                 "action": side,
                 "quantity": order_qty,
                 "price": price,
+                "stop_loss": stop_loss,
+                "target_price": target_price,
+                "win_percent": win_percent,
+                "chart_percent": chart_percent,
                 "timestamp": self._now_ist(),
             }
             if not send_trade_notification(trade):
@@ -750,6 +871,183 @@ class TradingBot:
         if script_name in per_script:
             return float(per_script[script_name])
         return float(self.config.get('min_ema_separation_percent', 0.03))
+
+    def _compute_percent_level_metrics(self, df, anchor_timestamp, reference_price):
+        if (
+            df is None
+            or df.empty
+            or anchor_timestamp is None
+            or reference_price is None
+            or reference_price <= 0
+            or 'timestamp' not in df.columns
+            or 'high' not in df.columns
+            or 'low' not in df.columns
+        ):
+            return None
+
+        working = df.sort_values('timestamp').reset_index(drop=True)
+        eligible = working[working['timestamp'] <= anchor_timestamp]
+        if eligible.empty:
+            return None
+
+        lookback = int(self.config.get('percent_levels_lookback_candles', 60))
+        window = eligible.tail(max(5, lookback))
+        if window.empty:
+            return None
+
+        swing_low = float(window['low'].min())
+        swing_high = float(window['high'].max())
+        swing_range = swing_high - swing_low
+        if swing_range <= 0:
+            return None
+
+        levels = self.config.get('percent_levels_to_log', [19.43, 33.66, 46.91])
+        level_rows = []
+        for raw in levels:
+            pct = float(raw)
+            lvl_price = swing_low + (swing_range * (pct / 100.0))
+            dist_pct = ((reference_price - lvl_price) / reference_price) * 100.0
+            level_rows.append({"pct": pct, "price": lvl_price, "dist_pct": dist_pct})
+
+        return {
+            "swing_low": swing_low,
+            "swing_high": swing_high,
+            "swing_range": swing_range,
+            "levels": level_rows,
+        }
+
+    def _compute_chart_ob_percent(self, df, entry_candle_timestamp, side):
+        """
+        Approximate chart-style OB percentage:
+        selected OB candle volume as % share of same-category OB candidate volumes
+        in the configured lookback window.
+        """
+        if (
+            df is None
+            or df.empty
+            or entry_candle_timestamp is None
+            or 'timestamp' not in df.columns
+            or 'open' not in df.columns
+            or 'close' not in df.columns
+            or 'volume' not in df.columns
+        ):
+            return None
+
+        working = df.sort_values('timestamp').reset_index(drop=True)
+        eligible = working[working['timestamp'] <= entry_candle_timestamp]
+        if eligible.empty:
+            return None
+
+        entry_idx = int(eligible.index[-1])
+        prev_idx = entry_idx - 1
+        if prev_idx < 0:
+            return None
+
+        lookback = max(1, int(self.config.get('order_block_lookback_candles', 12)))
+        start_idx = max(0, prev_idx - lookback + 1)
+
+        candidate_volumes = []
+        selected_volume = None
+        for idx in range(prev_idx, start_idx - 1, -1):
+            row = working.iloc[idx]
+            is_bearish = row['close'] < row['open']
+            is_bullish = row['close'] > row['open']
+            volume = abs(float(row.get('volume', 0.0) or 0.0))
+            if side == 'BUY' and is_bearish:
+                candidate_volumes.append(volume)
+                if selected_volume is None:
+                    selected_volume = volume
+            elif side == 'SELL' and is_bullish:
+                candidate_volumes.append(volume)
+                if selected_volume is None:
+                    selected_volume = volume
+
+        if not candidate_volumes or selected_volume is None:
+            return None
+
+        total_volume = sum(candidate_volumes)
+        if total_volume <= 0:
+            return None
+        return round((selected_volume / total_volume) * 100.0, 2)
+
+    def _build_percent_levels_context(self, level_metrics):
+        """
+        Build a compact context string for key percentage levels (e.g., 19.43/33.66/46.91).
+        Useful in ENTRY/SKIP logs for later trade selection analysis.
+        """
+        if not level_metrics:
+            return ""
+
+        parts = [
+            f"range_low={level_metrics['swing_low']:.2f}",
+            f"range_high={level_metrics['swing_high']:.2f}",
+            f"range_pts={level_metrics['swing_range']:.2f}",
+        ]
+        for row in level_metrics.get('levels', []):
+            pct = row["pct"]
+            pct_tag = str(f"{pct:.2f}").replace(".", "_")
+            parts.append(f"lvl_{pct_tag}={row['price']:.2f}")
+            parts.append(f"dist_{pct_tag}={row['dist_pct']:+.3f}%")
+
+        return "; ".join(parts)
+
+    def _estimate_trade_probability(
+        self,
+        script_name,
+        ema_slope_ok,
+        ema_sep_pct,
+        min_sep_pct,
+        ob_percent,
+        level_metrics,
+    ):
+        weights = self.config.get('trade_probability_weights', {})
+        w_slope = float(weights.get('ema_slope', 0.25))
+        w_sep = float(weights.get('ema_sep', 0.25))
+        w_ob = float(weights.get('ob_quality', 0.30))
+        w_lvl = float(weights.get('level_proximity', 0.20))
+        weight_sum = max(1e-9, (w_slope + w_sep + w_ob + w_lvl))
+
+        slope_score = 100.0 if ema_slope_ok else 0.0
+
+        if min_sep_pct > 0:
+            # Need materially strong separation (not just barely above threshold).
+            sep_score = max(0.0, min(100.0, (ema_sep_pct / (min_sep_pct * 1.8)) * 100.0))
+        else:
+            sep_score = 100.0
+
+        min_ob_pct = max(1e-9, self._get_min_ob_percent(script_name))
+        ob_raw = float(ob_percent or 0.0)
+        # Avoid inflating score when OB% is only slightly above minimum.
+        ob_score = max(0.0, min(100.0, (ob_raw / (min_ob_pct * 2.5)) * 100.0))
+
+        level_score = 35.0
+        has_level_context = bool(level_metrics and level_metrics.get('levels'))
+        if has_level_context:
+            ref_pct = float(self.config.get('trade_probability_reference_level_percent', 33.66))
+            nearest = min(
+                level_metrics['levels'],
+                key=lambda r: abs(float(r['pct']) - ref_pct)
+            )
+            ref_dist = abs(float(nearest['dist_pct']))
+            # 0% away => 100 score, 4%+ away => 0 score
+            level_score = max(0.0, min(100.0, 100.0 - (ref_dist * 25.0)))
+
+        weighted = (
+            (slope_score * w_slope)
+            + (sep_score * w_sep)
+            + (ob_score * w_ob)
+            + (level_score * w_lvl)
+        ) / weight_sum
+        if not has_level_context:
+            weighted *= 0.72
+        if not ema_slope_ok:
+            weighted = min(weighted, 45.0)
+
+        probability = round(max(0.0, min(100.0, weighted)), 1)
+        if not has_level_context:
+            probability = min(probability, 65.0)
+        bucket = "HIGH" if probability >= 70 else ("MEDIUM" if probability >= 50 else "LOW")
+        return probability, bucket
 
     def _now_ist(self):
         return datetime.now(ZoneInfo("Asia/Kolkata"))
@@ -1387,6 +1685,15 @@ class TradingBot:
             if script_name in self.positions:
                 position = self.positions[script_name]
                 self._ensure_position_fields(position, script_name)
+                if position.get('chart_percent') is None:
+                    chart_backfill = self._backfill_chart_percent(
+                        script_name,
+                        position,
+                        data.get('df')
+                    )
+                    if chart_backfill is not None:
+                        position['chart_percent'] = chart_backfill
+                        self.save_state()
 
                 confirmed_time_text = confirmed_candle_timestamp.isoformat() if hasattr(confirmed_candle_timestamp, 'isoformat') else 'NA'
                 last_eval_ts = self.last_position_eval_logged.get(script_name)
@@ -1569,6 +1876,17 @@ class TradingBot:
                 entry_ema_long_prev = float(data.get('entry_ema_long_prev', entry_ema_long))
                 entry_price = current_price
                 signal_df = data.get('df')
+                level_metrics = self._compute_percent_level_metrics(
+                    signal_df,
+                    entry_candle_timestamp,
+                    entry_price,
+                )
+                levels_ctx = self._build_percent_levels_context(level_metrics)
+                chart_percent = None
+                if entry_signal == 1:
+                    chart_percent = self._compute_chart_ob_percent(signal_df, entry_candle_timestamp, 'BUY')
+                elif entry_signal == -1:
+                    chart_percent = self._compute_chart_ob_percent(signal_df, entry_candle_timestamp, 'SELL')
 
                 if entry_crossover:
                     # --- EMA Slope filter: EMA18 must slope in trade direction ---
@@ -1579,6 +1897,17 @@ class TradingBot:
                     if entry_signal == 1:
                         ema_slope_ok = entry_ema_long > entry_ema_long_prev  # EMA18 rising
                         if not ema_slope_ok:
+                            trade_prob, trade_prob_bucket = self._estimate_trade_probability(
+                                script_name, False, ema_sep_pct, min_sep_pct, 0.0, level_metrics
+                            )
+                            skip_extra = (
+                                f"ema18={entry_ema_long:.4f}; prev={entry_ema_long_prev:.4f}; "
+                                f"ema_sep_pct={ema_sep_pct:.4f}; trade_prob={trade_prob:.1f}; "
+                                f"trade_prob_bucket={trade_prob_bucket}; chart_pct={chart_percent}; {levels_ctx}"
+                            )
+                            self._log_skip_event(
+                                script_name, "BUY", entry_price, "EMA18_NOT_RISING", skip_extra
+                            )
                             logger.info(
                                 f"SKIP: {script_name} BUY ignored — EMA18 not rising "
                                 f"(ema18={entry_ema_long:.4f}, prev={entry_ema_long_prev:.4f})"
@@ -1586,6 +1915,17 @@ class TradingBot:
                             self.last_entry_candle_processed[script_name] = entry_candle_timestamp
                             continue
                         if ema_sep_pct < min_sep_pct:
+                            trade_prob, trade_prob_bucket = self._estimate_trade_probability(
+                                script_name, True, ema_sep_pct, min_sep_pct, 0.0, level_metrics
+                            )
+                            skip_extra = (
+                                f"ema_sep_pct={ema_sep_pct:.4f}; min_sep_pct={min_sep_pct:.4f}; "
+                                f"trade_prob={trade_prob:.1f}; trade_prob_bucket={trade_prob_bucket}; "
+                                f"chart_pct={chart_percent}; {levels_ctx}"
+                            )
+                            self._log_skip_event(
+                                script_name, "BUY", entry_price, "EMA_SEPARATION_TOO_SMALL", skip_extra
+                            )
                             logger.info(
                                 f"SKIP: {script_name} BUY ignored — EMA separation too small "
                                 f"(sep={ema_sep_pct:.4f}% < min={min_sep_pct:.4f}%)"
@@ -1596,6 +1936,17 @@ class TradingBot:
                     elif entry_signal == -1:
                         ema_slope_ok = entry_ema_long < entry_ema_long_prev  # EMA18 falling
                         if not ema_slope_ok:
+                            trade_prob, trade_prob_bucket = self._estimate_trade_probability(
+                                script_name, False, ema_sep_pct, min_sep_pct, 0.0, level_metrics
+                            )
+                            skip_extra = (
+                                f"ema18={entry_ema_long:.4f}; prev={entry_ema_long_prev:.4f}; "
+                                f"ema_sep_pct={ema_sep_pct:.4f}; trade_prob={trade_prob:.1f}; "
+                                f"trade_prob_bucket={trade_prob_bucket}; chart_pct={chart_percent}; {levels_ctx}"
+                            )
+                            self._log_skip_event(
+                                script_name, "SELL", entry_price, "EMA18_NOT_FALLING", skip_extra
+                            )
                             logger.info(
                                 f"SKIP: {script_name} SELL ignored — EMA18 not falling "
                                 f"(ema18={entry_ema_long:.4f}, prev={entry_ema_long_prev:.4f})"
@@ -1603,6 +1954,17 @@ class TradingBot:
                             self.last_entry_candle_processed[script_name] = entry_candle_timestamp
                             continue
                         if ema_sep_pct < min_sep_pct:
+                            trade_prob, trade_prob_bucket = self._estimate_trade_probability(
+                                script_name, True, ema_sep_pct, min_sep_pct, 0.0, level_metrics
+                            )
+                            skip_extra = (
+                                f"ema_sep_pct={ema_sep_pct:.4f}; min_sep_pct={min_sep_pct:.4f}; "
+                                f"trade_prob={trade_prob:.1f}; trade_prob_bucket={trade_prob_bucket}; "
+                                f"chart_pct={chart_percent}; {levels_ctx}"
+                            )
+                            self._log_skip_event(
+                                script_name, "SELL", entry_price, "EMA_SEPARATION_TOO_SMALL", skip_extra
+                            )
                             logger.info(
                                 f"SKIP: {script_name} SELL ignored — EMA separation too small "
                                 f"(sep={ema_sep_pct:.4f}% < min={min_sep_pct:.4f}%)"
@@ -1613,6 +1975,16 @@ class TradingBot:
                     if entry_signal == 1:
                         initial_sl = self._get_entry_swing_sl(signal_df, entry_candle_timestamp, 'BUY')
                         if initial_sl is None or initial_sl >= entry_price:
+                            trade_prob, trade_prob_bucket = self._estimate_trade_probability(
+                                script_name, True, ema_sep_pct, min_sep_pct, 0.0, level_metrics
+                            )
+                            skip_extra = (
+                                f"sl={initial_sl}; entry={entry_price:.2f}; trade_prob={trade_prob:.1f}; "
+                                f"trade_prob_bucket={trade_prob_bucket}; chart_pct={chart_percent}; {levels_ctx}"
+                            )
+                            self._log_skip_event(
+                                script_name, "BUY", entry_price, "INVALID_SWING_SL", skip_extra
+                            )
                             logger.info(
                                 f"SKIP: {script_name} BUY ignored due to invalid swing SL "
                                 f"(sl={initial_sl}, entry={entry_price:.2f})"
@@ -1620,14 +1992,24 @@ class TradingBot:
                             self.last_entry_candle_processed[script_name] = entry_candle_timestamp
                             continue
                         ob_percent = self._calculate_ob_percent(entry_price, initial_sl)
+                        trade_prob, trade_prob_bucket = self._estimate_trade_probability(
+                            script_name, True, ema_sep_pct, min_sep_pct, ob_percent, level_metrics
+                        )
+                        target_price = entry_price * (1 + self.config['target_percent'] / 100)
                         logger.info(f"BUY signal for {script_name} at {entry_price:.2f}")
                         success, order_result = self._place_order_with_result(
-                            script_name, "BUY", entry_price, "EMA_CROSSOVER"
+                            script_name,
+                            "BUY",
+                            entry_price,
+                            "EMA_CROSSOVER",
+                            stop_loss=initial_sl,
+                            target_price=target_price,
+                            win_percent=trade_prob,
+                            chart_percent=chart_percent,
                         )
                         if not success:
                             self.last_entry_candle_processed[script_name] = entry_candle_timestamp
                             continue
-                        target_price = entry_price * (1 + self.config['target_percent'] / 100)
                         signal_timestamp = entry_candle_timestamp
                         signal_timestamp_str = signal_timestamp.isoformat() if signal_timestamp is not None else datetime.now().isoformat()
                         order_id = (order_result.get('data') or {}).get('order_id', 'NA')
@@ -1639,6 +2021,9 @@ class TradingBot:
                             'signal_time': signal_timestamp_str,
                             'signal_ema_short': entry_ema_short,
                             'signal_ema_long': entry_ema_long,
+                            'chart_percent': chart_percent,
+                            'win_percent': trade_prob,
+                            'win_percent_source': 'model_v2',
                             'ob_percent': ob_percent,
                             'initial_sl': initial_sl,
                             'stop_loss': initial_sl,
@@ -1659,7 +2044,10 @@ class TradingBot:
                             extra=(
                                 f"sl={initial_sl:.2f}; target={target_price:.2f}; "
                                 f"ob_pct={ob_percent:.2f}; "
+                                f"chart_pct={chart_percent}; "
                                 f"ema_sep_pct={ema_sep_pct:.4f}; "
+                                f"trade_prob={trade_prob:.1f}; trade_prob_bucket={trade_prob_bucket}; "
+                                f"{levels_ctx}; "
                                 f"ema18_slope=UP({entry_ema_long - entry_ema_long_prev:+.4f}); "
                                 f"signal_time={signal_timestamp_str}; "
                                 f"order_id={order_id}; "
@@ -1677,6 +2065,16 @@ class TradingBot:
                     elif entry_signal == -1:
                         initial_sl = self._get_entry_swing_sl(signal_df, entry_candle_timestamp, 'SELL')
                         if initial_sl is None or initial_sl <= entry_price:
+                            trade_prob, trade_prob_bucket = self._estimate_trade_probability(
+                                script_name, True, ema_sep_pct, min_sep_pct, 0.0, level_metrics
+                            )
+                            skip_extra = (
+                                f"sl={initial_sl}; entry={entry_price:.2f}; trade_prob={trade_prob:.1f}; "
+                                f"trade_prob_bucket={trade_prob_bucket}; chart_pct={chart_percent}; {levels_ctx}"
+                            )
+                            self._log_skip_event(
+                                script_name, "SELL", entry_price, "INVALID_SWING_SL", skip_extra
+                            )
                             logger.info(
                                 f"SKIP: {script_name} SELL ignored due to invalid swing SL "
                                 f"(sl={initial_sl}, entry={entry_price:.2f})"
@@ -1684,14 +2082,24 @@ class TradingBot:
                             self.last_entry_candle_processed[script_name] = entry_candle_timestamp
                             continue
                         ob_percent = self._calculate_ob_percent(entry_price, initial_sl)
+                        trade_prob, trade_prob_bucket = self._estimate_trade_probability(
+                            script_name, True, ema_sep_pct, min_sep_pct, ob_percent, level_metrics
+                        )
+                        target_price = entry_price * (1 - self.config['target_percent'] / 100)
                         logger.info(f"SELL signal for {script_name} at {entry_price:.2f}")
                         success, order_result = self._place_order_with_result(
-                            script_name, "SELL", entry_price, "EMA_CROSSOVER"
+                            script_name,
+                            "SELL",
+                            entry_price,
+                            "EMA_CROSSOVER",
+                            stop_loss=initial_sl,
+                            target_price=target_price,
+                            win_percent=trade_prob,
+                            chart_percent=chart_percent,
                         )
                         if not success:
                             self.last_entry_candle_processed[script_name] = entry_candle_timestamp
                             continue
-                        target_price = entry_price * (1 - self.config['target_percent'] / 100)
                         signal_timestamp = entry_candle_timestamp
                         signal_timestamp_str = signal_timestamp.isoformat() if signal_timestamp is not None else datetime.now().isoformat()
                         order_id = (order_result.get('data') or {}).get('order_id', 'NA')
@@ -1703,6 +2111,9 @@ class TradingBot:
                             'signal_time': signal_timestamp_str,
                             'signal_ema_short': entry_ema_short,
                             'signal_ema_long': entry_ema_long,
+                            'chart_percent': chart_percent,
+                            'win_percent': trade_prob,
+                            'win_percent_source': 'model_v2',
                             'ob_percent': ob_percent,
                             'initial_sl': initial_sl,
                             'stop_loss': initial_sl,
@@ -1723,7 +2134,10 @@ class TradingBot:
                             extra=(
                                 f"sl={initial_sl:.2f}; target={target_price:.2f}; "
                                 f"ob_pct={ob_percent:.2f}; "
+                                f"chart_pct={chart_percent}; "
                                 f"ema_sep_pct={ema_sep_pct:.4f}; "
+                                f"trade_prob={trade_prob:.1f}; trade_prob_bucket={trade_prob_bucket}; "
+                                f"{levels_ctx}; "
                                 f"ema18_slope=DOWN({entry_ema_long - entry_ema_long_prev:+.4f}); "
                                 f"signal_time={signal_timestamp_str}; "
                                 f"order_id={order_id}; "
@@ -1842,8 +2256,67 @@ class TradingBot:
 # MAIN ENTRY POINT
 # ============================================================================
 
+def _pid_is_running(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        # Process exists but we may not have permission.
+        return True
+    except OSError:
+        return False
+
+
+def _acquire_single_instance_lock() -> bool:
+    current_pid = os.getpid()
+
+    for _ in range(2):
+        try:
+            fd = os.open(str(LOCK_FILE), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            with os.fdopen(fd, "w", encoding="utf-8") as lock_file:
+                json.dump(
+                    {"pid": current_pid, "started_at": datetime.now().isoformat()},
+                    lock_file
+                )
+
+            def _release_lock():
+                try:
+                    if LOCK_FILE.exists():
+                        payload = json.loads(LOCK_FILE.read_text(encoding="utf-8"))
+                        if int(payload.get("pid", -1)) == current_pid:
+                            LOCK_FILE.unlink(missing_ok=True)
+                except Exception:
+                    pass
+
+            atexit.register(_release_lock)
+            return True
+        except FileExistsError:
+            try:
+                payload = json.loads(LOCK_FILE.read_text(encoding="utf-8"))
+                existing_pid = int(payload.get("pid", -1))
+            except Exception:
+                existing_pid = -1
+
+            # Remove stale or malformed lock and retry once.
+            if existing_pid <= 0 or not _pid_is_running(existing_pid):
+                LOCK_FILE.unlink(missing_ok=True)
+                continue
+
+            print(
+                f"Another trading bot instance is already running (PID: {existing_pid}). "
+                f"Exiting this launch."
+            )
+            return False
+    return False
+
+
 def main():
     """Main entry point"""
+    if not _acquire_single_instance_lock():
+        return
+
     print(f"{Fore.CYAN}")
     print("="*80)
     print("   MULTI-SCRIPT TRADING BOT v2.0")

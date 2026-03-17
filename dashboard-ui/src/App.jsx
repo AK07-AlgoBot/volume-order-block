@@ -25,6 +25,35 @@ function removeTrade(list, tradeId) {
   return list.filter((item) => item.id !== tradeId);
 }
 
+function normalizeIsoSecond(value) {
+  const text = String(value || "").trim().replace(",", ".");
+  return text.length >= 19 ? text.slice(0, 19) : text;
+}
+
+function liveTradeIdentityKey(trade) {
+  return [
+    trade?.symbol || "",
+    trade?.side || "",
+    Number(trade?.quantity || 0).toFixed(4),
+    Number(trade?.entry_price || 0).toFixed(4),
+    normalizeIsoSecond(trade?.opened_at),
+  ].join("|");
+}
+
+function dedupeLiveTrades(trades) {
+  const latestByKey = new Map();
+  for (const trade of trades || []) {
+    const key = liveTradeIdentityKey(trade);
+    const prev = latestByKey.get(key);
+    const rank = `${trade?.opened_at || ""}|${trade?.id || ""}`;
+    const prevRank = prev ? `${prev?.opened_at || ""}|${prev?.id || ""}` : "";
+    if (!prev || rank >= prevRank) {
+      latestByKey.set(key, trade);
+    }
+  }
+  return Array.from(latestByKey.values());
+}
+
 export default function App() {
   const [todayDateText] = useState(getLocalDateIso);
   const [liveTrades, setLiveTrades] = useState([]);
@@ -70,7 +99,7 @@ export default function App() {
         if (!active) {
           return;
         }
-        setLiveTrades(payload.live_trades || []);
+        setLiveTrades(dedupeLiveTrades(payload.live_trades || []));
         setClosedTrades(payload.closed_trades || []);
         setClosedTradeDates(payload.closed_trade_dates || []);
         setSelectedClosedDate(payload.closed_trade_selected_date || todayDateText);
@@ -91,19 +120,25 @@ export default function App() {
       try {
         const message = JSON.parse(event.data);
         if (message.type === "trade_opened" || message.type === "trade_updated") {
-          setLiveTrades((prev) => upsertTrade(prev, message.trade));
+          setLiveTrades((prev) => dedupeLiveTrades(upsertTrade(prev, message.trade)));
           return;
         }
 
         if (message.type === "trades_updated_batch") {
           setLiveTrades((prev) =>
-            message.trades.reduce((acc, trade) => upsertTrade(acc, trade), prev)
+            dedupeLiveTrades(
+              message.trades.reduce((acc, trade) => upsertTrade(acc, trade), prev)
+            )
           );
           return;
         }
 
         if (message.type === "trade_closed") {
-          setLiveTrades((prev) => removeTrade(prev, message.trade.id));
+          setLiveTrades((prev) =>
+            dedupeLiveTrades(removeTrade(prev, message.trade.id)).filter(
+              (item) => liveTradeIdentityKey(item) !== liveTradeIdentityKey(message.trade)
+            )
+          );
           const tradeDate = String(message.trade?.closed_at || "").slice(0, 10);
           if (tradeDate) {
             setClosedTradeDates((prev) =>

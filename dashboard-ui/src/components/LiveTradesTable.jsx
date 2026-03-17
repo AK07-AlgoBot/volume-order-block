@@ -29,11 +29,12 @@ export function LiveTradesTable({ trades }) {
           <colgroup>
             <col className="col-symbol" />
             <col className="col-side" />
-            <col className="col-qty" />
             <col className="col-price" />
             <col className="col-price" />
             <col className="col-price" />
             <col className="col-price" />
+            <col className="col-chart" />
+            <col className="col-win" />
             <col className="col-pnl" />
             <col className="col-datetime" />
           </colgroup>
@@ -41,19 +42,20 @@ export function LiveTradesTable({ trades }) {
             <tr>
               <th className="col-left">Symbol</th>
               <th className="col-center">Side</th>
-              <th className="col-center-num">Qty</th>
               <th className="col-center-num">Entry</th>
               <th className="col-center-num">LTP</th>
               <th className="col-center-num">Target</th>
               <th className="col-center-num">SL</th>
-              <th className="col-right">Unrealized P&L</th>
+              <th className="col-center-num">Chart %</th>
+              <th className="col-center-num">Win %</th>
+              <th className="col-center-num">Unrealized P&L</th>
               <th className="col-left">Opened At</th>
             </tr>
           </thead>
           <tbody>
             {trades.length === 0 ? (
               <tr>
-                <td className="empty" colSpan={9}>
+                <td className="empty" colSpan={10}>
                   No live trades
                 </td>
               </tr>
@@ -61,21 +63,36 @@ export function LiveTradesTable({ trades }) {
               trades.map((trade) => {
                 const pnl = asNumber(trade.unrealized_pnl);
                 const lockedProfit = isProfitLocked(trade);
+                const rawChartPct = trade.chart_percent;
+                const chartPct = Number(rawChartPct);
+                const hasChartPct =
+                  rawChartPct !== null &&
+                  rawChartPct !== undefined &&
+                  String(rawChartPct).trim() !== "" &&
+                  Number.isFinite(chartPct);
+                const rawWin = trade.win_percent;
+                const win = Number(rawWin);
+                const hasWin =
+                  rawWin !== null &&
+                  rawWin !== undefined &&
+                  String(rawWin).trim() !== "" &&
+                  Number.isFinite(win);
                 return (
                   <tr key={trade.id}>
                     <td className="col-left">{trade.symbol}</td>
                     <td className={`col-center ${trade.side === "BUY" ? "buy" : "sell"}`}>{trade.side}</td>
-                    <td className="col-center-num">{asNumber(trade.quantity).toFixed(2)}</td>
                     <td className="col-center-num">{asNumber(trade.entry_price).toFixed(2)}</td>
                     <td className="col-center-num">{asNumber(trade.last_price).toFixed(2)}</td>
                     <td className="col-center-num">{asNumber(trade.target_price).toFixed(2)}</td>
                     <td className="col-center-num">
                       <span className="sl-cell">
                         <span>{asNumber(trade.stop_loss).toFixed(2)}</span>
-                        {lockedProfit ? <span className="lock-pill">Locked</span> : null}
+                        {lockedProfit ? <span className="lock-pill">L</span> : null}
                       </span>
                     </td>
-                    <td className={`col-right ${pnl >= 0 ? "pnl-pos" : "pnl-neg"}`}>{pnl.toFixed(2)}</td>
+                    <td className="col-center-num">{hasChartPct ? `${chartPct.toFixed(2)}%` : "-"}</td>
+                    <td className="col-center-num">{hasWin ? `${win.toFixed(1)}%` : "-"}</td>
+                    <td className={`col-center-num ${pnl >= 0 ? "pnl-pos" : "pnl-neg"}`}>{pnl.toFixed(2)}</td>
                     <td className="col-left date-cell">{formatTimestamp(trade.opened_at)}</td>
                   </tr>
                 );
