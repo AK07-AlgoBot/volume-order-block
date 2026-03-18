@@ -65,6 +65,7 @@ if (-not (Test-Path $uiPath)) {
 $nodeCmd = "node"
 $npmCmd = "npm"
 $nodeVersionOk = $false
+$portableNodeDir = $null
 
 try {
     node -v | Out-Null
@@ -83,6 +84,7 @@ catch {
 
     $nodeCmd = Join-Path $nodeDir.FullName "node.exe"
     $npmCmd = Join-Path $nodeDir.FullName "npm.cmd"
+    $portableNodeDir = $nodeDir.FullName
 
     & $nodeCmd -v | Out-Null
     & $npmCmd -v | Out-Null
@@ -91,6 +93,11 @@ catch {
 
 if (-not $nodeVersionOk) {
     throw "Node.js/npm unavailable."
+}
+
+# If using portable Node, ensure npm script subprocesses can resolve node.exe.
+if ($portableNodeDir) {
+    $env:Path = "$portableNodeDir;$env:Path"
 }
 
 # Ensure UI dependencies are installed
