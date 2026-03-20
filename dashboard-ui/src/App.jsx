@@ -61,8 +61,12 @@ export default function App() {
   const [closedTradeDates, setClosedTradeDates] = useState([]);
   const [selectedClosedDate, setSelectedClosedDate] = useState(todayDateText);
   const [weeklyPnl, setWeeklyPnl] = useState([]);
+  const [weeklyTotal, setWeeklyTotal] = useState(0);
+  const [weeklyFilterOptions, setWeeklyFilterOptions] = useState([]);
+  const [selectedWeekOffset, setSelectedWeekOffset] = useState(0);
   const [connected, setConnected] = useState(false);
   const selectedClosedDateRef = useRef(selectedClosedDate);
+  const selectedWeekOffsetRef = useRef(selectedWeekOffset);
   const appReadySentRef = useRef(false);
 
   const markAppReady = () => {
@@ -78,15 +82,22 @@ export default function App() {
   }, [selectedClosedDate]);
 
   useEffect(() => {
+    selectedWeekOffsetRef.current = selectedWeekOffset;
+  }, [selectedWeekOffset]);
+
+  useEffect(() => {
     let active = true;
-    const loadWeeklyPnl = () => {
-      fetch(`${API_BASE}/api/dashboard/weekly-pnl`)
+    const loadWeeklyPnl = (weekOffset = selectedWeekOffsetRef.current) => {
+      fetch(`${API_BASE}/api/dashboard/weekly-pnl?week_offset=${encodeURIComponent(weekOffset)}`)
         .then((response) => response.json())
         .then((payload) => {
           if (!active) {
             return;
           }
           setWeeklyPnl(payload.weekly_pnl || []);
+          setWeeklyTotal(Number(payload.weekly_total || 0));
+          setWeeklyFilterOptions(payload.weekly_filter_options || []);
+          setSelectedWeekOffset(Number(payload.weekly_selected_offset || 0));
         })
         .catch((error) => {
           console.error("Failed weekly pnl load", error);
@@ -104,6 +115,9 @@ export default function App() {
         setClosedTradeDates(payload.closed_trade_dates || []);
         setSelectedClosedDate(payload.closed_trade_selected_date || todayDateText);
         setWeeklyPnl(payload.weekly_pnl || []);
+        setWeeklyTotal(Number(payload.weekly_total || 0));
+        setWeeklyFilterOptions(payload.weekly_filter_options || []);
+        setSelectedWeekOffset(Number(payload.weekly_selected_offset || 0));
         markAppReady();
       })
       .catch((error) => {
@@ -153,7 +167,14 @@ export default function App() {
         }
 
         if (message.type === "pnl_update") {
-          setWeeklyPnl(message.weekly_pnl || []);
+          if (selectedWeekOffsetRef.current === 0) {
+            setWeeklyPnl(message.weekly_pnl || []);
+            const total = (message.weekly_pnl || []).reduce(
+              (sum, point) => sum + Number(point?.pnl || 0),
+              0
+            );
+            setWeeklyTotal(total);
+          }
         }
       } catch (error) {
         console.error("WebSocket parse failed", error);
@@ -176,6 +197,28 @@ export default function App() {
       socket.close();
     };
   }, [todayDateText]);
+
+  useEffect(() => {
+    let active = true;
+    fetch(
+      `${API_BASE}/api/dashboard/weekly-pnl?week_offset=${encodeURIComponent(selectedWeekOffset)}`
+    )
+      .then((response) => response.json())
+      .then((payload) => {
+        if (!active) {
+          return;
+        }
+        setWeeklyPnl(payload.weekly_pnl || []);
+        setWeeklyTotal(Number(payload.weekly_total || 0));
+        setWeeklyFilterOptions(payload.weekly_filter_options || []);
+      })
+      .catch((error) => {
+        console.error("Failed selected weekly pnl load", error);
+      });
+    return () => {
+      active = false;
+    };
+  }, [selectedWeekOffset]);
 
   useEffect(() => {
     let active = true;
@@ -224,7 +267,13 @@ export default function App() {
       <main className="container">
         <div className="layout">
           <LiveTradesTable trades={liveTrades} />
-          <WeeklyPnlChart points={weeklyPnl} />
+          <WeeklyPnlChart
+            points={weeklyPnl}
+            weekTotal={weeklyTotal}
+            selectedWeekOffset={selectedWeekOffset}
+            weekOptions={weeklyFilterOptions}
+            onWeekChange={setSelectedWeekOffset}
+          />
         </div>
 
         <div className="closed-section">

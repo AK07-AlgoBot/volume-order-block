@@ -89,10 +89,14 @@ def _parse_ts(ts_str: str) -> datetime:
     return datetime.strptime(ts_str, "%Y-%m-%d %H:%M:%S,%f")
 
 
-def _current_week_monday_to_friday() -> list[datetime.date]:
-    """Return current week's Monday-Friday dates in order."""
+def _week_monday_to_friday(week_offset: int = 0) -> list[datetime.date]:
+    """
+    Return Monday-Friday dates for a week.
+    week_offset=0 => current week, 1 => previous week, etc.
+    """
     today = datetime.now().date()
-    monday = today - timedelta(days=today.weekday())
+    base_monday = today - timedelta(days=today.weekday())
+    monday = base_monday - timedelta(days=7 * max(0, week_offset))
     return [monday + timedelta(days=day_offset) for day_offset in range(5)]
 
 
@@ -116,12 +120,9 @@ def _get_order_log_files() -> list[Path]:
     return deduped
 
 
-def _compute_weekly_pnl_from_orders(days: int = 5) -> list[dict]:
-    """Compute weekly realized P&L for Monday-Friday from active+archived order logs."""
-    if days <= 0:
-        return []
-
-    weekdays = _current_week_monday_to_friday()
+def _compute_weekly_pnl_from_orders(week_offset: int = 0) -> list[dict]:
+    """Compute realized P&L for selected week's Monday-Friday from active+archived order logs."""
+    weekdays = _week_monday_to_friday(week_offset)
     weekday_set = set(weekdays)
     pnl_by_date = {day: 0.0 for day in weekdays}
 
@@ -181,6 +182,28 @@ def _compute_weekly_pnl_from_orders(days: int = 5) -> list[dict]:
         {"date": day.strftime("%Y-%m-%d"), "pnl": round(pnl_by_date[day], 2)}
         for day in weekdays
     ]
+
+
+def _weekly_total(points: list[dict]) -> float:
+    return round(sum(float(point.get("pnl", 0.0) or 0.0) for point in points), 2)
+
+
+def _weekly_filter_options(count: int = 12) -> list[dict]:
+    options = []
+    for offset in range(max(1, count)):
+        weekdays = _week_monday_to_friday(offset)
+        start_day = weekdays[0].strftime("%Y-%m-%d")
+        end_day = weekdays[-1].strftime("%Y-%m-%d")
+        label = "Current Week" if offset == 0 else f"{offset} Week Ago"
+        options.append(
+            {
+                "week_offset": offset,
+                "label": label,
+                "range_start": start_day,
+                "range_end": end_day,
+            }
+        )
+    return options
 
 
 def _build_closed_trades_from_orders(limit: int = 300) -> list[dict]:
@@ -421,12 +444,16 @@ async def dashboard_initial():
     today_text = datetime.now().date().isoformat()
     effective_closed = _effective_closed_trades(limit=2000)
     date_filtered_closed = _filter_closed_trades_by_date(effective_closed, today_text)
+    weekly_points = _compute_weekly_pnl_from_orders(week_offset=0)
     return {
         "live_trades": _dedupe_live_trades(list(live_trades.values())),
         "closed_trades": date_filtered_closed,
         "closed_trade_dates": _closed_trade_dates(effective_closed),
         "closed_trade_selected_date": today_text,
-        "weekly_pnl": _compute_weekly_pnl_from_orders(days=5),
+        "weekly_pnl": weekly_points,
+        "weekly_total": _weekly_total(weekly_points),
+        "weekly_selected_offset": 0,
+        "weekly_filter_options": _weekly_filter_options(count=12),
         "server_time": datetime.utcnow().isoformat(),
     }
 
@@ -446,8 +473,15 @@ async def dashboard_closed_trades(date: str | None = None):
 
 
 @app.get("/api/dashboard/weekly-pnl")
-async def dashboard_weekly_pnl():
-    return {"weekly_pnl": _compute_weekly_pnl_from_orders(days=5)}
+async def dashboard_weekly_pnl(week_offset: int = 0):
+    safe_offset = max(0, int(week_offset))
+    weekly_points = _compute_weekly_pnl_from_orders(week_offset=safe_offset)
+    return {
+        "weekly_pnl": weekly_points,
+        "weekly_total": _weekly_total(weekly_points),
+        "weekly_selected_offset": safe_offset,
+        "weekly_filter_options": _weekly_filter_options(count=12),
+    }
 
 
 @app.websocket("/ws/trades")
@@ -530,7 +564,7 @@ async def trade_close(trade: Trade):
     closed_trades.insert(0, payload)
     _sort_closed_trades()
     await _broadcast({"type": "trade_closed", "trade": payload})
-    await _broadcast({"type": "pnl_update", "weekly_pnl": _compute_weekly_pnl_from_orders(days=5)})
+    await _broadcast({"type": "pnl_update", "weekly_pnl": _compute_weekly_pnl_from_orders(week_offset=0)})
     return {"ok": True}
 
 
@@ -538,6 +572,6 @@ async def trade_close(trade: Trade):
 async def set_weekly_pnl(points: list[WeeklyPnlPoint]):
     # Kept for backward compatibility, but dashboard now uses orders.log as source of truth.
     _ = [point.model_dump() for point in points]
-    computed = _compute_weekly_pnl_from_orders(days=5)
+    computed = _compute_weekly_pnl_from_orders(week_offset=0)
     await _broadcast({"type": "pnl_update", "weekly_pnl": computed})
     return {"ok": True, "points": len(computed), "source": "orders.log"}

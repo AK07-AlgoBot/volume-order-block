@@ -10,6 +10,7 @@ import json
 import sys
 import os
 import atexit
+import gzip
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from pathlib import Path
@@ -36,6 +37,8 @@ DASHBOARD_CONFIG = {
     "timeout_seconds": 2.0,
     "batch_size": 50,
 }
+
+MCX_INSTRUMENTS_URL = "https://assets.upstox.com/market-quote/instruments/exchange/MCX.json.gz"
 
 
 def send_trade_notification(trade: dict, chat_id: int | str = None) -> bool:
@@ -76,6 +79,7 @@ def send_trade_notification(trade: dict, chat_id: int | str = None) -> bool:
     entry_reasons = {"EMA_CROSSOVER"}
     exit_reasons = {
         "STOP_LOSS_HIT",
+        "TRAILING_STOP_LOSS_HIT",
         "TARGET_HIT",
         "OB_ZONE_BREACH",
         "OPPOSITE_CROSSOVER",
@@ -192,7 +196,7 @@ class DashboardClient:
 
 # Upstox API Configuration
 API_CONFIG = {
-    "access_token": "eyJ0eXAiOiJKV1QiLCJrZXlfaWQiOiJza192MS4wIiwiYWxnIjoiSFMyNTYifQ.eyJzdWIiOiI2RUJBVTQiLCJqdGkiOiI2OWI4YzU0Yjg2NmJlYzJiNjlkOGMxM2EiLCJpc011bHRpQ2xpZW50IjpmYWxzZSwiaXNQbHVzUGxhbiI6ZmFsc2UsImlhdCI6MTc3MzcxNjgxMSwiaXNzIjoidWRhcGktZ2F0ZXdheS1zZXJ2aWNlIiwiZXhwIjoxNzczNzg0ODAwfQ.2JnhQCpL0wimjino62wtjuhncazGK0SQMJu26vclGJ8",
+    "access_token": "eyJ0eXAiOiJKV1QiLCJrZXlfaWQiOiJza192MS4wIiwiYWxnIjoiSFMyNTYifQ.eyJzdWIiOiI2RUJBVTQiLCJqdGkiOiI2OWJjYzRlYjRkYjgzOTBmMTkyZTk3NDciLCJpc011bHRpQ2xpZW50IjpmYWxzZSwiaXNQbHVzUGxhbiI6ZmFsc2UsImlhdCI6MTc3Mzk3ODg1OSwiaXNzIjoidWRhcGktZ2F0ZXdheS1zZXJ2aWNlIiwiZXhwIjoxNzc0MDQ0MDAwfQ.8tHvO5cAPomdHLUT24-MldLQHpv39ZJhYaOVqS0RxUY",
     "api_key": "d9df59d8-e3c8-491e-9a7a-0bd19805ba8d",
     "api_secret": "wu5npsei6y",
     "base_url": "https://api.upstox.com/v2"
@@ -335,6 +339,8 @@ TRADING_CONFIG = {
         "lock_increment_pnl": 500.0
     },
     "loop_interval": 10,  # seconds between each check
+    "contract_roll_retry_seconds": 300,  # seconds between roll attempts per script
+    "contract_roll_mcx_cache_seconds": 21600,  # 6h MCX instrument cache window
     "quantity": 1,  # Number of lots per order
     "segment_scripts": {
         "NSE": ["NIFTY", "BANKNIFTY", "SENSEX"],
@@ -585,6 +591,9 @@ class TradingBot:
         self.dashboard_batch_size = int(DASHBOARD_CONFIG.get("batch_size", 50))
         self.pending_live_updates = {}
         self.archive_requested = False
+        self._last_contract_roll_attempt = {}
+        self._mcx_instruments_cache = []
+        self._mcx_instruments_cache_at = 0.0
         
     def load_state(self):
         """Load saved trading state"""
@@ -915,6 +924,122 @@ class TradingBot:
         lots = int(self.config.get('quantity', 1))
         lot_size = int(self.config.get('lot_sizes', {}).get(script_name, 1))
         return max(1, lots * lot_size)
+
+    @staticmethod
+    def _stoploss_reason(position):
+        """
+        Return stop-loss reason code.
+        If SL has moved away from initial SL, treat it as trailing SL hit.
+        """
+        initial_sl = position.get('initial_sl')
+        current_sl = position.get('stop_loss')
+        if initial_sl is None or current_sl is None:
+            return "STOP_LOSS_HIT"
+
+        if abs(float(current_sl) - float(initial_sl)) > 1e-9:
+            return "TRAILING_STOP_LOSS_HIT"
+        return "STOP_LOSS_HIT"
+
+    @staticmethod
+    def _is_mcx_instrument(instrument_key):
+        return isinstance(instrument_key, str) and instrument_key.startswith("MCX_FO|")
+
+    def _should_attempt_contract_roll(self, script_name):
+        cooldown = float(self.config.get("contract_roll_retry_seconds", 300))
+        now_ts = time.time()
+        last_attempt = float(self._last_contract_roll_attempt.get(script_name, 0.0))
+        if now_ts - last_attempt < cooldown:
+            return False
+        self._last_contract_roll_attempt[script_name] = now_ts
+        return True
+
+    def _fetch_mcx_instruments(self):
+        cache_ttl = float(self.config.get("contract_roll_mcx_cache_seconds", 21600))
+        now_ts = time.time()
+        if self._mcx_instruments_cache and (now_ts - self._mcx_instruments_cache_at) < cache_ttl:
+            return self._mcx_instruments_cache
+
+        response = requests.get(MCX_INSTRUMENTS_URL, timeout=20)
+        response.raise_for_status()
+        instruments = json.loads(gzip.decompress(response.content))
+        self._mcx_instruments_cache = instruments if isinstance(instruments, list) else []
+        self._mcx_instruments_cache_at = now_ts
+        return self._mcx_instruments_cache
+
+    def _get_mcx_contract_candidates(self, script_name):
+        script_roots = {
+            "CRUDE": ["CRUDEOIL"],
+            "GOLDMINI": ["GOLDPETAL", "GOLDM"],
+            "SILVERMINI": ["SILVERM"],
+        }
+        roots = script_roots.get(script_name, [])
+        if not roots:
+            return []
+
+        try:
+            instruments = self._fetch_mcx_instruments()
+        except Exception as e:
+            logger.warning(f"WARNING: Unable to fetch MCX instruments for contract roll: {e}")
+            return []
+
+        target_lot = int(self.config.get("lot_sizes", {}).get(script_name, 0))
+        now_ms = int(time.time() * 1000)
+        candidates = []
+        for row in instruments:
+            if str(row.get("instrument_type", "")).upper() != "FUT":
+                continue
+
+            instrument_key = str(row.get("instrument_key", ""))
+            if not instrument_key.startswith("MCX_FO|"):
+                continue
+
+            expiry_ms = int(row.get("expiry", 0) or 0)
+            if expiry_ms and expiry_ms < now_ms:
+                continue
+
+            lot_size = int(float(row.get("lot_size", 0) or 0))
+            if target_lot and lot_size != target_lot:
+                continue
+
+            trading_symbol = str(row.get("trading_symbol", "")).upper()
+            if not any(trading_symbol.startswith(f"{root} ") for root in roots):
+                continue
+
+            candidates.append((expiry_ms, instrument_key, trading_symbol))
+
+        candidates.sort(key=lambda item: (item[0], item[1]))
+
+        unique_keys = []
+        seen = set()
+        for _, key, _ in candidates:
+            if key not in seen:
+                seen.add(key)
+                unique_keys.append(key)
+        return unique_keys
+
+    def _switch_to_next_contract(self, script_name, current_instrument_key):
+        candidates = self._get_mcx_contract_candidates(script_name)
+        if not candidates:
+            return current_instrument_key
+
+        if current_instrument_key in candidates:
+            current_idx = candidates.index(current_instrument_key)
+            if current_idx + 1 < len(candidates):
+                next_key = candidates[current_idx + 1]
+            else:
+                next_key = current_instrument_key
+        else:
+            next_key = candidates[0]
+
+        if next_key == current_instrument_key:
+            return current_instrument_key
+
+        self.config.setdefault("scripts", {})[script_name] = next_key
+        self.config.setdefault("order_tokens", {})[script_name] = next_key
+        logger.warning(
+            f"CONTRACT ROLL: {script_name} switched from {current_instrument_key} to {next_key}"
+        )
+        return next_key
 
     @staticmethod
     def _calculate_ob_percent(entry_price, stop_loss):
@@ -1681,6 +1806,7 @@ class TradingBot:
     def fetch_market_data(self, script_name, instrument_key):
         """Fetch and combine historical + intraday market data"""
         try:
+            instrument_key = self.config.get('scripts', {}).get(script_name, instrument_key)
             # Get dates
             to_date = datetime.now().strftime('%Y-%m-%d')
             from_date = (datetime.now() - timedelta(days=7)).strftime('%Y-%m-%d')
@@ -1699,6 +1825,29 @@ class TradingBot:
                 instrument_key, 
                 data_interval
             )
+
+            if (
+                df_hist is None
+                and df_intraday is None
+                and self._is_mcx_instrument(instrument_key)
+                and self._should_attempt_contract_roll(script_name)
+            ):
+                next_key = self._switch_to_next_contract(script_name, instrument_key)
+                if next_key != instrument_key:
+                    logger.info(
+                        f"RETRY: {script_name} refetching market data with rolled contract {next_key}"
+                    )
+                    instrument_key = next_key
+                    df_hist = self.client.get_historical_candles(
+                        instrument_key,
+                        data_interval,
+                        from_date,
+                        to_date
+                    )
+                    df_intraday = self.client.get_intraday_candles(
+                        instrument_key,
+                        data_interval
+                    )
             
             # Combine data
             if df_hist is not None and df_intraday is not None:
@@ -1789,7 +1938,7 @@ class TradingBot:
             
             return {
                 'script_name': script_name,
-                'instrument_key': instrument_key,
+                'instrument_key': self.config.get('scripts', {}).get(script_name, instrument_key),
                 'current_price': current_price,
                 'current_high': float(latest.get('high', current_price)),
                 'current_low': float(latest.get('low', current_price)),
@@ -1901,6 +2050,7 @@ class TradingBot:
                 # Stop loss check
                 stop_loss = position['stop_loss']
                 if position['type'] == 'BUY' and current_low <= stop_loss:
+                    sl_reason = self._stoploss_reason(position)
                     logger.warning(
                         f"ALERT: SL hit for {script_name}. Closing BUY @ Rs{current_price:.2f} "
                         f"(SL: Rs{stop_loss:.2f}, low: Rs{current_low:.2f})"
@@ -1909,7 +2059,7 @@ class TradingBot:
                         script_name,
                         "SELL",
                         current_price,
-                        "STOP_LOSS_HIT",
+                        sl_reason,
                         realized_pnl=self._calculate_realized_pnl(
                             position['type'],
                             float(position['entry_price']),
@@ -1925,7 +2075,7 @@ class TradingBot:
                         action="EXIT",
                         side="SELL",
                         price=current_price,
-                        reason="STOP_LOSS_HIT",
+                        reason=sl_reason,
                         extra=f"entry={position['entry_price']:.2f}; sl={stop_loss:.2f}; order_id={order_id}"
                     )
                     self._notify_dashboard_trade_close(script_name, position, current_price)
@@ -1934,6 +2084,7 @@ class TradingBot:
                     continue
 
                 if position['type'] == 'SELL' and current_high >= stop_loss:
+                    sl_reason = self._stoploss_reason(position)
                     logger.warning(
                         f"ALERT: SL hit for {script_name}. Closing SELL @ Rs{current_price:.2f} "
                         f"(SL: Rs{stop_loss:.2f}, high: Rs{current_high:.2f})"
@@ -1942,7 +2093,7 @@ class TradingBot:
                         script_name,
                         "BUY",
                         current_price,
-                        "STOP_LOSS_HIT",
+                        sl_reason,
                         realized_pnl=self._calculate_realized_pnl(
                             position['type'],
                             float(position['entry_price']),
@@ -1958,7 +2109,7 @@ class TradingBot:
                         action="EXIT",
                         side="BUY",
                         price=current_price,
-                        reason="STOP_LOSS_HIT",
+                        reason=sl_reason,
                         extra=f"entry={position['entry_price']:.2f}; sl={stop_loss:.2f}; order_id={order_id}"
                     )
                     self._notify_dashboard_trade_close(script_name, position, current_price)

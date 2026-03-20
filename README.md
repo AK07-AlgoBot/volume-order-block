@@ -80,6 +80,11 @@ python trading_bot.py
 # Stop with Ctrl+C (saves state automatically)
 ```
 
+### Windows launchers
+
+- `run_bot.bat`: starts bot + dashboard API + dashboard UI (recommended daily launcher)
+- `run_bot.bat --bot-only` or `run_bot_only.bat`: starts only the trading bot
+
 ## API Token Update
 
 Update your access token in the configuration:

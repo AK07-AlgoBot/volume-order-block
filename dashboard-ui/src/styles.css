@@ -227,6 +227,24 @@ tr:last-child td {
   font-size: 0.75rem;
 }
 
+.weekly-filter-row {
+  margin-top: 0.5rem;
+  margin-bottom: 0.4rem;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+}
+
+.weekly-select {
+  border: 1px solid #334155;
+  border-radius: 8px;
+  background: rgba(15, 23, 42, 0.95);
+  color: #e2e8f0;
+  padding: 0.25rem 0.45rem;
+  font-size: 0.78rem;
+  min-width: 280px;
+}
+
 .empty {
   color: #64748b;
   text-align: center;

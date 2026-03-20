@@ -24,12 +24,24 @@ Open `trading_bot.py` and find line 23:
 
 Replace with your Upstox access token.
 
-## Step 3: Run the Bot ⏱️ 30 sec
+## Step 3: Run the Bot + UI ⏱️ 30 sec
 
-**Option A: Using batch file**
+**Option A: Using batch file (recommended)**
 ```powershell
 # Double-click this file or run:
 run_bot.bat
+```
+
+This now starts everything:
+- Trading bot
+- Dashboard API (`http://localhost:8000`)
+- Dashboard UI (`http://localhost:5173`)
+
+Need bot only? Use:
+```powershell
+run_bot.bat --bot-only
+# or
+run_bot_only.bat
 ```
 
 **Option B: Using command line**
