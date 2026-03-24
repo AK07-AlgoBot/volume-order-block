@@ -5,6 +5,7 @@ Created: March 4, 2026
 """
 
 import time
+import math
 import logging
 import json
 import sys
@@ -196,7 +197,7 @@ class DashboardClient:
 
 # Upstox API Configuration
 API_CONFIG = {
-    "access_token": "eyJ0eXAiOiJKV1QiLCJrZXlfaWQiOiJza192MS4wIiwiYWxnIjoiSFMyNTYifQ.eyJzdWIiOiI2RUJBVTQiLCJqdGkiOiI2OWJjYzRlYjRkYjgzOTBmMTkyZTk3NDciLCJpc011bHRpQ2xpZW50IjpmYWxzZSwiaXNQbHVzUGxhbiI6ZmFsc2UsImlhdCI6MTc3Mzk3ODg1OSwiaXNzIjoidWRhcGktZ2F0ZXdheS1zZXJ2aWNlIiwiZXhwIjoxNzc0MDQ0MDAwfQ.8tHvO5cAPomdHLUT24-MldLQHpv39ZJhYaOVqS0RxUY",
+    "access_token": "eyJ0eXAiOiJKV1QiLCJrZXlfaWQiOiJza192MS4wIiwiYWxnIjoiSFMyNTYifQ.eyJzdWIiOiI2RUJBVTQiLCJqdGkiOiI2OWMyMDQ4NDlkMjNmOTc5ZGU5YTNlMzciLCJpc011bHRpQ2xpZW50IjpmYWxzZSwiaXNQbHVzUGxhbiI6ZmFsc2UsImlhdCI6MTc3NDMyMjgyMCwiaXNzIjoidWRhcGktZ2F0ZXdheS1zZXJ2aWNlIiwiZXhwIjoxNzc0Mzg5NjAwfQ.ws2CzW7CkVPAFGQgxeePBE6T4oAsknJQGNWa89X5R5w",
     "api_key": "d9df59d8-e3c8-491e-9a7a-0bd19805ba8d",
     "api_secret": "wu5npsei6y",
     "base_url": "https://api.upstox.com/v2"
@@ -327,7 +328,7 @@ TRADING_CONFIG = {
     },
     "trade_probability_reference_level_percent": 33.66,
     "order_block_lookback_candles": 12,  # Search depth for latest opposite candle (5m) as order block
-    "chart_ob_max_active_per_side": 5,   # Match TradingView "Volume Order Blocks 5" visible pool
+    "chart_ob_max_active_per_side": 15,  # Match TradingView array cap per side (15)
     # NSE-only rupee money-lock overlay:
     # - At trigger_pnl, lock first lock_increment_pnl above cost.
     # - For every step_pnl extra MFE, lock one more lock_increment_pnl.
@@ -685,6 +686,9 @@ class TradingBot:
 
         if 'quantity' not in position:
             position['quantity'] = self._get_order_quantity(script_name) if script_name else 1
+
+        if 'last_polled_price' not in position:
+            position['last_polled_price'] = None
 
         if 'trade_id' not in position:
             script_for_id = script_name or "UNKNOWN"
@@ -1102,11 +1106,12 @@ class TradingBot:
 
     def _compute_chart_ob_snapshot(self, df, anchor_timestamp, side):
         """
-        TradingView-style active OB volume share snapshot.
-        - Build bullish/bearish OBs on crossover candles.
-        - Invalidate OBs when close breaches their boundary.
-        - Selected OB = latest active OB of requested side at anchor time.
-        - Chart % = selected OB volume / sum(active same-side OB volumes) * 100
+        Pine-parity OB% snapshot (BigBeluga strategy variant).
+        - Rebuilds lower/upper OB arrays from start up to anchor timestamp.
+        - Matches TradingView **on-chart** OB labels at the anchor bar (barstate.islast style):
+          newest active OB volume / sum(all active same-side OB volumes) * 100.
+          (Percentages update as OBs are invalidated; formation-only % would drift vs TV.)
+        - Fallback when no active OBs on that side: (None, None).
         Returns: (chart_percent, selected_ob_volume)
         """
         if (
@@ -1129,77 +1134,141 @@ class TradingBot:
         if eligible.empty:
             return None, None
 
-        lookback = max(2, int(self.config.get('ema_long', 18)))
-        max_active = max(1, int(self.config.get('chart_ob_max_active_per_side', 5)))
-        active_bullish = []
-        active_bearish = []
+        n = len(eligible)
+        length1 = max(1, int(self.config.get('ema_short', 5)))
+        length2 = length1 + 13
+        max_active = max(1, int(self.config.get('chart_ob_max_active_per_side', 15)))
 
-        for idx in range(len(eligible)):
-            row = eligible.iloc[idx]
-            close_price = float(row['close'])
+        o = eligible['open'].astype(float)
+        h = eligible['high'].astype(float)
+        l = eligible['low'].astype(float)
+        c = eligible['close'].astype(float)
+        v = eligible['volume'].astype(float).abs()
 
-            # Invalidation first (matches live OB lifecycle behavior).
-            active_bullish = [ob for ob in active_bullish if close_price >= ob['bottom']]
-            active_bearish = [ob for ob in active_bearish if close_price <= ob['top']]
-            if len(active_bullish) > max_active:
-                active_bullish = active_bullish[-max_active:]
-            if len(active_bearish) > max_active:
-                active_bearish = active_bearish[-max_active:]
+        ema1 = c.ewm(span=length1, adjust=False).mean()
+        ema2 = c.ewm(span=length2, adjust=False).mean()
+        lowest = l.rolling(window=length2, min_periods=1).min()
+        highest = h.rolling(window=length2, min_periods=1).max()
 
-            if bool(row.get('crossover')):
-                signal = int(row.get('signal', 0) or 0)
-                start_idx = max(0, idx - lookback + 1)
-                win = eligible.iloc[start_idx:idx + 1]
-                if win.empty:
-                    continue
+        prev_close = c.shift(1)
+        tr = pd.concat(
+            [
+                (h - l),
+                (h - prev_close).abs(),
+                (l - prev_close).abs(),
+            ],
+            axis=1,
+        ).max(axis=1)
+        # Pine ta.atr(200) uses Wilder smoothing (RMA), not a simple SMA of TR.
+        atr200 = tr.ewm(alpha=1.0 / 200.0, adjust=False).mean()
+        atr_hi_200 = atr200.rolling(window=200, min_periods=1).max()
+        atr = atr_hi_200 * 3.0
+        atr1 = atr_hi_200 * 2.0
 
-                if signal == 1:
-                    ref_idx = win['low'].idxmin()
-                    ref = eligible.loc[ref_idx]
-                    bottom = float(ref['low'])
-                    top = float(ref['high'])
-                    ref_pos = int(eligible.index.get_loc(ref_idx))
-                    segment_start = min(ref_pos, idx)
-                    segment_end = max(ref_pos, idx)
-                    segment = eligible.iloc[segment_start:segment_end + 1]
-                    ob_volume = float(segment['volume'].abs().sum())
-                    ob_time = ref['timestamp']
-                    active_bullish.append(
-                        {"time": ob_time, "top": top, "bottom": bottom, "volume": ob_volume}
-                    )
-                    if len(active_bullish) > max_active:
-                        active_bullish = active_bullish[-max_active:]
-                elif signal == -1:
-                    ref_idx = win['high'].idxmax()
-                    ref = eligible.loc[ref_idx]
-                    top = float(ref['high'])
-                    bottom = float(ref['low'])
-                    ref_pos = int(eligible.index.get_loc(ref_idx))
-                    segment_start = min(ref_pos, idx)
-                    segment_end = max(ref_pos, idx)
-                    segment = eligible.iloc[segment_start:segment_end + 1]
-                    ob_volume = float(segment['volume'].abs().sum())
-                    ob_time = ref['timestamp']
-                    active_bearish.append(
-                        {"time": ob_time, "top": top, "bottom": bottom, "volume": ob_volume}
-                    )
-                    if len(active_bearish) > max_active:
-                        active_bearish = active_bearish[-max_active:]
+        upper_lvl = []
+        lower_lvl = []
 
-        wanted = str(side).upper()
-        same_side_obs = active_bullish if wanted == "BUY" else active_bearish
-        same_side_obs = same_side_obs[-max_active:]
-        if not same_side_obs:
-            return None, None
+        def _price_eq(a, b, rel_tol=1e-9, abs_tol=1e-12):
+            return a == b or math.isclose(float(a), float(b), rel_tol=rel_tol, abs_tol=abs_tol)
 
-        selected = same_side_obs[-1]
-        selected_volume = float(selected.get('volume', 0.0) or 0.0)
-        total_volume = float(sum(ob.get('volume', 0.0) or 0.0 for ob in same_side_obs))
-        if selected_volume <= 0 or total_volume <= 0:
-            return None, None
+        def _newest_active_ob_share(levels):
+            """Same as TV chart labels: newest OB's vol / sum(active side vols) * 100."""
+            active = [
+                ob for ob in levels
+                if ob is not None and ob.get("vol") is not None
+            ]
+            if not active:
+                return None, None
+            newest = active[-1]
+            total = sum(float(ob["vol"]) for ob in active)
+            if total <= 0:
+                return None, None
+            v_new = float(newest["vol"])
+            pct = round((v_new / total) * 100.0, 2)
+            return pct, v_new
 
-        chart_percent = round((selected_volume / total_volume) * 100.0, 2)
-        return chart_percent, selected_volume
+        def _cleanup_side(levels, is_lower, close_price, atr_val):
+            if len(levels) > 1:
+                for i in range(1, len(levels)):
+                    cur = levels[i]
+                    prev = levels[i - 1]
+                    if cur is None or prev is None:
+                        continue
+
+                    if abs(float(cur["mid"]) - float(prev["mid"])) < float(atr_val):
+                        levels[i - 1] = None
+
+                    if is_lower:
+                        if close_price < float(cur["lower"]):
+                            levels[i] = None
+                    else:
+                        if close_price > float(cur["upper"]):
+                            levels[i] = None
+
+                if len(levels) > max_active:
+                    levels.pop(0)
+
+        for idx in range(1, n):
+            cross_up = (
+                pd.notna(ema1.iloc[idx - 1])
+                and pd.notna(ema2.iloc[idx - 1])
+                and float(ema1.iloc[idx - 1]) <= float(ema2.iloc[idx - 1])
+                and float(ema1.iloc[idx]) > float(ema2.iloc[idx])
+            )
+            cross_dn = (
+                pd.notna(ema1.iloc[idx - 1])
+                and pd.notna(ema2.iloc[idx - 1])
+                and float(ema1.iloc[idx - 1]) >= float(ema2.iloc[idx - 1])
+                and float(ema1.iloc[idx]) < float(ema2.iloc[idx])
+            )
+
+            if cross_up:
+                found = False
+                for i in range(1, length2 + 1):
+                    j = idx - i
+                    if j < 0:
+                        break
+                    if _price_eq(l.iloc[j], lowest.iloc[idx]) and not found:
+                        ob_vol = float(v.iloc[j:idx + 1].sum())
+                        src = min(float(o.iloc[j]), float(c.iloc[j]))
+                        low_ref = float(lowest.iloc[idx])
+                        atr1_ref = float(atr1.iloc[idx])
+                        if (src - low_ref) < (atr1_ref * 0.5):
+                            src = low_ref + (atr1_ref * 0.5)
+                        mid = (src + low_ref) / 2.0
+                        lower_lvl.append(
+                            {"upper": src, "lower": low_ref, "mid": mid, "vol": ob_vol}
+                        )
+                        found = True
+
+            if cross_dn:
+                found = False
+                for i in range(1, length2 + 1):
+                    j = idx - i
+                    if j < 0:
+                        break
+                    if _price_eq(h.iloc[j], highest.iloc[idx]) and not found:
+                        ob_vol = float(v.iloc[j:idx + 1].sum())
+                        src = max(float(o.iloc[j]), float(c.iloc[j]))
+                        high_ref = float(highest.iloc[idx])
+                        atr1_ref = float(atr1.iloc[idx])
+                        if (high_ref - src) < (atr1_ref * 0.5):
+                            src = high_ref - (atr1_ref * 0.5)
+                        mid = (src + high_ref) / 2.0
+                        upper_lvl.append(
+                            {"upper": high_ref, "lower": src, "mid": mid, "vol": ob_vol}
+                        )
+                        found = True
+
+            close_price = float(c.iloc[idx])
+            atr_val = float(atr.iloc[idx])
+            _cleanup_side(lower_lvl, True, close_price, atr_val)
+            _cleanup_side(upper_lvl, False, close_price, atr_val)
+
+        wanted = "BUY" if str(side).upper() == "BUY" else "SELL"
+        if wanted == "BUY":
+            return _newest_active_ob_share(lower_lvl)
+        return _newest_active_ob_share(upper_lvl)
 
     def _compute_chart_ob_percent(self, df, entry_candle_timestamp, side):
         chart_percent, _ = self._compute_chart_ob_snapshot(df, entry_candle_timestamp, side)
@@ -2049,11 +2118,27 @@ class TradingBot:
 
                 # Stop loss check
                 stop_loss = position['stop_loss']
-                if position['type'] == 'BUY' and current_low <= stop_loss:
+                prev_polled_price_raw = position.get('last_polled_price')
+                prev_polled_price = (
+                    float(prev_polled_price_raw)
+                    if prev_polled_price_raw is not None
+                    else float(current_price)
+                )
+                # If SL was updated in this loop, start a fresh 10s gap baseline now.
+                # This prevents retroactive SL hits against a tighter SL using older prev_poll.
+                if sl_updated:
+                    prev_polled_price = float(current_price)
+                # Polling-based exits: only act on current observed price at each 10s loop.
+                # This avoids retroactive exits based on full candle high/low extremes.
+                # We detect threshold touch within the observed 10s gap [prev_poll, current_poll].
+                if position['type'] == 'BUY' and (
+                    current_price <= stop_loss
+                    or (prev_polled_price > stop_loss and current_price <= stop_loss)
+                ):
                     sl_reason = self._stoploss_reason(position)
                     logger.warning(
                         f"ALERT: SL hit for {script_name}. Closing BUY @ Rs{current_price:.2f} "
-                        f"(SL: Rs{stop_loss:.2f}, low: Rs{current_low:.2f})"
+                        f"(SL: Rs{stop_loss:.2f}, prev_poll: Rs{prev_polled_price:.2f}, current: Rs{current_price:.2f})"
                     )
                     success, order_result = self._place_order_with_result(
                         script_name,
@@ -2083,11 +2168,14 @@ class TradingBot:
                     self.save_state()
                     continue
 
-                if position['type'] == 'SELL' and current_high >= stop_loss:
+                if position['type'] == 'SELL' and (
+                    current_price >= stop_loss
+                    or (prev_polled_price < stop_loss and current_price >= stop_loss)
+                ):
                     sl_reason = self._stoploss_reason(position)
                     logger.warning(
                         f"ALERT: SL hit for {script_name}. Closing SELL @ Rs{current_price:.2f} "
-                        f"(SL: Rs{stop_loss:.2f}, high: Rs{current_high:.2f})"
+                        f"(SL: Rs{stop_loss:.2f}, prev_poll: Rs{prev_polled_price:.2f}, current: Rs{current_price:.2f})"
                     )
                     success, order_result = self._place_order_with_result(
                         script_name,
@@ -2121,13 +2209,25 @@ class TradingBot:
                 favorable_move = self._favorable_move_percent(position['type'], position['entry_price'], current_price)
                 target_price = float(position.get('target_price', position['entry_price']))
                 target_hit = (
-                    (position['type'] == 'BUY' and current_high >= target_price) or
-                    (position['type'] == 'SELL' and current_low <= target_price)
+                    (
+                        position['type'] == 'BUY'
+                        and (
+                            current_price >= target_price
+                            or (prev_polled_price < target_price and current_price >= target_price)
+                        )
+                    ) or
+                    (
+                        position['type'] == 'SELL'
+                        and (
+                            current_price <= target_price
+                            or (prev_polled_price > target_price and current_price <= target_price)
+                        )
+                    )
                 )
                 if target_hit:
                     logger.info(
                         f" Target hit for {script_name}. Closing {position['type']} @ Rs{current_price:.2f} "
-                        f"(target: Rs{target_price:.2f}, high: Rs{current_high:.2f}, low: Rs{current_low:.2f}, move: {favorable_move:.2f}%)"
+                        f"(target: Rs{target_price:.2f}, prev_poll: Rs{prev_polled_price:.2f}, current: Rs{current_price:.2f}, move: {favorable_move:.2f}%)"
                     )
                     exit_side = "SELL" if position['type'] == 'BUY' else "BUY"
                     success, order_result = self._place_order_with_result(
@@ -2157,6 +2257,9 @@ class TradingBot:
                     del self.positions[script_name]
                     self.save_state()
                     continue
+
+                # Carry forward the current observation as baseline for next 10s gap check.
+                position['last_polled_price'] = float(current_price)
 
                 # Exit on OB zone breach (BigBeluga logic) or on confirmed crossover (reversal) with OB present
                 ob_zone_boundary = position.get('initial_sl')
@@ -2379,7 +2482,7 @@ class TradingBot:
                             )
                             self.last_entry_candle_processed[script_name] = entry_candle_timestamp
                             continue
-                        ob_percent = self._calculate_ob_percent(entry_price, initial_sl)
+                        ob_percent = float(chart_percent) if chart_percent is not None else 100.0
                         trade_prob, trade_prob_bucket = self._estimate_trade_probability(
                             script_name, True, ema_sep_pct, min_sep_pct, ob_percent, level_metrics
                         )
@@ -2419,7 +2522,8 @@ class TradingBot:
                             'stop_loss': initial_sl,
                             'target_price': target_price,
                             'trail_steps_locked': 0,
-                            'breakeven_done': False
+                            'breakeven_done': False,
+                            'last_polled_price': float(entry_price)
                         }
                         self.positions[script_name]['trade_id'] = self._build_trade_id(
                             script_name, self.positions[script_name]['entry_time']
@@ -2473,7 +2577,7 @@ class TradingBot:
                             )
                             self.last_entry_candle_processed[script_name] = entry_candle_timestamp
                             continue
-                        ob_percent = self._calculate_ob_percent(entry_price, initial_sl)
+                        ob_percent = float(chart_percent) if chart_percent is not None else 100.0
                         trade_prob, trade_prob_bucket = self._estimate_trade_probability(
                             script_name, True, ema_sep_pct, min_sep_pct, ob_percent, level_metrics
                         )
@@ -2513,7 +2617,8 @@ class TradingBot:
                             'stop_loss': initial_sl,
                             'target_price': target_price,
                             'trail_steps_locked': 0,
-                            'breakeven_done': False
+                            'breakeven_done': False,
+                            'last_polled_price': float(entry_price)
                         }
                         self.positions[script_name]['trade_id'] = self._build_trade_id(
                             script_name, self.positions[script_name]['entry_time']

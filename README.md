@@ -123,3 +123,13 @@ MIT License - Use at your own risk. Trading involves financial risk.
 
 **Disclaimer**: This software is for educational purposes. Past performance does not guarantee future results. Always test thoroughly before live trading.
 Volume order block and EMA crossover
+
+## OB% from Upstox (not `orders.log`)
+
+To print **BUY and SELL** OB% / OB volume for all configured symbols using **live Upstox candles** (same logic as the bot):
+
+```bash
+python scripts/fetch_ob_snapshot.py
+python scripts/fetch_ob_snapshot.py --json
+python scripts/fetch_ob_snapshot.py --scripts CRUDE NIFTY --json
+```
