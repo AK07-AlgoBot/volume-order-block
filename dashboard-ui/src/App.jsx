@@ -3,7 +3,13 @@ import { ClosedTradesTable } from "./components/ClosedTradesTable";
 import { LiveTradesTable } from "./components/LiveTradesTable";
 import { WeeklyPnlChart } from "./components/WeeklyPnlChart";
 
-const API_BASE = "http://localhost:8000";
+const API_BASE =
+  (import.meta.env.VITE_DASHBOARD_API_BASE || "").trim() || "http://127.0.0.1:8001";
+const LIVE_API_BASE =
+  (import.meta.env.VITE_DASHBOARD_LIVE_API_BASE || "").trim() || "http://127.0.0.1:8000";
+const WS_BASE = LIVE_API_BASE.startsWith("https://")
+  ? LIVE_API_BASE.replace("https://", "wss://")
+  : LIVE_API_BASE.replace("http://", "ws://");
 
 function getLocalDateIso() {
   const now = new Date();
@@ -110,6 +116,7 @@ export default function App() {
         if (!active) {
           return;
         }
+        // closed trades / pnl come from corrected API
         setLiveTrades(dedupeLiveTrades(payload.live_trades || []));
         setClosedTrades(payload.closed_trades || []);
         setClosedTradeDates(payload.closed_trade_dates || []);
@@ -126,7 +133,20 @@ export default function App() {
         markAppReady();
       });
 
-    const socket = new WebSocket("ws://localhost:8000/ws/trades");
+    // live positions come from bot-connected API instance.
+    fetch(`${LIVE_API_BASE}/api/dashboard/initial`)
+      .then((response) => response.json())
+      .then((payload) => {
+        if (!active) {
+          return;
+        }
+        setLiveTrades(dedupeLiveTrades(payload.live_trades || []));
+      })
+      .catch((error) => {
+        console.error("Failed live initial load", error);
+      });
+
+    const socket = new WebSocket(`${WS_BASE}/ws/trades`);
     socket.onopen = () => setConnected(true);
     socket.onclose = () => setConnected(false);
     socket.onerror = () => setConnected(false);
@@ -153,15 +173,23 @@ export default function App() {
               (item) => liveTradeIdentityKey(item) !== liveTradeIdentityKey(message.trade)
             )
           );
-          const tradeDate = String(message.trade?.closed_at || "").slice(0, 10);
-          if (tradeDate) {
-            setClosedTradeDates((prev) =>
-              prev.includes(tradeDate) ? prev : [tradeDate, ...prev].sort((a, b) => b.localeCompare(a))
-            );
-          }
-          if (!tradeDate || tradeDate === selectedClosedDateRef.current) {
-            setClosedTrades((prev) => upsertTrade(prev, message.trade));
-          }
+          // Closed trades are sourced from corrected API; refresh from there.
+          fetch(
+            `${API_BASE}/api/dashboard/closed-trades?date=${encodeURIComponent(
+              selectedClosedDateRef.current
+            )}`
+          )
+            .then((response) => response.json())
+            .then((payload) => {
+              if (!active) {
+                return;
+              }
+              setClosedTrades(payload.closed_trades || []);
+              setClosedTradeDates(payload.closed_trade_dates || []);
+            })
+            .catch((error) => {
+              console.error("Failed closed trades refresh", error);
+            });
           loadWeeklyPnl();
           return;
         }

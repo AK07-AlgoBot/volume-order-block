@@ -63,6 +63,7 @@ LINE_PATTERN = re.compile(
     r"(?P<script>[^|]+) \| ACTION=(?P<action>ENTRY|EXIT) \| SIDE=(?P<side>BUY|SELL) "
     r"\| PRICE=(?P<price>\d+(?:\.\d+)?)"
 )
+ORDER_ID_PATTERN = re.compile(r"order_id=(?P<order_id>\d+)")
 
 
 def _sort_closed_trades() -> None:
@@ -120,41 +121,99 @@ def _get_order_log_files() -> list[Path]:
     return deduped
 
 
+def _parse_order_events() -> list[tuple]:
+    """
+    Parse ENTRY/EXIT events from active + archived order logs and dedupe them.
+
+    Multiple archive snapshots can contain overlapping lines. Without dedupe,
+    FIFO entry/exit pairing may drift and produce incorrect closed trades.
+    """
+    order_files = _get_order_log_files()
+    if not order_files:
+        return []
+
+    parsed_events = []
+    for order_file in order_files:
+        lines = order_file.read_text(encoding="utf-8", errors="ignore").splitlines()
+        for raw in lines:
+            stripped = raw.strip()
+            match = LINE_PATTERN.search(stripped)
+            if not match:
+                continue
+            order_id_match = ORDER_ID_PATTERN.search(stripped)
+            order_id = order_id_match.group("order_id") if order_id_match else ""
+            parsed_events.append(
+                (
+                    _parse_ts(match.group("ts")),
+                    match.group("script").strip(),
+                    match.group("action"),
+                    match.group("side"),
+                    float(match.group("price")),
+                    order_id,
+                )
+            )
+
+    parsed_events.sort(key=lambda event: event[0])
+
+    # Global dedupe across current + archive snapshots.
+    deduped = []
+    seen = set()
+    for event in parsed_events:
+        key = (
+            event[0].isoformat(timespec="milliseconds"),
+            event[1],  # script
+            event[2],  # action
+            event[3],  # side
+            round(float(event[4]), 4),  # price
+            event[5],  # order_id (may be empty)
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(event)
+
+    return deduped
+
+
+def _pop_matching_entry(entry_queue: deque, exit_side: str) -> dict | None:
+    """
+    Pop the latest entry that can legally be closed by this exit side.
+    EXIT SELL must close BUY entry, EXIT BUY must close SELL entry.
+
+    We intentionally prefer latest-match (LIFO per side) because archive
+    gaps can leave stale unmatched entries from much older sessions; pairing
+    exits with the nearest valid prior entry prevents cross-day drift.
+    """
+    expected_entry_side = "BUY" if exit_side == "SELL" else "SELL"
+    for idx in range(len(entry_queue) - 1, -1, -1):
+        entry = entry_queue[idx]
+        if str(entry.get("side")) == expected_entry_side:
+            if idx == 0:
+                return entry_queue.popleft()
+            if idx == len(entry_queue) - 1:
+                return entry_queue.pop()
+            # deque has no pop(idx) for middle indices; remove by value occurrence.
+            selected = entry
+            entry_queue.remove(selected)
+            return selected
+    return None
+
+
 def _compute_weekly_pnl_from_orders(week_offset: int = 0) -> list[dict]:
     """Compute realized P&L for selected week's Monday-Friday from active+archived order logs."""
     weekdays = _week_monday_to_friday(week_offset)
     weekday_set = set(weekdays)
     pnl_by_date = {day: 0.0 for day in weekdays}
 
-    order_files = _get_order_log_files()
-    if not order_files:
+    parsed_events = _parse_order_events()
+    if not parsed_events:
         return [
             {"date": day.strftime("%Y-%m-%d"), "pnl": 0.0}
             for day in weekdays
         ]
-
-    parsed_events = []
-    for order_file in order_files:
-        lines = order_file.read_text(encoding="utf-8", errors="ignore").splitlines()
-        for raw in lines:
-            match = LINE_PATTERN.search(raw.strip())
-            if not match:
-                continue
-            ts = _parse_ts(match.group("ts"))
-            parsed_events.append(
-                (
-                    ts,
-                    match.group("script").strip(),
-                    match.group("action"),
-                    match.group("side"),
-                    float(match.group("price")),
-                )
-            )
-
-    parsed_events.sort(key=lambda event: event[0])
     entries = defaultdict(deque)
 
-    for ts, script, action, side, price in parsed_events:
+    for ts, script, action, side, price, _order_id in parsed_events:
 
         if action == "ENTRY":
             entries[script].append({"side": side, "price": price, "ts": ts})
@@ -163,7 +222,9 @@ def _compute_weekly_pnl_from_orders(week_offset: int = 0) -> list[dict]:
         if not entries[script]:
             continue
 
-        entry = entries[script].popleft()
+        entry = _pop_matching_entry(entries[script], side)
+        if entry is None:
+            continue
         lot = LOT_SIZES.get(script, 1)
 
         if entry["side"] == "BUY" and side == "SELL":
@@ -208,33 +269,14 @@ def _weekly_filter_options(count: int = 12) -> list[dict]:
 
 def _build_closed_trades_from_orders(limit: int = 300) -> list[dict]:
     """Reconstruct closed trades from order logs (active + archived)."""
-    order_files = _get_order_log_files()
-    if not order_files:
+    parsed_events = _parse_order_events()
+    if not parsed_events:
         return []
-
-    parsed_events = []
-    for order_file in order_files:
-        lines = order_file.read_text(encoding="utf-8", errors="ignore").splitlines()
-        for raw in lines:
-            match = LINE_PATTERN.search(raw.strip())
-            if not match:
-                continue
-            parsed_events.append(
-                (
-                    _parse_ts(match.group("ts")),
-                    match.group("script").strip(),
-                    match.group("action"),
-                    match.group("side"),
-                    float(match.group("price")),
-                )
-            )
-
-    parsed_events.sort(key=lambda event: event[0])
     entries = defaultdict(deque)
     reconstructed: list[dict] = []
     sequence = 0
 
-    for ts, script, action, side, price in parsed_events:
+    for ts, script, action, side, price, _order_id in parsed_events:
         if action == "ENTRY":
             entries[script].append({"side": side, "price": price, "ts": ts})
             continue
@@ -242,7 +284,9 @@ def _build_closed_trades_from_orders(limit: int = 300) -> list[dict]:
         if not entries[script]:
             continue
 
-        entry = entries[script].popleft()
+        entry = _pop_matching_entry(entries[script], side)
+        if entry is None:
+            continue
         lot = float(LOT_SIZES.get(script, 1))
         if entry["side"] == "BUY" and side == "SELL":
             realized = (price - entry["price"]) * lot
@@ -416,11 +460,14 @@ def _effective_closed_trades(limit: int = 1000) -> list[dict]:
     for trade in reconstructed:
         by_open_identity[_closed_trade_open_identity_key(trade)] = trade
 
-    # Overlay in-memory closed trades only when they are better/missing.
+    # Overlay in-memory closed trades only when missing from log reconstruction.
+    # This keeps orders.log/archive as canonical history and avoids showing
+    # a later in-memory close timestamp for a position that was already
+    # square-off/closed in archived logs.
     for trade in closed_trades:
         key = _closed_trade_open_identity_key(trade)
         existing = by_open_identity.get(key)
-        if existing is None or _prefer_closed_trade(trade, existing):
+        if existing is None:
             by_open_identity[key] = trade
 
     merged = _dedupe_closed_trades(list(by_open_identity.values()))
