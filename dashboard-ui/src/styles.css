@@ -226,6 +226,75 @@ tr:last-child td {
   margin-top: 1rem;
 }
 
+/* Symbol performance: do not reuse .trade-table (fixed layout + wrong col-* widths skew columns). */
+.symbol-perf-table-wrap {
+  max-height: 320px;
+  overflow: auto;
+}
+
+.symbol-perf-table {
+  width: 100%;
+  min-width: 640px;
+  table-layout: fixed;
+  border-collapse: collapse;
+  font-size: 0.84rem;
+}
+
+.symbol-perf-table .symbol-perf-col-symbol {
+  width: 22%;
+}
+
+.symbol-perf-table .symbol-perf-col-narrow {
+  width: 11%;
+}
+
+.symbol-perf-table .symbol-perf-col-wl {
+  width: 20%;
+}
+
+.symbol-perf-table .symbol-perf-col-pnl {
+  width: 18%;
+}
+
+.symbol-perf-table th,
+.symbol-perf-table td {
+  padding: 0.62rem 0.45rem;
+  border-bottom: 1px solid #1f2937;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  vertical-align: middle;
+  overflow: visible;
+  text-overflow: clip;
+  white-space: nowrap;
+}
+
+.symbol-perf-table th:first-child,
+.symbol-perf-table td:first-child {
+  text-align: left;
+}
+
+.symbol-perf-table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: rgba(15, 23, 42, 0.98);
+  color: #94a3b8;
+  font-weight: 600;
+}
+
+.symbol-perf-table .symbol-perf-wl {
+  white-space: normal;
+  word-break: break-word;
+}
+
+.symbol-perf-table .symbol-perf-empty {
+  text-align: left;
+}
+
+.symbol-perf-table tr:last-child td {
+  border-bottom: 0;
+}
+
 .subtle {
   color: #94a3b8;
   font-size: 0.75rem;

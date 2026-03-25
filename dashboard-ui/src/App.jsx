@@ -353,6 +353,15 @@ export default function App() {
           />
         </div>
 
+        <div className="closed-section">
+          <ClosedTradesTable
+            trades={closedTrades}
+            availableDates={closedTradeDates}
+            selectedDate={selectedClosedDate}
+            onDateChange={setSelectedClosedDate}
+          />
+        </div>
+
         <div className="symbol-perf-section">
           <SymbolPerformanceTable
             rows={symbolPerfRows}
@@ -361,15 +370,6 @@ export default function App() {
             tradeCount={symbolPerfMeta.trade_count}
             cutoffDate={symbolPerfMeta.cutoff_date}
             endDate={symbolPerfMeta.end_date}
-          />
-        </div>
-
-        <div className="closed-section">
-          <ClosedTradesTable
-            trades={closedTrades}
-            availableDates={closedTradeDates}
-            selectedDate={selectedClosedDate}
-            onDateChange={setSelectedClosedDate}
           />
         </div>
 

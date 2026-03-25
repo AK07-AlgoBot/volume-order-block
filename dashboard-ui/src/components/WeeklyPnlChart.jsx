@@ -9,6 +9,22 @@ import {
   YAxis,
 } from "recharts";
 
+function buildWeeklyChartData(points) {
+  const sorted = [...(points || [])].sort((a, b) =>
+    String(a?.date || "").localeCompare(String(b?.date || ""))
+  );
+  let cumulative = 0;
+  return sorted.map((point) => {
+    const daily = Number(point?.pnl ?? 0);
+    cumulative += daily;
+    return {
+      date: point.date,
+      daily,
+      cumulative: Number(cumulative.toFixed(2)),
+    };
+  });
+}
+
 export function WeeklyPnlChart({
   points,
   weekTotal,
@@ -16,9 +32,10 @@ export function WeeklyPnlChart({
   weekOptions,
   onWeekChange,
 }) {
-  const pnlValues = (points || []).map((point) => Number(point?.pnl ?? 0));
-  const maxGain = pnlValues.length ? Math.max(...pnlValues) : 0;
-  const maxLoss = pnlValues.length ? Math.min(...pnlValues) : 0;
+  const chartData = buildWeeklyChartData(points);
+  const dailyValues = chartData.map((row) => row.daily);
+  const maxGain = dailyValues.length ? Math.max(...dailyValues) : 0;
+  const maxLoss = dailyValues.length ? Math.min(...dailyValues) : 0;
   const maxGainText = maxGain.toFixed(2);
   const maxLossText = maxLoss.toFixed(2);
   const total = Number(weekTotal || 0);
@@ -44,10 +61,10 @@ export function WeeklyPnlChart({
             </span>
           </div>
           <div>
-            Max gain: <span style={{ color: "#4ade80", fontWeight: 700 }}>{maxGainText}</span>
+            Best day: <span style={{ color: "#4ade80", fontWeight: 700 }}>{maxGainText}</span>
           </div>
           <div>
-            Max loss: <span style={{ color: "#fb7185", fontWeight: 700 }}>{maxLossText}</span>
+            Worst day: <span style={{ color: "#fb7185", fontWeight: 700 }}>{maxLossText}</span>
           </div>
         </div>
       </div>
@@ -68,10 +85,12 @@ export function WeeklyPnlChart({
           ))}
         </select>
       </div>
-      <div className="subtle">Daily realized P&L</div>
+      <div className="subtle">
+        Cumulative realized P&L (running sum Mon→Fri; matches week total at last day)
+      </div>
       <div style={{ width: "100%", height: 320 }}>
         <ResponsiveContainer>
-          <AreaChart data={points}>
+          <AreaChart data={chartData}>
             <defs>
               <linearGradient id="pnlFill" x1="0" y1="0" x2="0" y2="1">
                 <stop offset="5%" stopColor="#22c55e" stopOpacity={0.7} />
@@ -82,14 +101,33 @@ export function WeeklyPnlChart({
             <XAxis dataKey="date" stroke="#94a3b8" />
             <YAxis stroke="#94a3b8" />
             <Tooltip
-              contentStyle={{
-                backgroundColor: "#020617",
-                border: "1px solid #334155",
-                color: "#e2e8f0",
+              content={({ active, payload, label }) => {
+                if (!active || !payload?.length) {
+                  return null;
+                }
+                const row = payload[0]?.payload;
+                if (!row) {
+                  return null;
+                }
+                return (
+                  <div
+                    style={{
+                      backgroundColor: "#020617",
+                      border: "1px solid #334155",
+                      color: "#e2e8f0",
+                      padding: "0.5rem 0.65rem",
+                      fontSize: "0.8rem",
+                    }}
+                  >
+                    <div style={{ marginBottom: "0.35rem", fontWeight: 600 }}>{label}</div>
+                    <div>That day: {Number(row.daily).toFixed(2)}</div>
+                    <div>Week so far: {Number(row.cumulative).toFixed(2)}</div>
+                  </div>
+                );
               }}
             />
             <ReferenceLine y={0} stroke="#64748b" strokeDasharray="4 4" />
-            <Area type="monotone" dataKey="pnl" stroke="#22c55e" fill="url(#pnlFill)" />
+            <Area type="monotone" dataKey="cumulative" stroke="#22c55e" fill="url(#pnlFill)" />
           </AreaChart>
         </ResponsiveContainer>
       </div>

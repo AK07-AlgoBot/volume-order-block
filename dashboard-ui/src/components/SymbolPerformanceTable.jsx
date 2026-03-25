@@ -35,22 +35,30 @@ export function SymbolPerformanceTable({
       <div className="subtle">
         {tradeCount} closed trades from {cutoffDate || "—"} to {endDate || "—"} (by close date)
       </div>
-      <div className="table-wrap closed-table-wrap">
-        <table className="trade-table symbol-perf-table">
+      <div className="table-wrap symbol-perf-table-wrap">
+        <table className="symbol-perf-table">
+          <colgroup>
+            <col className="symbol-perf-col-symbol" />
+            <col className="symbol-perf-col-narrow" />
+            <col className="symbol-perf-col-wl" />
+            <col className="symbol-perf-col-narrow" />
+            <col className="symbol-perf-col-pnl" />
+            <col className="symbol-perf-col-pnl" />
+          </colgroup>
           <thead>
             <tr>
-              <th className="col-left">Symbol</th>
-              <th className="col-center-num">Trades</th>
-              <th className="col-center-num">W / L</th>
-              <th className="col-center-num">Win %</th>
-              <th className="col-center-num">Total P&amp;L</th>
-              <th className="col-center-num">Avg P&amp;L</th>
+              <th scope="col">Symbol</th>
+              <th scope="col">Trades</th>
+              <th scope="col">W / L</th>
+              <th scope="col">Win %</th>
+              <th scope="col">Total P&amp;L</th>
+              <th scope="col">Avg P&amp;L</th>
             </tr>
           </thead>
           <tbody>
             {rows.length === 0 ? (
               <tr>
-                <td colSpan={6} className="subtle col-left">
+                <td colSpan={6} className="subtle symbol-perf-empty">
                   No closed trades in this window.
                 </td>
               </tr>
@@ -60,15 +68,15 @@ export function SymbolPerformanceTable({
                 const cls = total > 0 ? "pnl-pos" : total < 0 ? "pnl-neg" : "";
                 return (
                   <tr key={row.symbol}>
-                    <td className="col-left">{row.symbol}</td>
-                    <td className="col-center-num">{row.trades}</td>
-                    <td className="col-center-num">
+                    <td>{row.symbol}</td>
+                    <td>{row.trades}</td>
+                    <td className="symbol-perf-wl">
                       {row.wins} / {row.losses}
                       {row.breakeven ? ` (${row.breakeven} flat)` : ""}
                     </td>
-                    <td className="col-center-num">{asNumber(row.win_rate_pct).toFixed(1)}%</td>
-                    <td className={`col-center-num ${cls}`}>{total.toFixed(2)}</td>
-                    <td className="col-center-num">{asNumber(row.avg_pnl).toFixed(2)}</td>
+                    <td>{asNumber(row.win_rate_pct).toFixed(1)}%</td>
+                    <td className={cls}>{total.toFixed(2)}</td>
+                    <td>{asNumber(row.avg_pnl).toFixed(2)}</td>
                   </tr>
                 );
               })

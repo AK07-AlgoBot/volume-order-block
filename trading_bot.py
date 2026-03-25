@@ -70,6 +70,9 @@ def send_trade_notification(trade: dict, chat_id: int | str = None) -> bool:
     win_percent = trade.get("win_percent")
     chart_percent = trade.get("chart_percent")
     chart_volume = trade.get("chart_volume")
+    entry_adx = trade.get("entry_adx")
+    entry_plus_di = trade.get("entry_plus_di")
+    entry_minus_di = trade.get("entry_minus_di")
     timestamp = trade.get("timestamp")
 
     if isinstance(timestamp, datetime):
@@ -109,6 +112,9 @@ def send_trade_notification(trade: dict, chat_id: int | str = None) -> bool:
         + (f"\n*Chart Vol*: `{float(chart_volume):.0f}`" if chart_volume is not None else "")
         + (f"\n*Win %*: `{float(win_percent):.1f}%`" if win_percent is not None else "")
         + (f"\n*Trade P&L*: `{float(realized_pnl):.2f}`" if realized_pnl is not None else "")
+        + (f"\n*ADX*: `{float(entry_adx):.2f}`" if entry_adx is not None else "")
+        + (f"\n*+DI*: `{float(entry_plus_di):.2f}`" if entry_plus_di is not None else "")
+        + (f"\n*-DI*: `{float(entry_minus_di):.2f}`" if entry_minus_di is not None else "")
         + "\n"
         f"*Time*: `{ts_str}`"
     )
@@ -318,6 +324,18 @@ TRADING_CONFIG = {
         "CRUDE": 0.03,
         "GOLDMINI": 0.03,
         "SILVERMINI": 0.03
+    },
+    # ADX trend-strength gate for new entries.
+    "adx_filter_enabled": True,
+    "adx_period": 14,
+    "adx_min_threshold": 20.0,
+    "adx_min_threshold_by_script": {
+        "NIFTY": 20.0,
+        "BANKNIFTY": 20.0,
+        "SENSEX": 20.0,
+        "CRUDE": 22.0,
+        "GOLDMINI": 20.0,
+        "SILVERMINI": 22.0
     },
     # Heuristic confidence score (0-100) logged as trade_prob for ENTRY/SKIP analysis.
     "trade_probability_weights": {
@@ -681,6 +699,15 @@ class TradingBot:
             position['win_percent'] = self._backfill_win_percent(script_name, position)
             position['win_percent_source'] = "legacy_backfill_v2"
 
+        # ADX gate signal values (persist for auditability in orders.log).
+        # These may be missing from older saved state.
+        if 'signal_adx' not in position:
+            position['signal_adx'] = float(position.get('signal_adx', 0.0) or 0.0)
+        if 'signal_plus_di' not in position:
+            position['signal_plus_di'] = float(position.get('signal_plus_di', 0.0) or 0.0)
+        if 'signal_minus_di' not in position:
+            position['signal_minus_di'] = float(position.get('signal_minus_di', 0.0) or 0.0)
+
         if 'entry_time' not in position:
             position['entry_time'] = datetime.now().isoformat()
 
@@ -884,6 +911,9 @@ class TradingBot:
         chart_percent=None,
         chart_volume=None,
         realized_pnl=None,
+        entry_adx=None,
+        entry_plus_di=None,
+        entry_minus_di=None,
     ):
         order_token = self._get_order_token(script_name)
         order_qty = self._get_order_quantity(script_name)
@@ -901,6 +931,9 @@ class TradingBot:
                 "chart_percent": chart_percent,
                 "chart_volume": chart_volume,
                 "realized_pnl": realized_pnl,
+                "entry_adx": entry_adx,
+                "entry_plus_di": entry_plus_di,
+                "entry_minus_di": entry_minus_di,
                 "timestamp": self._now_ist(),
             }
             if not send_trade_notification(trade):
@@ -1353,6 +1386,56 @@ class TradingBot:
         bucket = "HIGH" if probability >= 70 else ("MEDIUM" if probability >= 50 else "LOW")
         return probability, bucket
 
+    def _get_adx_min_threshold(self, script_name):
+        by_script = self.config.get('adx_min_threshold_by_script', {})
+        if script_name in by_script:
+            return float(by_script[script_name])
+        return float(self.config.get('adx_min_threshold', 20.0))
+
+    @staticmethod
+    def _calculate_adx_values(df, period=14):
+        """
+        Wilder-style ADX and DI series.
+        Returns (adx, plus_di, minus_di) aligned to df index.
+        """
+        high = df['high'].astype(float)
+        low = df['low'].astype(float)
+        close = df['close'].astype(float)
+
+        up_move = high.diff()
+        down_move = -low.diff()
+
+        plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+        minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+        plus_dm = pd.Series(plus_dm, index=df.index)
+        minus_dm = pd.Series(minus_dm, index=df.index)
+
+        prev_close = close.shift(1)
+        tr = pd.concat(
+            [
+                (high - low),
+                (high - prev_close).abs(),
+                (low - prev_close).abs(),
+            ],
+            axis=1,
+        ).max(axis=1)
+
+        alpha = 1.0 / max(1, int(period))
+        atr = tr.ewm(alpha=alpha, adjust=False).mean()
+        plus_dm_sm = plus_dm.ewm(alpha=alpha, adjust=False).mean()
+        minus_dm_sm = minus_dm.ewm(alpha=alpha, adjust=False).mean()
+
+        plus_di = 100.0 * (plus_dm_sm / atr.replace(0, np.nan))
+        minus_di = 100.0 * (minus_dm_sm / atr.replace(0, np.nan))
+        dx = 100.0 * ((plus_di - minus_di).abs() / (plus_di + minus_di).replace(0, np.nan))
+        adx = dx.ewm(alpha=alpha, adjust=False).mean()
+
+        return (
+            adx.fillna(0.0),
+            plus_di.fillna(0.0),
+            minus_di.fillna(0.0),
+        )
+
     def _now_ist(self):
         return datetime.now(ZoneInfo("Asia/Kolkata"))
 
@@ -1473,6 +1556,9 @@ class TradingBot:
                         float(market_price),
                         float(position.get('quantity', self._get_order_quantity(script_name)))
                     ),
+                    entry_adx=float(position.get('signal_adx', 0.0) or 0.0),
+                    entry_plus_di=float(position.get('signal_plus_di', 0.0) or 0.0),
+                    entry_minus_di=float(position.get('signal_minus_di', 0.0) or 0.0),
                 )
                 if not success:
                     continue
@@ -1487,7 +1573,10 @@ class TradingBot:
                     extra=(
                         f"cutoff={cutoff_dt.strftime('%H:%M')}; "
                         f"price_source={price_source}; "
-                        f"order_id={order_id}"
+                        f"order_id={order_id}; "
+                        f"entry_adx={float(position.get('signal_adx', 0.0) or 0.0):.2f}; "
+                        f"plus_di={float(position.get('signal_plus_di', 0.0) or 0.0):.2f}; "
+                        f"minus_di={float(position.get('signal_minus_di', 0.0) or 0.0):.2f}"
                     )
                 )
                 self._notify_dashboard_trade_close(script_name, position, market_price)
@@ -1962,6 +2051,9 @@ class TradingBot:
             
             if df is None:
                 return None
+
+            adx_period = int(self.config.get('adx_period', 14))
+            adx_series, plus_di_series, minus_di_series = self._calculate_adx_values(df, adx_period)
             
             # Get latest values
             latest = df.iloc[-1]
@@ -1986,6 +2078,15 @@ class TradingBot:
                     closed_ema_long_prev = float(prev_row['ema_long'])
                 else:
                     closed_ema_long_prev = float(closed_ema_long)
+                if len(closed_row_idx) > 0:
+                    idx = int(closed_row_idx[0])
+                    closed_adx = float(adx_series.iloc[idx])
+                    closed_plus_di = float(plus_di_series.iloc[idx])
+                    closed_minus_di = float(minus_di_series.iloc[idx])
+                else:
+                    closed_adx = float(adx_series.iloc[-1])
+                    closed_plus_di = float(plus_di_series.iloc[-1])
+                    closed_minus_di = float(minus_di_series.iloc[-1])
             else:
                 closed_signal = signal
                 closed_crossover = False
@@ -1993,6 +2094,9 @@ class TradingBot:
                 closed_ema_long = ema_long
                 closed_timestamp = None
                 closed_ema_long_prev = float(ema_long)
+                closed_adx = float(adx_series.iloc[-1])
+                closed_plus_di = float(plus_di_series.iloc[-1])
+                closed_minus_di = float(minus_di_series.iloc[-1])
             
             # Determine signal status
             if signal == 1:
@@ -2023,6 +2127,9 @@ class TradingBot:
                 'entry_ema_short': closed_ema_short,
                 'entry_ema_long': closed_ema_long,
                 'entry_ema_long_prev': closed_ema_long_prev,
+                'entry_adx': closed_adx,
+                'entry_plus_di': closed_plus_di,
+                'entry_minus_di': closed_minus_di,
                 'entry_candle_timestamp': closed_timestamp,
                 'df': df
             }
@@ -2151,6 +2258,9 @@ class TradingBot:
                             float(current_price),
                             float(position.get('quantity', self._get_order_quantity(script_name)))
                         ),
+                        entry_adx=float(position.get('signal_adx', 0.0) or 0.0),
+                        entry_plus_di=float(position.get('signal_plus_di', 0.0) or 0.0),
+                        entry_minus_di=float(position.get('signal_minus_di', 0.0) or 0.0),
                     )
                     if not success:
                         continue
@@ -2161,7 +2271,12 @@ class TradingBot:
                         side="SELL",
                         price=current_price,
                         reason=sl_reason,
-                        extra=f"entry={position['entry_price']:.2f}; sl={stop_loss:.2f}; order_id={order_id}"
+                        extra=(
+                            f"entry={position['entry_price']:.2f}; sl={stop_loss:.2f}; order_id={order_id}; "
+                            f"entry_adx={float(position.get('signal_adx', 0.0) or 0.0):.2f}; "
+                            f"plus_di={float(position.get('signal_plus_di', 0.0) or 0.0):.2f}; "
+                            f"minus_di={float(position.get('signal_minus_di', 0.0) or 0.0):.2f}"
+                        )
                     )
                     self._notify_dashboard_trade_close(script_name, position, current_price)
                     del self.positions[script_name]
@@ -2188,6 +2303,9 @@ class TradingBot:
                             float(current_price),
                             float(position.get('quantity', self._get_order_quantity(script_name)))
                         ),
+                        entry_adx=float(position.get('signal_adx', 0.0) or 0.0),
+                        entry_plus_di=float(position.get('signal_plus_di', 0.0) or 0.0),
+                        entry_minus_di=float(position.get('signal_minus_di', 0.0) or 0.0),
                     )
                     if not success:
                         continue
@@ -2198,7 +2316,12 @@ class TradingBot:
                         side="BUY",
                         price=current_price,
                         reason=sl_reason,
-                        extra=f"entry={position['entry_price']:.2f}; sl={stop_loss:.2f}; order_id={order_id}"
+                        extra=(
+                            f"entry={position['entry_price']:.2f}; sl={stop_loss:.2f}; order_id={order_id}; "
+                            f"entry_adx={float(position.get('signal_adx', 0.0) or 0.0):.2f}; "
+                            f"plus_di={float(position.get('signal_plus_di', 0.0) or 0.0):.2f}; "
+                            f"minus_di={float(position.get('signal_minus_di', 0.0) or 0.0):.2f}"
+                        )
                     )
                     self._notify_dashboard_trade_close(script_name, position, current_price)
                     del self.positions[script_name]
@@ -2241,6 +2364,9 @@ class TradingBot:
                             float(current_price),
                             float(position.get('quantity', self._get_order_quantity(script_name)))
                         ),
+                        entry_adx=float(position.get('signal_adx', 0.0) or 0.0),
+                        entry_plus_di=float(position.get('signal_plus_di', 0.0) or 0.0),
+                        entry_minus_di=float(position.get('signal_minus_di', 0.0) or 0.0),
                     )
                     if not success:
                         continue
@@ -2251,7 +2377,12 @@ class TradingBot:
                         side=exit_side,
                         price=current_price,
                         reason="TARGET_HIT",
-                        extra=f"entry={position['entry_price']:.2f}; target={position.get('target_price', 0):.2f}; order_id={order_id}"
+                        extra=(
+                            f"entry={position['entry_price']:.2f}; target={position.get('target_price', 0):.2f}; order_id={order_id}; "
+                            f"entry_adx={float(position.get('signal_adx', 0.0) or 0.0):.2f}; "
+                            f"plus_di={float(position.get('signal_plus_di', 0.0) or 0.0):.2f}; "
+                            f"minus_di={float(position.get('signal_minus_di', 0.0) or 0.0):.2f}"
+                        )
                     )
                     self._notify_dashboard_trade_close(script_name, position, current_price)
                     del self.positions[script_name]
@@ -2299,6 +2430,9 @@ class TradingBot:
                             float(current_price),
                             float(position.get('quantity', self._get_order_quantity(script_name)))
                         ),
+                        entry_adx=float(position.get('signal_adx', 0.0) or 0.0),
+                        entry_plus_di=float(position.get('signal_plus_di', 0.0) or 0.0),
+                        entry_minus_di=float(position.get('signal_minus_di', 0.0) or 0.0),
                     )
                     if not success:
                         continue
@@ -2309,7 +2443,12 @@ class TradingBot:
                         side=exit_side,
                         price=current_price,
                         reason=reason,
-                        extra=f"signal_time={confirmed_time_text}; order_id={order_id}"
+                        extra=(
+                            f"signal_time={confirmed_time_text}; order_id={order_id}; "
+                            f"entry_adx={float(position.get('signal_adx', 0.0) or 0.0):.2f}; "
+                            f"plus_di={float(position.get('signal_plus_di', 0.0) or 0.0):.2f}; "
+                            f"minus_di={float(position.get('signal_minus_di', 0.0) or 0.0):.2f}"
+                        )
                     )
                     self._notify_dashboard_trade_close(script_name, position, current_price)
                     del self.positions[script_name]
@@ -2357,6 +2496,9 @@ class TradingBot:
                 entry_ema_short = float(data.get('entry_ema_short', data.get('ema_short', 0.0)))
                 entry_ema_long = float(data.get('entry_ema_long', data.get('ema_long', 0.0)))
                 entry_ema_long_prev = float(data.get('entry_ema_long_prev', entry_ema_long))
+                entry_adx = float(data.get('entry_adx', 0.0) or 0.0)
+                entry_plus_di = float(data.get('entry_plus_di', 0.0) or 0.0)
+                entry_minus_di = float(data.get('entry_minus_di', 0.0) or 0.0)
                 entry_price = current_price
                 signal_df = data.get('df')
                 level_metrics = self._compute_percent_level_metrics(
@@ -2389,6 +2531,7 @@ class TradingBot:
                                 script_name, False, ema_sep_pct, min_sep_pct, 0.0, level_metrics
                             )
                             skip_extra = (
+                                f"adx={entry_adx:.2f}; plus_di={entry_plus_di:.2f}; minus_di={entry_minus_di:.2f}; "
                                 f"ema18={entry_ema_long:.4f}; prev={entry_ema_long_prev:.4f}; "
                                 f"ema_sep_pct={ema_sep_pct:.4f}; trade_prob={trade_prob:.1f}; "
                                 f"trade_prob_bucket={trade_prob_bucket}; chart_pct={chart_percent}; "
@@ -2408,6 +2551,7 @@ class TradingBot:
                                 script_name, True, ema_sep_pct, min_sep_pct, 0.0, level_metrics
                             )
                             skip_extra = (
+                                f"adx={entry_adx:.2f}; plus_di={entry_plus_di:.2f}; minus_di={entry_minus_di:.2f}; "
                                 f"ema_sep_pct={ema_sep_pct:.4f}; min_sep_pct={min_sep_pct:.4f}; "
                                 f"trade_prob={trade_prob:.1f}; trade_prob_bucket={trade_prob_bucket}; "
                                 f"chart_pct={chart_percent}; chart_vol={chart_volume}; {levels_ctx}"
@@ -2429,6 +2573,7 @@ class TradingBot:
                                 script_name, False, ema_sep_pct, min_sep_pct, 0.0, level_metrics
                             )
                             skip_extra = (
+                                f"adx={entry_adx:.2f}; plus_di={entry_plus_di:.2f}; minus_di={entry_minus_di:.2f}; "
                                 f"ema18={entry_ema_long:.4f}; prev={entry_ema_long_prev:.4f}; "
                                 f"ema_sep_pct={ema_sep_pct:.4f}; trade_prob={trade_prob:.1f}; "
                                 f"trade_prob_bucket={trade_prob_bucket}; chart_pct={chart_percent}; "
@@ -2448,6 +2593,7 @@ class TradingBot:
                                 script_name, True, ema_sep_pct, min_sep_pct, 0.0, level_metrics
                             )
                             skip_extra = (
+                                f"adx={entry_adx:.2f}; plus_di={entry_plus_di:.2f}; minus_di={entry_minus_di:.2f}; "
                                 f"ema_sep_pct={ema_sep_pct:.4f}; min_sep_pct={min_sep_pct:.4f}; "
                                 f"trade_prob={trade_prob:.1f}; trade_prob_bucket={trade_prob_bucket}; "
                                 f"chart_pct={chart_percent}; chart_vol={chart_volume}; {levels_ctx}"
@@ -2462,6 +2608,30 @@ class TradingBot:
                             self.last_entry_candle_processed[script_name] = entry_candle_timestamp
                             continue
 
+                    if self.config.get('adx_filter_enabled', False):
+                        min_adx = self._get_adx_min_threshold(script_name)
+                        if entry_adx < min_adx:
+                            trade_prob, trade_prob_bucket = self._estimate_trade_probability(
+                                script_name, True, ema_sep_pct, min_sep_pct, 0.0, level_metrics
+                            )
+                            side_text = "BUY" if entry_signal == 1 else "SELL"
+                            skip_extra = (
+                                f"adx={entry_adx:.2f}; min_adx={min_adx:.2f}; "
+                                f"plus_di={entry_plus_di:.2f}; minus_di={entry_minus_di:.2f}; "
+                                f"ema_sep_pct={ema_sep_pct:.4f}; min_sep_pct={min_sep_pct:.4f}; "
+                                f"trade_prob={trade_prob:.1f}; trade_prob_bucket={trade_prob_bucket}; "
+                                f"chart_pct={chart_percent}; chart_vol={chart_volume}; {levels_ctx}"
+                            )
+                            self._log_skip_event(
+                                script_name, side_text, entry_price, "ADX_TOO_WEAK", skip_extra
+                            )
+                            logger.info(
+                                f"SKIP: {script_name} {side_text} ignored - ADX too weak "
+                                f"(adx={entry_adx:.2f} < min={min_adx:.2f})"
+                            )
+                            self.last_entry_candle_processed[script_name] = entry_candle_timestamp
+                            continue
+
                     if entry_signal == 1:
                         initial_sl = self._get_entry_swing_sl(signal_df, entry_candle_timestamp, 'BUY')
                         if initial_sl is None or initial_sl >= entry_price:
@@ -2469,6 +2639,7 @@ class TradingBot:
                                 script_name, True, ema_sep_pct, min_sep_pct, 0.0, level_metrics
                             )
                             skip_extra = (
+                                f"adx={entry_adx:.2f}; plus_di={entry_plus_di:.2f}; minus_di={entry_minus_di:.2f}; "
                                 f"sl={initial_sl}; entry={entry_price:.2f}; trade_prob={trade_prob:.1f}; "
                                 f"trade_prob_bucket={trade_prob_bucket}; chart_pct={chart_percent}; "
                                 f"chart_vol={chart_volume}; {levels_ctx}"
@@ -2498,6 +2669,9 @@ class TradingBot:
                             win_percent=trade_prob,
                             chart_percent=chart_percent,
                             chart_volume=chart_volume,
+                            entry_adx=entry_adx,
+                            entry_plus_di=entry_plus_di,
+                            entry_minus_di=entry_minus_di,
                         )
                         if not success:
                             self.last_entry_candle_processed[script_name] = entry_candle_timestamp
@@ -2513,6 +2687,9 @@ class TradingBot:
                             'signal_time': signal_timestamp_str,
                             'signal_ema_short': entry_ema_short,
                             'signal_ema_long': entry_ema_long,
+                            'signal_adx': entry_adx,
+                            'signal_plus_di': entry_plus_di,
+                            'signal_minus_di': entry_minus_di,
                             'chart_percent': chart_percent,
                             'chart_volume': chart_volume,
                             'win_percent': trade_prob,
@@ -2541,6 +2718,7 @@ class TradingBot:
                                 f"chart_pct={chart_percent}; "
                                 f"chart_vol={chart_volume}; "
                                 f"ema_sep_pct={ema_sep_pct:.4f}; "
+                                f"adx={entry_adx:.2f}; plus_di={entry_plus_di:.2f}; minus_di={entry_minus_di:.2f}; "
                                 f"trade_prob={trade_prob:.1f}; trade_prob_bucket={trade_prob_bucket}; "
                                 f"{levels_ctx}; "
                                 f"ema18_slope=UP({entry_ema_long - entry_ema_long_prev:+.4f}); "
@@ -2564,6 +2742,7 @@ class TradingBot:
                                 script_name, True, ema_sep_pct, min_sep_pct, 0.0, level_metrics
                             )
                             skip_extra = (
+                                f"adx={entry_adx:.2f}; plus_di={entry_plus_di:.2f}; minus_di={entry_minus_di:.2f}; "
                                 f"sl={initial_sl}; entry={entry_price:.2f}; trade_prob={trade_prob:.1f}; "
                                 f"trade_prob_bucket={trade_prob_bucket}; chart_pct={chart_percent}; "
                                 f"chart_vol={chart_volume}; {levels_ctx}"
@@ -2593,6 +2772,9 @@ class TradingBot:
                             win_percent=trade_prob,
                             chart_percent=chart_percent,
                             chart_volume=chart_volume,
+                            entry_adx=entry_adx,
+                            entry_plus_di=entry_plus_di,
+                            entry_minus_di=entry_minus_di,
                         )
                         if not success:
                             self.last_entry_candle_processed[script_name] = entry_candle_timestamp
@@ -2608,6 +2790,9 @@ class TradingBot:
                             'signal_time': signal_timestamp_str,
                             'signal_ema_short': entry_ema_short,
                             'signal_ema_long': entry_ema_long,
+                            'signal_adx': entry_adx,
+                            'signal_plus_di': entry_plus_di,
+                            'signal_minus_di': entry_minus_di,
                             'chart_percent': chart_percent,
                             'chart_volume': chart_volume,
                             'win_percent': trade_prob,
@@ -2636,6 +2821,7 @@ class TradingBot:
                                 f"chart_pct={chart_percent}; "
                                 f"chart_vol={chart_volume}; "
                                 f"ema_sep_pct={ema_sep_pct:.4f}; "
+                                f"adx={entry_adx:.2f}; plus_di={entry_plus_di:.2f}; minus_di={entry_minus_di:.2f}; "
                                 f"trade_prob={trade_prob:.1f}; trade_prob_bucket={trade_prob_bucket}; "
                                 f"{levels_ctx}; "
                                 f"ema18_slope=DOWN({entry_ema_long - entry_ema_long_prev:+.4f}); "
