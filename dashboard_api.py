@@ -1,5 +1,5 @@
 from collections import defaultdict, deque
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 import re
 from typing import List, Literal
@@ -327,6 +327,73 @@ def _trade_date_text(trade: dict) -> str:
     return ""
 
 
+def _closed_at_calendar_date(trade: dict) -> date | None:
+    """Parse YYYY-MM-DD from closed_at for rolling-window stats."""
+    text = str(trade.get("closed_at") or "").strip()
+    if len(text) < 10:
+        return None
+    try:
+        return datetime.strptime(text[:10], "%Y-%m-%d").date()
+    except ValueError:
+        return None
+
+
+def _compute_symbol_performance(days: int = 14) -> dict:
+    """
+    Aggregate realized P&L by symbol over the last N calendar days (inclusive of today),
+    using the same reconstructed closed trades as the dashboard tables.
+    """
+    safe_days = max(1, min(int(days), 366))
+    today = datetime.now().date()
+    cutoff = today - timedelta(days=safe_days - 1)
+
+    effective = _effective_closed_trades(limit=5000)
+    filtered: list[dict] = []
+    for trade in effective:
+        closed_day = _closed_at_calendar_date(trade)
+        if closed_day is None or closed_day < cutoff:
+            continue
+        filtered.append(trade)
+
+    by_symbol: dict[str, list[float]] = defaultdict(list)
+    for trade in filtered:
+        sym = str(trade.get("symbol") or "UNKNOWN").strip() or "UNKNOWN"
+        pnl = float(trade.get("realized_pnl") or 0.0)
+        by_symbol[sym].append(pnl)
+
+    rows: list[dict] = []
+    for symbol in sorted(by_symbol.keys()):
+        pnls = by_symbol[symbol]
+        n = len(pnls)
+        wins = sum(1 for p in pnls if p > 0.0)
+        losses = sum(1 for p in pnls if p < 0.0)
+        flat = n - wins - losses
+        total = round(sum(pnls), 2)
+        win_rate = round((wins / n) * 100.0, 1) if n else 0.0
+        avg = round(total / n, 2) if n else 0.0
+        rows.append(
+            {
+                "symbol": symbol,
+                "trades": n,
+                "wins": wins,
+                "losses": losses,
+                "breakeven": flat,
+                "win_rate_pct": win_rate,
+                "total_pnl": total,
+                "avg_pnl": avg,
+            }
+        )
+
+    rows.sort(key=lambda r: r["total_pnl"], reverse=True)
+    return {
+        "period_days": safe_days,
+        "cutoff_date": cutoff.isoformat(),
+        "end_date": today.isoformat(),
+        "trade_count": len(filtered),
+        "rows": rows,
+    }
+
+
 def _normalize_iso_second(value: str | None) -> str:
     """
     Normalize timestamp to second precision for dedupe stability.
@@ -503,6 +570,16 @@ async def dashboard_initial():
         "weekly_filter_options": _weekly_filter_options(count=12),
         "server_time": datetime.utcnow().isoformat(),
     }
+
+
+@app.get("/api/dashboard/symbol-performance")
+async def dashboard_symbol_performance(days: int = 14):
+    """Per-symbol stats from reconstructed closed trades (orders.log + archive)."""
+    try:
+        safe_days = int(days)
+    except (TypeError, ValueError):
+        safe_days = 14
+    return _compute_symbol_performance(safe_days)
 
 
 @app.get("/api/dashboard/closed-trades")

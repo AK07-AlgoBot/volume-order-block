@@ -1,15 +1,14 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { ClosedTradesTable } from "./components/ClosedTradesTable";
 import { LiveTradesTable } from "./components/LiveTradesTable";
+import { SymbolPerformanceTable } from "./components/SymbolPerformanceTable";
 import { WeeklyPnlChart } from "./components/WeeklyPnlChart";
 
 const API_BASE =
-  (import.meta.env.VITE_DASHBOARD_API_BASE || "").trim() || "http://127.0.0.1:8001";
-const LIVE_API_BASE =
-  (import.meta.env.VITE_DASHBOARD_LIVE_API_BASE || "").trim() || "http://127.0.0.1:8000";
-const WS_BASE = LIVE_API_BASE.startsWith("https://")
-  ? LIVE_API_BASE.replace("https://", "wss://")
-  : LIVE_API_BASE.replace("http://", "ws://");
+  (import.meta.env.VITE_DASHBOARD_API_BASE || "").trim() || "http://127.0.0.1:8000";
+const WS_BASE = API_BASE.startsWith("https://")
+  ? API_BASE.replace("https://", "wss://")
+  : API_BASE.replace("http://", "ws://");
 
 function getLocalDateIso() {
   const now = new Date();
@@ -71,8 +70,16 @@ export default function App() {
   const [weeklyFilterOptions, setWeeklyFilterOptions] = useState([]);
   const [selectedWeekOffset, setSelectedWeekOffset] = useState(0);
   const [connected, setConnected] = useState(false);
+  const [perfDays, setPerfDays] = useState(14);
+  const [symbolPerfRows, setSymbolPerfRows] = useState([]);
+  const [symbolPerfMeta, setSymbolPerfMeta] = useState({
+    trade_count: 0,
+    cutoff_date: "",
+    end_date: "",
+  });
   const selectedClosedDateRef = useRef(selectedClosedDate);
   const selectedWeekOffsetRef = useRef(selectedWeekOffset);
+  const perfDaysRef = useRef(perfDays);
   const appReadySentRef = useRef(false);
 
   const markAppReady = () => {
@@ -90,6 +97,10 @@ export default function App() {
   useEffect(() => {
     selectedWeekOffsetRef.current = selectedWeekOffset;
   }, [selectedWeekOffset]);
+
+  useEffect(() => {
+    perfDaysRef.current = perfDays;
+  }, [perfDays]);
 
   useEffect(() => {
     let active = true;
@@ -110,13 +121,34 @@ export default function App() {
         });
     };
 
+    const loadSymbolPerformance = () => {
+      const days = perfDaysRef.current;
+      fetch(
+        `${API_BASE}/api/dashboard/symbol-performance?days=${encodeURIComponent(days)}`
+      )
+        .then((response) => response.json())
+        .then((payload) => {
+          if (!active) {
+            return;
+          }
+          setSymbolPerfRows(payload.rows || []);
+          setSymbolPerfMeta({
+            trade_count: Number(payload.trade_count || 0),
+            cutoff_date: String(payload.cutoff_date || ""),
+            end_date: String(payload.end_date || ""),
+          });
+        })
+        .catch((error) => {
+          console.error("Failed symbol performance load", error);
+        });
+    };
+
     fetch(`${API_BASE}/api/dashboard/initial`)
       .then((response) => response.json())
       .then((payload) => {
         if (!active) {
           return;
         }
-        // closed trades / pnl come from corrected API
         setLiveTrades(dedupeLiveTrades(payload.live_trades || []));
         setClosedTrades(payload.closed_trades || []);
         setClosedTradeDates(payload.closed_trade_dates || []);
@@ -129,22 +161,10 @@ export default function App() {
       })
       .catch((error) => {
         console.error("Failed initial load", error);
-        // Even on failure, remove boot splash so user sees fallback UI instead of blocked overlay.
         markAppReady();
       });
 
-    // live positions come from bot-connected API instance.
-    fetch(`${LIVE_API_BASE}/api/dashboard/initial`)
-      .then((response) => response.json())
-      .then((payload) => {
-        if (!active) {
-          return;
-        }
-        setLiveTrades(dedupeLiveTrades(payload.live_trades || []));
-      })
-      .catch((error) => {
-        console.error("Failed live initial load", error);
-      });
+    loadSymbolPerformance();
 
     const socket = new WebSocket(`${WS_BASE}/ws/trades`);
     socket.onopen = () => setConnected(true);
@@ -173,7 +193,6 @@ export default function App() {
               (item) => liveTradeIdentityKey(item) !== liveTradeIdentityKey(message.trade)
             )
           );
-          // Closed trades are sourced from corrected API; refresh from there.
           fetch(
             `${API_BASE}/api/dashboard/closed-trades?date=${encodeURIComponent(
               selectedClosedDateRef.current
@@ -191,6 +210,7 @@ export default function App() {
               console.error("Failed closed trades refresh", error);
             });
           loadWeeklyPnl();
+          loadSymbolPerformance();
           return;
         }
 
@@ -217,11 +237,15 @@ export default function App() {
     const weeklyRefresh = window.setInterval(() => {
       loadWeeklyPnl();
     }, 30000);
+    const perfRefresh = window.setInterval(() => {
+      loadSymbolPerformance();
+    }, 120000);
 
     return () => {
       active = false;
       window.clearInterval(keepAlive);
       window.clearInterval(weeklyRefresh);
+      window.clearInterval(perfRefresh);
       socket.close();
     };
   }, [todayDateText]);
@@ -267,6 +291,31 @@ export default function App() {
     };
   }, [selectedClosedDate]);
 
+  useEffect(() => {
+    let active = true;
+    fetch(
+      `${API_BASE}/api/dashboard/symbol-performance?days=${encodeURIComponent(perfDays)}`
+    )
+      .then((response) => response.json())
+      .then((payload) => {
+        if (!active) {
+          return;
+        }
+        setSymbolPerfRows(payload.rows || []);
+        setSymbolPerfMeta({
+          trade_count: Number(payload.trade_count || 0),
+          cutoff_date: String(payload.cutoff_date || ""),
+          end_date: String(payload.end_date || ""),
+        });
+      })
+      .catch((error) => {
+        console.error("Failed symbol performance load", error);
+      });
+    return () => {
+      active = false;
+    };
+  }, [perfDays]);
+
   const todayRealized = useMemo(
     () => Number(weeklyPnl.find((point) => point.date === todayDateText)?.pnl || 0),
     [weeklyPnl, todayDateText]
@@ -301,6 +350,17 @@ export default function App() {
             selectedWeekOffset={selectedWeekOffset}
             weekOptions={weeklyFilterOptions}
             onWeekChange={setSelectedWeekOffset}
+          />
+        </div>
+
+        <div className="symbol-perf-section">
+          <SymbolPerformanceTable
+            rows={symbolPerfRows}
+            periodDays={perfDays}
+            onPeriodChange={setPerfDays}
+            tradeCount={symbolPerfMeta.trade_count}
+            cutoffDate={symbolPerfMeta.cutoff_date}
+            endDate={symbolPerfMeta.end_date}
           />
         </div>
 

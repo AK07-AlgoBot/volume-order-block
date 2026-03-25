@@ -222,6 +222,10 @@ tr:last-child td {
   margin-top: 1rem;
 }
 
+.symbol-perf-section {
+  margin-top: 1rem;
+}
+
 .subtle {
   color: #94a3b8;
   font-size: 0.75rem;
