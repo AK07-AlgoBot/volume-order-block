@@ -20,6 +20,13 @@ import numpy as np
 import requests
 from colorama import Fore, Style, init
 
+from upstox_credentials_store import (
+    CREDENTIALS_FILE,
+    DEFAULT_BASE_URL,
+    load_upstox_credentials,
+    mask_tail,
+)
+
 # Initialize colorama
 init(autoreset=True)
 
@@ -201,12 +208,9 @@ class DashboardClient:
 # CONFIGURATION
 # ============================================================================
 
-# Upstox API Configuration
+# Upstox API: use dashboard → Upstox settings, or upstox_credentials.json, or UPSTOX_* env vars.
 API_CONFIG = {
-    "access_token": "eyJ0eXAiOiJKV1QiLCJrZXlfaWQiOiJza192MS4wIiwiYWxnIjoiSFMyNTYifQ.eyJzdWIiOiI2RUJBVTQiLCJqdGkiOiI2OWMzNTMyMjBhNDlkMjYyNjdkYjcwMmMiLCJpc011bHRpQ2xpZW50IjpmYWxzZSwiaXNQbHVzUGxhbiI6ZmFsc2UsImlhdCI6MTc3NDQwODQ4MiwiaXNzIjoidWRhcGktZ2F0ZXdheS1zZXJ2aWNlIiwiZXhwIjoxNzc0NDc2MDAwfQ.pLf_YU7QOhjDFsMVVtyT7IIOvOs9sQaT3afdlcAYtZ8",
-    "api_key": "d9df59d8-e3c8-491e-9a7a-0bd19805ba8d",
-    "api_secret": "wu5npsei6y",
-    "base_url": "https://api.upstox.com/v2"
+    "base_url": DEFAULT_BASE_URL,
 }
 
 # Trading Configuration
@@ -382,7 +386,7 @@ STATE_FILE = Path("trading_state.json")
 LOG_FILE = Path("trading_bot.log")
 ORDER_LOG_FILE = Path("orders.log")
 MARKET_STATUS_LOG_FILE = Path("market_status.log")
-LOCK_FILE = Path("trading_bot.lock")
+LOCK_FILE = Path(__file__).resolve().parent / "trading_bot.lock"
 
 # ============================================================================
 # LOGGING SETUP
@@ -422,20 +426,38 @@ class UpstoxClient:
     """Upstox API v2 Client for market data and orders"""
     
     def __init__(self, access_token, base_url):
-        self.access_token = access_token
-        self.base_url = base_url
+        self.access_token = access_token or ""
+        self.base_url = base_url or DEFAULT_BASE_URL
         self.session = requests.Session()
-        self.session.headers.update({
-            "Authorization": f"Bearer {access_token}",
-            "Accept": "application/json"
-        })
+        self.set_access_token(self.access_token)
+
+    def set_access_token(self, access_token: str) -> None:
+        self.access_token = access_token or ""
+        self.session.headers.update(
+            {
+                "Authorization": f"Bearer {self.access_token}",
+                "Accept": "application/json",
+            }
+        )
+
+    def refresh_credentials_if_changed(self) -> None:
+        creds = load_upstox_credentials()
+        token = (creds.get("access_token") or "").strip()
+        if token and token != self.access_token:
+            logger.info("Reloading Upstox access token from disk (upstox_credentials.json)")
+            self.set_access_token(token)
     
     def get_user_profile(self):
         """Get user profile information"""
         try:
             url = f"{self.base_url}/user/profile"
-            response = self.session.get(url)
-            response.raise_for_status()
+            response = self.session.get(url, timeout=30)
+            if response.status_code != 200:
+                snippet = (response.text or "").replace("\n", " ")[:500]
+                logger.error(
+                    f"Upstox user profile HTTP {response.status_code}: {snippet or '(empty body)'}"
+                )
+                return None
             data = response.json()
             return data.get('data', {})
         except Exception as e:
@@ -2847,17 +2869,28 @@ class TradingBot:
         # Load previous state
         self.load_state()
         
-        # Verify credentials
-        profile = self.client.get_user_profile()
-        if profile:
-            logger.info(f"CONNECTED: Connected as: {profile.get('user_name', 'Unknown')}")
-        else:
-            logger.error("ERROR: Failed to connect to Upstox API")
-            return
+        # Verify credentials (retry: token may be pasted from dashboard after API starts)
+        while self.running:
+            self.client.refresh_credentials_if_changed()
+            profile = self.client.get_user_profile()
+            if profile:
+                logger.info(f"CONNECTED: Connected as: {profile.get('user_name', 'Unknown')}")
+                break
+            logger.warning(
+                "Upstox login failed (invalid or expired token). Credentials file: %s — "
+                "update token in dashboard or that file. If this path is not the repo you "
+                "edited, you are running a different copy of the bot. Retrying in 30s...",
+                CREDENTIALS_FILE.resolve(),
+            )
+            for _ in range(30):
+                if not self.running:
+                    return
+                time.sleep(1)
         
         try:
             while self.running:
                 try:
+                    self.client.refresh_credentials_if_changed()
                     # Process all scripts
                     script_data = []
                     for script_name, instrument_key in self.config['scripts'].items():
@@ -3010,6 +3043,19 @@ def main():
     print("   " + datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
     print("="*80)
     print(f"{Style.RESET_ALL}")
+
+    _creds0 = load_upstox_credentials()
+    _tok0 = (_creds0.get("access_token") or "").strip()
+    print(f"{Fore.CYAN}RUNNING SCRIPT:{Style.RESET_ALL} {Path(__file__).resolve()}")
+    print(f"{Fore.CYAN}CREDENTIALS FILE:{Style.RESET_ALL} {CREDENTIALS_FILE.resolve()}")
+    print(
+        f"{Fore.CYAN}ACCESS TOKEN:{Style.RESET_ALL} length={len(_tok0)} "
+        f"preview={mask_tail(_tok0) or '(empty)'}"
+    )
+    print(
+        f"{Fore.YELLOW}If login fails, confirm this CREDENTIALS FILE path matches where you "
+        f"saved the token in Cursor.{Style.RESET_ALL}\n"
+    )
     
     # Display public IP
     try:
@@ -3024,10 +3070,10 @@ def main():
     else:
         print("Telegram test message sent successfully.")
 
-    # Initialize client
+    creds = load_upstox_credentials()
     client = UpstoxClient(
-        API_CONFIG['access_token'],
-        API_CONFIG['base_url']
+        creds.get("access_token") or "",
+        creds.get("base_url") or API_CONFIG["base_url"],
     )
     
     # Initialize and run bot

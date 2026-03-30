@@ -82,19 +82,16 @@ python trading_bot.py
 
 ### Windows launchers
 
-- `run_bot.bat`: starts bot + dashboard API + dashboard UI (recommended daily launcher)
-- `run_bot.bat --bot-only` or `run_bot_only.bat`: starts only the trading bot
+- `start.bat` (or `.\start.ps1`): starts dashboard API, dashboard UI, and trading bot in one step
+- `start.bat -BotOnly` (or `.\start.ps1 -BotOnly`): trading bot only (no dashboard)
 
-## API Token Update
+## API credentials
 
-Update your access token in the configuration:
+Upstox access token, API key, and API secret are stored in `upstox_credentials.json` (gitignored). Copy `upstox_credentials.example.json` to that name on the server, or use **Dashboard → Upstox credentials** after the API is running. Optional env fallbacks (only where the file has no value yet): `UPSTOX_ACCESS_TOKEN`, `UPSTOX_API_KEY`, `UPSTOX_API_SECRET`. `UPSTOX_BASE_URL` applies only before `upstox_credentials.json` exists.
 
-```python
-API_CONFIG = {
-    "access_token": "your_new_token_here",
-    "base_url": "https://api.upstox.com/v2"
-}
-```
+On a public host, set `DASHBOARD_ADMIN_TOKEN` on the server and paste the same value in the dashboard “admin token” field before saving credentials. Use `DASHBOARD_CORS_ORIGINS` (comma-separated) if the UI is not served from `localhost:5173`.
+
+After a successful credential save, the dashboard API **recycles `trading_bot.py`**: it stops the process recorded in `trading_bot.lock` and starts a new one (same Python as `uvicorn`, or override with `TRADING_BOT_PYTHON`). Set `DASHBOARD_RESTART_BOT_ON_SAVE=0` to disable. On Linux, if the bot is a **systemd** unit, set `DASHBOARD_SYSTEMD_UNIT=your-bot.service` instead of direct spawn (the API runs `systemctl restart`; ensure the `uvicorn` user may run that, e.g. `sudoers`).
 
 ## Production Deployment
 

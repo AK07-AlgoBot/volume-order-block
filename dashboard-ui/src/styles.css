@@ -410,6 +410,93 @@ tr:last-child td {
   line-height: 1.2;
 }
 
+.upstox-settings {
+  margin-top: 1.25rem;
+}
+
+.upstox-settings-help {
+  margin: 0 0 0.75rem;
+  font-size: 0.8rem;
+  color: #94a3b8;
+  line-height: 1.45;
+}
+
+.inline-code {
+  font-family: ui-monospace, monospace;
+  font-size: 0.78rem;
+  color: #a5f3fc;
+}
+
+.upstox-field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  margin-bottom: 0.65rem;
+  font-size: 0.78rem;
+  color: #94a3b8;
+}
+
+.upstox-field input {
+  background: rgba(2, 6, 23, 0.9);
+  border: 1px solid #334155;
+  border-radius: 8px;
+  padding: 0.45rem 0.55rem;
+  color: #e2e8f0;
+  font-size: 0.85rem;
+}
+
+.upstox-field input:focus {
+  outline: 1px solid #22c55e;
+  border-color: #22c55e;
+}
+
+.upstox-previews {
+  font-size: 0.75rem;
+  margin-bottom: 0.65rem;
+}
+
+.upstox-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-top: 0.35rem;
+}
+
+.btn-primary {
+  background: linear-gradient(145deg, #16a34a, #059669);
+  color: #020617;
+  border: none;
+  border-radius: 10px;
+  padding: 0.45rem 0.9rem;
+  font-weight: 700;
+  font-size: 0.8rem;
+  cursor: pointer;
+}
+
+.btn-primary:hover {
+  filter: brightness(1.08);
+}
+
+.btn-ghost {
+  background: transparent;
+  border: 1px solid #334155;
+  color: #cbd5e1;
+  border-radius: 10px;
+  padding: 0.45rem 0.75rem;
+  font-size: 0.8rem;
+  cursor: pointer;
+}
+
+.btn-ghost:hover {
+  border-color: #64748b;
+}
+
+.upstox-status {
+  margin: 0.5rem 0 0;
+  font-size: 0.8rem;
+  color: #fcd34d;
+}
+
 @media (max-width: 980px) {
   .layout {
     grid-template-columns: 1fr;

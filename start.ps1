@@ -1,6 +1,7 @@
 param(
     [switch]$Force,
-    [switch]$UsePreviewUI = $true
+    [switch]$UsePreviewUI = $true,
+    [switch]$BotOnly
 )
 
 $ErrorActionPreference = "Stop"
@@ -55,6 +56,23 @@ function Test-CommandLineProcess {
 }
 
 $repoRoot = $PSScriptRoot
+
+if ($BotOnly) {
+    $botRunning = Test-CommandLineProcess -Pattern "trading_bot.py"
+    if ($botRunning -and -not $Force) {
+        Write-Host "Trading bot appears to be already running (use -Force to start another)."
+    }
+    else {
+        Start-ManagedProcess -Name "Trading Bot" -WorkingDirectory $repoRoot -Command @"
+Set-Location '$repoRoot'
+python trading_bot.py
+"@
+    }
+    Write-Host ""
+    Write-Host "Bot-only mode (no dashboard API/UI)."
+    exit 0
+}
+
 $uiPath = Join-Path $repoRoot "dashboard-ui"
 
 if (-not (Test-Path $uiPath)) {
@@ -182,5 +200,6 @@ Write-Host "All launch commands sent."
 Write-Host "Dashboard UI: http://localhost:5173"
 Write-Host "Dashboard API: http://localhost:8000"
 Write-Host ""
-Write-Host "Tip: Use .\run_all.ps1 -Force to start new API/UI instances even if ports are already active."
-Write-Host "Tip: Use .\run_all.ps1 -UsePreviewUI:\$false for Vite dev server."
+Write-Host "Tip: Use .\start.ps1 -Force to start new API/UI instances even if ports are already active."
+Write-Host "Tip: Use .\start.ps1 -UsePreviewUI:`$false for Vite dev server."
+Write-Host "Tip: Use .\start.ps1 -BotOnly for headless trading bot only."

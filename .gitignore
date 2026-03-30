@@ -46,3 +46,4 @@ config.json
 .env
 *.key
 *.token
+upstox_credentials.json

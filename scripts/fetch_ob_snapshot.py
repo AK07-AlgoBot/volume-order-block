@@ -34,13 +34,15 @@ def main() -> None:
     args = parser.parse_args()
 
     # Import after path fix; reduce noise when not --json
-    from trading_bot import API_CONFIG, TRADING_CONFIG, TradingBot, UpstoxClient
+    from trading_bot import TRADING_CONFIG, TradingBot, UpstoxClient
+    from upstox_credentials_store import load_upstox_credentials
 
     if args.json:
         logging.getLogger().handlers.clear()
         logging.basicConfig(level=logging.WARNING)
 
-    client = UpstoxClient(API_CONFIG["access_token"], API_CONFIG["base_url"])
+    creds = load_upstox_credentials()
+    client = UpstoxClient(creds.get("access_token") or "", creds.get("base_url") or "")
     bot = TradingBot(TRADING_CONFIG, client)
 
     all_scripts = list(TRADING_CONFIG.get("scripts", {}).items())

@@ -1,19 +1,39 @@
+import asyncio
 from collections import defaultdict, deque
 from datetime import date, datetime, timedelta
+import os
 from pathlib import Path
 import re
 from typing import List, Literal
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
+from bot_process_control import restart_trading_bot_after_credential_save
+from upstox_credentials_store import (
+    CREDENTIALS_FILE,
+    mask_tail,
+    normalize_access_token,
+    persist_credentials,
+    read_credentials_file,
+)
+
+
+_cors_raw = os.environ.get(
+    "DASHBOARD_CORS_ORIGINS",
+    "http://localhost:5173,http://127.0.0.1:5173",
+)
+_cors_origins = [o.strip() for o in _cors_raw.split(",") if o.strip()] or [
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+]
 
 app = FastAPI(title="AK07 Dashboard API", version="1.0.0")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+    allow_origins=_cors_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -41,6 +61,25 @@ class Trade(BaseModel):
 class WeeklyPnlPoint(BaseModel):
     date: str
     pnl: float
+
+
+class UpstoxSettingsBody(BaseModel):
+    access_token: str = ""
+    api_key: str = ""
+    api_secret: str = ""
+    base_url: str = ""
+
+
+def _require_dashboard_admin(request: Request) -> None:
+    expected = os.environ.get("DASHBOARD_ADMIN_TOKEN", "").strip()
+    if not expected:
+        return
+    got = (request.headers.get("X-Dashboard-Admin-Token") or "").strip()
+    if got != expected:
+        raise HTTPException(
+            status_code=401,
+            detail="Set header X-Dashboard-Admin-Token to match DASHBOARD_ADMIN_TOKEN on the server.",
+        )
 
 
 live_trades: dict[str, dict] = {}
@@ -699,3 +738,49 @@ async def set_weekly_pnl(points: list[WeeklyPnlPoint]):
     computed = _compute_weekly_pnl_from_orders(week_offset=0)
     await _broadcast({"type": "pnl_update", "weekly_pnl": computed})
     return {"ok": True, "points": len(computed), "source": "orders.log"}
+
+
+@app.get("/api/settings/upstox")
+async def get_upstox_settings():
+    data = read_credentials_file()
+    admin_required = bool(os.environ.get("DASHBOARD_ADMIN_TOKEN", "").strip())
+    return {
+        "base_url": data["base_url"],
+        "access_token_preview": mask_tail(data["access_token"]),
+        "api_key_preview": mask_tail(data["api_key"]),
+        "api_secret_preview": mask_tail(data["api_secret"]),
+        "has_access_token": bool(data["access_token"]),
+        "has_api_key": bool(data["api_key"]),
+        "has_api_secret": bool(data["api_secret"]),
+        "credentials_file": CREDENTIALS_FILE.name,
+        "credentials_path": str(CREDENTIALS_FILE.resolve()),
+        "admin_token_configured": admin_required,
+    }
+
+
+@app.post("/api/settings/upstox")
+async def post_upstox_settings(request: Request, body: UpstoxSettingsBody):
+    _require_dashboard_admin(request)
+    current = read_credentials_file()
+    updated = False
+    if body.access_token.strip():
+        current["access_token"] = normalize_access_token(body.access_token)
+        updated = True
+    if body.api_key.strip():
+        current["api_key"] = body.api_key.strip()
+        updated = True
+    if body.api_secret.strip():
+        current["api_secret"] = body.api_secret.strip()
+        updated = True
+    if body.base_url.strip():
+        current["base_url"] = body.base_url.strip()
+        updated = True
+    persist_credentials(current)
+    restart_result = None
+    if updated:
+        restart_result = await asyncio.to_thread(restart_trading_bot_after_credential_save)
+    return {
+        "ok": True,
+        "saved": CREDENTIALS_FILE.name,
+        "bot_restart": restart_result or {"restarted": False, "skipped": "no credential fields changed"},
+    }

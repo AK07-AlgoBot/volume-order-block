@@ -7,41 +7,30 @@ Get your trading bot running in **5 minutes**!
 pip install -r requirements.txt
 ```
 
-## Step 2: Update Access Token ⏱️ 1 min
+## Step 2: Upstox credentials ⏱️ 1 min
 
-**Option A: Use the token updater (Easy)**
-```powershell
-# Double-click this file or run:
-update_token.bat
-```
+**Option A (recommended):** Start the stack (`start.bat`), open the dashboard at `http://localhost:5173`, scroll to **Upstox credentials**, paste your daily access token (and key/secret if you use them), then save.
 
-**Option B: Edit manually**
-
-Open `trading_bot.py` and find line 23:
-```python
-"access_token": "YOUR_TOKEN_HERE",
-```
-
-Replace with your Upstox access token.
+**Option B:** Copy `upstox_credentials.example.json` to `upstox_credentials.json` in the project root and edit the values (this file is gitignored).
 
 ## Step 3: Run the Bot + UI ⏱️ 30 sec
 
-**Option A: Using batch file (recommended)**
+**Option A: Single launcher (recommended)**
 ```powershell
-# Double-click this file or run:
-run_bot.bat
+# Double-click or run:
+start.bat
 ```
 
-This now starts everything:
-- Trading bot
+This starts everything:
+
 - Dashboard API (`http://localhost:8000`)
 - Dashboard UI (`http://localhost:5173`)
+- Trading bot (waits and retries until a valid token is on file or in env)
 
-Need bot only? Use:
+Bot only (no dashboard):
+
 ```powershell
-run_bot.bat --bot-only
-# or
-run_bot_only.bat
+start.bat -BotOnly
 ```
 
 **Option B: Using command line**
@@ -230,8 +219,7 @@ pip install -r requirements.txt
 
 ### "Invalid token" error
 - Get new token from Upstox
-- Update in `trading_bot.py` line 23
-- Or use `update_token.bat`
+- Update via dashboard **Upstox credentials** or edit `upstox_credentials.json`
 
 ### "No data fetched" error
 - Check if market is open (9:15 AM - 3:30 PM IST)

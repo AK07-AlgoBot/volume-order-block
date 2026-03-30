@@ -3,6 +3,7 @@ import { ClosedTradesTable } from "./components/ClosedTradesTable";
 import { LiveTradesTable } from "./components/LiveTradesTable";
 import { SymbolPerformanceTable } from "./components/SymbolPerformanceTable";
 import { WeeklyPnlChart } from "./components/WeeklyPnlChart";
+import { UpstoxSettingsCard } from "./components/UpstoxSettingsCard";
 
 const API_BASE =
   (import.meta.env.VITE_DASHBOARD_API_BASE || "").trim() || "http://127.0.0.1:8000";
@@ -372,6 +373,8 @@ export default function App() {
             endDate={symbolPerfMeta.end_date}
           />
         </div>
+
+        <UpstoxSettingsCard />
 
         <div className="subtle" style={{ marginTop: "0.75rem", marginBottom: "1.5rem" }}>
           Today realized P&L: {todayRealized.toFixed(2)}
