@@ -21,11 +21,15 @@ import requests
 from colorama import Fore, Style, init
 
 from upstox_credentials_store import (
-    CREDENTIALS_FILE,
     DEFAULT_BASE_URL,
-    load_upstox_credentials,
+    credentials_file_for_user,
+    list_usernames_from_auth_store,
+    load_upstox_credentials_for_user,
     mask_tail,
+    sanitize_username,
+    user_data_dir,
 )
+from trading_preferences_store import read_trading_preferences
 
 # Initialize colorama
 init(autoreset=True)
@@ -38,6 +42,12 @@ TELEGRAM_BOT_TOKEN = "8376419713:AAENJb_Rta0qBA1ypZsHZvkfOqSWTGP256Y"
 TELEGRAM_API_URL = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
 TELEGRAM_GROUP_CHAT_ID = -5105991026
 
+
+def telegram_notifications_enabled_for_user(username: str) -> bool:
+    """Only the dashboard holder (admin role) account should send Telegram (avoid duplicate alerts per Upstox account)."""
+    return sanitize_username(username) == "AK07"
+
+
 # Dashboard API
 DASHBOARD_CONFIG = {
     "enabled": True,
@@ -47,6 +57,8 @@ DASHBOARD_CONFIG = {
 }
 
 MCX_INSTRUMENTS_URL = "https://assets.upstox.com/market-quote/instruments/exchange/MCX.json.gz"
+NSE_INSTRUMENTS_URL = "https://assets.upstox.com/market-quote/instruments/exchange/NSE.json.gz"
+BSE_INSTRUMENTS_URL = "https://assets.upstox.com/market-quote/instruments/exchange/BSE.json.gz"
 
 
 def send_trade_notification(trade: dict, chat_id: int | str = None) -> bool:
@@ -106,8 +118,12 @@ def send_trade_notification(trade: dict, chat_id: int | str = None) -> bool:
     else:
         title = "✅ *Trade Update*"
 
+    acct = str(trade.get("account") or "").strip()
+    acct_line = f"*Account*: `{acct}`\n" if acct else ""
+
     message = (
         f"{title}\n"
+        f"{acct_line}"
         f"*Symbol*: `{symbol}`\n"
         f"*Action*: *{str(action).upper()}*\n"
         f"*Quantity*: `{quantity}`\n"
@@ -166,20 +182,33 @@ def send_telegram_test_message(message: str = "Hi from VOLUME-ORDER-BLOCK bot") 
 class DashboardClient:
     """Thin client for dashboard API with batch update support."""
 
-    def __init__(self, enabled=True, base_url="http://localhost:8000", timeout_seconds=2.0):
+    def __init__(
+        self,
+        trading_user: str,
+        enabled=True,
+        base_url="http://localhost:8000",
+        timeout_seconds=2.0,
+    ):
         self.enabled = enabled
         self.base_url = base_url.rstrip("/")
         self.timeout_seconds = timeout_seconds
         self.session = requests.Session()
         self._logger = logging.getLogger(__name__)
+        self._bot_token = os.environ.get("BOT_API_TOKEN", "").strip()
+        self._trading_user = sanitize_username(trading_user)
 
     def _post_json(self, endpoint, payload):
         if not self.enabled:
             return True
 
         url = f"{self.base_url}{endpoint}"
+        headers = {"X-Trading-User": self._trading_user}
+        if self._bot_token:
+            headers["X-Bot-Token"] = self._bot_token
         try:
-            response = self.session.post(url, json=payload, timeout=self.timeout_seconds)
+            response = self.session.post(
+                url, json=payload, timeout=self.timeout_seconds, headers=headers
+            )
             if not response.ok:
                 self._logger.error(
                     f"Dashboard API failed [{endpoint}] {response.status_code}: {response.text[:300]}"
@@ -365,6 +394,11 @@ TRADING_CONFIG = {
     "contract_roll_retry_seconds": 300,  # seconds between roll attempts per script
     "contract_roll_mcx_cache_seconds": 21600,  # 6h MCX instrument cache window
     "quantity": 1,  # Number of lots per order
+    # Optional per-script exchange quantity override for order placement.
+    # Example: CRUDE quantity=1 (instead of lots*lot_size) to match broker setup.
+    "order_quantity_override_by_script": {
+        "CRUDE": 1
+    },
     "segment_scripts": {
         "NSE": ["NIFTY", "BANKNIFTY", "SENSEX"],
         "MCX": ["CRUDE", "GOLDMINI", "SILVERMINI"]
@@ -381,42 +415,16 @@ TRADING_CONFIG = {
     "auto_archive_on_shutdown": True
 }
 
-# File paths
-STATE_FILE = Path("trading_state.json")
-LOG_FILE = Path("trading_bot.log")
-ORDER_LOG_FILE = Path("orders.log")
-MARKET_STATUS_LOG_FILE = Path("market_status.log")
-LOCK_FILE = Path(__file__).resolve().parent / "trading_bot.lock"
+REPO_ROOT = Path(__file__).resolve().parent
+LOCK_FILE = REPO_ROOT / "trading_bot.lock"
 
-# ============================================================================
-# LOGGING SETUP
-# ============================================================================
-
+# Console-only bootstrap; per-account file loggers are attached in TradingBot.__init__
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler(LOG_FILE, encoding='utf-8'),
-        logging.StreamHandler(sys.stdout)
-    ]
+    format="%(asctime)s - %(levelname)s - %(message)s",
+    handlers=[logging.StreamHandler(sys.stdout)],
 )
 logger = logging.getLogger(__name__)
-
-order_logger = logging.getLogger("order_logger")
-order_logger.setLevel(logging.INFO)
-order_logger.propagate = False
-if not order_logger.handlers:
-    order_handler = logging.FileHandler(ORDER_LOG_FILE, encoding='utf-8')
-    order_handler.setFormatter(logging.Formatter('%(asctime)s - %(message)s'))
-    order_logger.addHandler(order_handler)
-
-market_status_logger = logging.getLogger("market_status_logger")
-market_status_logger.setLevel(logging.INFO)
-market_status_logger.propagate = False
-if not market_status_logger.handlers:
-    market_status_handler = logging.FileHandler(MARKET_STATUS_LOG_FILE, encoding='utf-8')
-    market_status_handler.setFormatter(logging.Formatter('%(asctime)s - %(message)s'))
-    market_status_logger.addHandler(market_status_handler)
 
 # ============================================================================
 # UPSTOX API CLIENT
@@ -424,8 +432,10 @@ if not market_status_logger.handlers:
 
 class UpstoxClient:
     """Upstox API v2 Client for market data and orders"""
-    
-    def __init__(self, access_token, base_url):
+
+    def __init__(self, access_token, base_url, username: str, log: logging.Logger | None = None):
+        self._username = sanitize_username(username)
+        self._log = log or logger
         self.access_token = access_token or ""
         self.base_url = base_url or DEFAULT_BASE_URL
         self.session = requests.Session()
@@ -441,10 +451,13 @@ class UpstoxClient:
         )
 
     def refresh_credentials_if_changed(self) -> None:
-        creds = load_upstox_credentials()
+        creds = load_upstox_credentials_for_user(self._username)
         token = (creds.get("access_token") or "").strip()
         if token and token != self.access_token:
-            logger.info("Reloading Upstox access token from disk (upstox_credentials.json)")
+            self._log.info(
+                "Reloading Upstox access token from disk (%s)",
+                credentials_file_for_user(self._username).name,
+            )
             self.set_access_token(token)
     
     def get_user_profile(self):
@@ -454,14 +467,14 @@ class UpstoxClient:
             response = self.session.get(url, timeout=30)
             if response.status_code != 200:
                 snippet = (response.text or "").replace("\n", " ")[:500]
-                logger.error(
+                self._log.error(
                     f"Upstox user profile HTTP {response.status_code}: {snippet or '(empty body)'}"
                 )
                 return None
             data = response.json()
             return data.get('data', {})
         except Exception as e:
-            logger.error(f"Error fetching user profile: {e}")
+            self._log.error(f"Error fetching user profile: {e}")
             return None
     
     def get_historical_candles(self, instrument_key, interval, from_date, to_date):
@@ -481,9 +494,9 @@ class UpstoxClient:
                     return df
             return None
         except Exception as e:
-            logger.error(f"Error fetching historical candles: {e}")
+            self._log.error(f"Error fetching historical candles: {e}")
             return None
-    
+
     def get_intraday_candles(self, instrument_key, interval):
         """Get intraday candle data"""
         try:
@@ -501,9 +514,9 @@ class UpstoxClient:
                     return df
             return None
         except Exception as e:
-            logger.error(f"Error fetching intraday candles: {e}")
+            self._log.error(f"Error fetching intraday candles: {e}")
             return None
-    
+
     def place_order(self, instrument_key, quantity, transaction_type, order_type="MARKET", price=None):
         """Place an order"""
         payload = {
@@ -541,7 +554,9 @@ class UpstoxClient:
                 response_data = response.json() if response.text else {}
 
                 if response.status_code == 200 and response_data.get('status') == 'success':
-                    logger.info(f" Order placed via {url}: {transaction_type} {quantity} of {instrument_key}")
+                    self._log.info(
+                        f" Order placed via {url}: {transaction_type} {quantity} of {instrument_key}"
+                    )
                     return {
                         "status": "success",
                         "data": response_data.get('data', {}),
@@ -562,7 +577,7 @@ class UpstoxClient:
             except Exception as e:
                 last_error = str(e)
 
-        logger.error(
+        self._log.error(
             f"ERROR: Order failed on all endpoints for {instrument_key} {transaction_type} qty={quantity}. "
             f"Last endpoint={last_endpoint}, error={last_error}"
         )
@@ -610,11 +625,67 @@ class TechnicalAnalyzer:
 # ============================================================================
 
 class TradingBot:
-    """Main trading bot engine"""
-    
-    def __init__(self, config, client):
+    """Main trading bot engine (one instance per dashboard user / Upstox account).
+
+    Per-user logs under server/data/users/<username>/logs/ (not shared across accounts):
+
+    - trading_bot.log — Operational log (API errors, signals, VERIFY lines, EOD). Same lines also go
+      to stdout with a [username] prefix so a multi-account process does not mix accounts in files,
+      only on the shared console stream.
+
+    - orders.log — Structured ENTRY / EXIT / SKIP / ORDER_FAILED lines only; parsed by the dashboard
+      for P&L and history. Intentionally not duplicated into trading_bot.log.
+
+    - market_status.log — One line per script per loop (EMA + signal snapshot). Overlaps somewhat
+      with the colored console table; set TRADING_BOT_WRITE_MARKET_STATUS_LOG=0 to skip this file.
+    """
+
+    def __init__(self, config, client: UpstoxClient, username: str):
+        self.username = sanitize_username(username)
         self.config = config
         self.client = client
+        self.state_file = user_data_dir(self.username) / "trading_state.json"
+        logs_dir = user_data_dir(self.username) / "logs"
+        logs_dir.mkdir(parents=True, exist_ok=True)
+        write_market_status_file = os.environ.get(
+            "TRADING_BOT_WRITE_MARKET_STATUS_LOG", "1"
+        ).strip().lower() not in ("0", "false", "no", "")
+
+        fmt_file = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
+        fmt_console = logging.Formatter(
+            f"%(asctime)s - %(levelname)s - [{self.username}] %(message)s"
+        )
+
+        self._bot_logger = logging.getLogger(f"trading_bot.{self.username}")
+        self._bot_logger.setLevel(logging.INFO)
+        self._bot_logger.propagate = False
+        self._bot_logger.handlers.clear()
+        bf = logging.FileHandler(logs_dir / "trading_bot.log", encoding="utf-8")
+        bf.setFormatter(fmt_file)
+        self._bot_logger.addHandler(bf)
+        bc = logging.StreamHandler(sys.stdout)
+        bc.setFormatter(fmt_console)
+        self._bot_logger.addHandler(bc)
+
+        self._order_logger = logging.getLogger(f"orders.{self.username}")
+        self._order_logger.setLevel(logging.INFO)
+        self._order_logger.propagate = False
+        self._order_logger.handlers.clear()
+        oh = logging.FileHandler(logs_dir / "orders.log", encoding="utf-8")
+        oh.setFormatter(logging.Formatter("%(asctime)s - %(message)s"))
+        self._order_logger.addHandler(oh)
+
+        self._market_status_logger = logging.getLogger(f"market_status.{self.username}")
+        self._market_status_logger.setLevel(logging.INFO)
+        self._market_status_logger.propagate = False
+        self._market_status_logger.handlers.clear()
+        if write_market_status_file:
+            mh = logging.FileHandler(logs_dir / "market_status.log", encoding="utf-8")
+            mh.setFormatter(logging.Formatter("%(asctime)s - %(message)s"))
+            self._market_status_logger.addHandler(mh)
+        else:
+            self._market_status_logger.addHandler(logging.NullHandler())
+
         self.positions = {}
         self.total_pnl = 0
         self.running = True
@@ -625,6 +696,7 @@ class TradingBot:
         self.last_position_eval_logged = {}
         self.eod_squareoff_done = {}
         self.dashboard_client = DashboardClient(
+            self.username,
             enabled=DASHBOARD_CONFIG.get("enabled", True),
             base_url=DASHBOARD_CONFIG.get("base_url", "http://localhost:8000"),
             timeout_seconds=float(DASHBOARD_CONFIG.get("timeout_seconds", 2.0)),
@@ -635,33 +707,39 @@ class TradingBot:
         self._last_contract_roll_attempt = {}
         self._mcx_instruments_cache = []
         self._mcx_instruments_cache_at = 0.0
-        
+        self._nse_instruments_cache = []
+        self._nse_instruments_cache_at = 0.0
+        self._bse_instruments_cache = []
+        self._bse_instruments_cache_at = 0.0
+        self.client._log = self._bot_logger
+
     def load_state(self):
         """Load saved trading state"""
         try:
-            if STATE_FILE.exists():
-                with open(STATE_FILE, 'r') as f:
+            if self.state_file.exists():
+                with open(self.state_file, "r", encoding="utf-8") as f:
                     state = json.load(f)
-                    self.positions = state.get('positions', {})
-                    self.total_pnl = state.get('total_pnl', 0)
-                    self.eod_squareoff_done = state.get('eod_squareoff_done', {})
-                    logger.info(f"STATE LOADED: {len(self.positions)} positions")
+                    self.positions = state.get("positions", {})
+                    self.total_pnl = state.get("total_pnl", 0)
+                    self.eod_squareoff_done = state.get("eod_squareoff_done", {})
+                    self._bot_logger.info(f"STATE LOADED: {len(self.positions)} positions")
         except Exception as e:
-            logger.warning(f"WARNING: Could not load state: {e}")
-    
+            self._bot_logger.warning(f"WARNING: Could not load state: {e}")
+
     def save_state(self):
         """Save current trading state"""
         try:
+            self.state_file.parent.mkdir(parents=True, exist_ok=True)
             state = {
-                'positions': self.positions,
-                'total_pnl': self.total_pnl,
-                'eod_squareoff_done': self.eod_squareoff_done,
-                'timestamp': datetime.now().isoformat()
+                "positions": self.positions,
+                "total_pnl": self.total_pnl,
+                "eod_squareoff_done": self.eod_squareoff_done,
+                "timestamp": datetime.now().isoformat(),
             }
-            with open(STATE_FILE, 'w') as f:
+            with open(self.state_file, "w", encoding="utf-8") as f:
                 json.dump(state, f, indent=2)
         except Exception as e:
-            logger.error(f"ERROR: Could not save state: {e}")
+            self._bot_logger.error(f"ERROR: Could not save state: {e}")
 
     def _ensure_position_fields(self, position, script_name=None):
         """Backfill position fields for older saved state compatibility."""
@@ -898,7 +976,7 @@ class TradingBot:
         self.dashboard_client.post_trade_close(payload)
 
     def _log_order_event(self, script_name, action, side, price, reason, extra=""):
-        order_logger.info(
+        self._order_logger.info(
             f"{script_name} | ACTION={action} | SIDE={side} | PRICE={price:.2f} | REASON={reason}"
             + (f" | {extra}" if extra else "")
         )
@@ -917,7 +995,7 @@ class TradingBot:
         fail_extra = f"error={error_text}"
         if endpoint:
             fail_extra += f"; endpoint={endpoint}"
-        order_logger.info(
+        self._order_logger.info(
             f"{script_name} | ACTION=ORDER_FAILED | SIDE={side} | PRICE={price:.2f} | REASON={reason} | {fail_extra}"
         )
 
@@ -942,6 +1020,7 @@ class TradingBot:
         result = self.client.place_order(order_token, order_qty, side)
         if result and result.get('status') == 'success':
             trade = {
+                "account": self.username,
                 "symbol": script_name,
                 "action": side,
                 "quantity": order_qty,
@@ -958,16 +1037,17 @@ class TradingBot:
                 "entry_minus_di": entry_minus_di,
                 "timestamp": self._now_ist(),
             }
-            if not send_trade_notification(trade):
-                logger.error(
-                    f"Failed to send Telegram notification for trade: "
-                    f"{script_name} {side} qty={order_qty} @ Rs{price:.2f}"
-                )
+            if telegram_notifications_enabled_for_user(self.username):
+                if not send_trade_notification(trade):
+                    self._bot_logger.error(
+                        f"Failed to send Telegram notification for trade: "
+                        f"{script_name} {side} qty={order_qty} @ Rs{price:.2f}"
+                    )
             return True, result
 
         error_text = (result or {}).get('error', 'Unknown error')
         endpoint = (result or {}).get('endpoint', '')
-        logger.error(
+        self._bot_logger.error(
             f"ORDER FAILED: {script_name} {side} qty={order_qty} @ Rs{price:.2f} | reason={reason} | error={error_text}"
         )
         self._log_order_failure(script_name, side, price, reason, error_text, endpoint)
@@ -980,6 +1060,12 @@ class TradingBot:
 
     def _get_order_quantity(self, script_name):
         """Get exchange quantity as lots multiplied by contract lot size."""
+        overrides = self.config.get("order_quantity_override_by_script", {}) or {}
+        if script_name in overrides:
+            try:
+                return max(1, int(float(overrides.get(script_name))))
+            except Exception:
+                pass
         lots = int(self.config.get('quantity', 1))
         lot_size = int(self.config.get('lot_sizes', {}).get(script_name, 1))
         return max(1, lots * lot_size)
@@ -1025,6 +1111,112 @@ class TradingBot:
         self._mcx_instruments_cache_at = now_ts
         return self._mcx_instruments_cache
 
+    def _fetch_exchange_instruments(self, url: str, cache_key: str):
+        """
+        Fetch Upstox instrument master (gz JSON) for a specific exchange.
+        Caches separately for NSE/BSE to support contract rollover for futures.
+        """
+        cache_ttl = float(self.config.get("contract_roll_mcx_cache_seconds", 21600))
+        now_ts = time.time()
+        if cache_key == "nse":
+            if self._nse_instruments_cache and (now_ts - self._nse_instruments_cache_at) < cache_ttl:
+                return self._nse_instruments_cache
+        if cache_key == "bse":
+            if self._bse_instruments_cache and (now_ts - self._bse_instruments_cache_at) < cache_ttl:
+                return self._bse_instruments_cache
+
+        response = requests.get(url, timeout=30)
+        response.raise_for_status()
+        instruments = json.loads(gzip.decompress(response.content))
+        if not isinstance(instruments, list):
+            instruments = []
+
+        if cache_key == "nse":
+            self._nse_instruments_cache = instruments
+            self._nse_instruments_cache_at = now_ts
+        elif cache_key == "bse":
+            self._bse_instruments_cache = instruments
+            self._bse_instruments_cache_at = now_ts
+        return instruments
+
+    def _get_fo_contract_candidates(self, script_name: str) -> list[str]:
+        """
+        Candidate keys for NSE_FO/BSE_FO rollovers.
+        Filters by FUT + correct segment + trading_symbol root + active expiry + lot_size.
+        """
+        script_roots = {
+            "NIFTY": ["NIFTY"],
+            "BANKNIFTY": ["BANKNIFTY"],
+            "SENSEX": ["SENSEX"],
+        }
+        seg = None
+        exchange = None
+        if script_name == "SENSEX":
+            seg = "BSE_FO"
+            exchange = "bse"
+        elif script_name in ("NIFTY", "BANKNIFTY"):
+            seg = "NSE_FO"
+            exchange = "nse"
+        else:
+            return []
+
+        roots = script_roots.get(script_name, [])
+        if not roots:
+            return []
+
+        try:
+            instruments = self._fetch_exchange_instruments(
+                BSE_INSTRUMENTS_URL if exchange == "bse" else NSE_INSTRUMENTS_URL,
+                exchange,
+            )
+        except Exception as e:
+            self._bot_logger.warning(
+                f"WARNING: Unable to fetch {exchange.upper()} instruments for contract roll: {e}"
+            )
+            return []
+
+        target_lot = int(self.config.get("lot_sizes", {}).get(script_name, 0))
+        now_ms = int(time.time() * 1000)
+
+        candidates: list[tuple[int, str]] = []
+        for row in instruments:
+            instrument_type = str(row.get("instrument_type", "")).upper()
+            if instrument_type != "FUT":
+                continue
+
+            trading_symbol = str(row.get("trading_symbol", "")).upper()
+            if not any(root in trading_symbol for root in roots):
+                continue
+
+            row_seg = str(row.get("segment", "")).upper()
+            if row_seg != seg:
+                continue
+
+            instrument_key = str(row.get("instrument_key", ""))
+            if not instrument_key.startswith(f"{seg}|"):
+                continue
+
+            expiry_ms = int(row.get("expiry", 0) or 0)
+            if expiry_ms and expiry_ms < now_ms:
+                continue
+
+            lot_size = int(float(row.get("lot_size", 0) or 0))
+            if target_lot and lot_size != target_lot:
+                continue
+
+            candidates.append((expiry_ms, instrument_key))
+
+        # Sort by expiry then key; remove duplicates by key while preserving order.
+        candidates.sort(key=lambda item: (item[0], item[1]))
+        out: list[str] = []
+        seen: set[str] = set()
+        for _, key in candidates:
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(key)
+        return out
+
     def _get_mcx_contract_candidates(self, script_name):
         script_roots = {
             "CRUDE": ["CRUDEOIL"],
@@ -1038,7 +1230,7 @@ class TradingBot:
         try:
             instruments = self._fetch_mcx_instruments()
         except Exception as e:
-            logger.warning(f"WARNING: Unable to fetch MCX instruments for contract roll: {e}")
+            self._bot_logger.warning(f"WARNING: Unable to fetch MCX instruments for contract roll: {e}")
             return []
 
         target_lot = int(self.config.get("lot_sizes", {}).get(script_name, 0))
@@ -1077,7 +1269,15 @@ class TradingBot:
         return unique_keys
 
     def _switch_to_next_contract(self, script_name, current_instrument_key):
-        candidates = self._get_mcx_contract_candidates(script_name)
+        # Determine candidate list based on current instrument family.
+        if self._is_mcx_instrument(current_instrument_key):
+            candidates = self._get_mcx_contract_candidates(script_name)
+        elif isinstance(current_instrument_key, str) and current_instrument_key.startswith(("NSE_FO|", "BSE_FO|")):
+            candidates = self._get_fo_contract_candidates(script_name)
+        else:
+            # Fallback: try FO roll for known NSE/BSE scripts.
+            candidates = self._get_fo_contract_candidates(script_name) or self._get_mcx_contract_candidates(script_name)
+
         if not candidates:
             return current_instrument_key
 
@@ -1095,7 +1295,7 @@ class TradingBot:
 
         self.config.setdefault("scripts", {})[script_name] = next_key
         self.config.setdefault("order_tokens", {})[script_name] = next_key
-        logger.warning(
+        self._bot_logger.warning(
             f"CONTRACT ROLL: {script_name} switched from {current_instrument_key} to {next_key}"
         )
         return next_key
@@ -1506,15 +1706,21 @@ class TradingBot:
             return False
         return now_ist >= shutdown_dt
 
-    @staticmethod
-    def _run_daily_archive():
-        """Run archive_day.py safely after bot shutdown."""
+    def _run_daily_archive(self):
+        """Run archive_day.py; snapshots land under server/data/users/<this user>/archive/."""
+        old = os.environ.get("TRADING_USER")
         try:
+            os.environ["TRADING_USER"] = self.username
             import archive_day
+
             archive_day.main()
         except Exception as e:
-            # logging might be shut down already, so fallback to stdout.
-            print(f"ERROR: Daily archive failed: {e}")
+            print(f"ERROR: Daily archive failed ({self.username}): {e}")
+        finally:
+            if old is None:
+                os.environ.pop("TRADING_USER", None)
+            else:
+                os.environ["TRADING_USER"] = old
 
     def _is_before_segment_entry_start(self, script_name, now_ist):
         segment = self._script_segment(script_name)
@@ -1551,7 +1757,7 @@ class TradingBot:
             if self.eod_squareoff_done.get(segment) == today_text:
                 continue
 
-            logger.info(f"EOD: Square-off check for {segment} at {now_ist.strftime('%H:%M:%S')}")
+            self._bot_logger.info(f"EOD: Square-off check for {segment} at {now_ist.strftime('%H:%M:%S')}")
             any_closed = False
 
             for script_name in scripts:
@@ -1608,11 +1814,11 @@ class TradingBot:
             remaining = [s for s in scripts if s in self.positions]
             if not remaining:
                 self.eod_squareoff_done[segment] = today_text
-                logger.info(f"EOD: {segment} square-off completed for {today_text}")
+                self._bot_logger.info(f"EOD: {segment} square-off completed for {today_text}")
                 self.save_state()
             elif any_closed:
                 self.save_state()
-                logger.warning(f"EOD: {segment} square-off partial. Remaining: {remaining}")
+                self._bot_logger.warning(f"EOD: {segment} square-off partial. Remaining: {remaining}")
 
     def _favorable_move_percent(self, position_type, entry_price, current_price):
         if position_type == 'BUY':
@@ -1721,7 +1927,7 @@ class TradingBot:
         position['stop_loss'] = new_sl
         position['profit_lock_r_locked'] = lock_r
         position['profit_lock_trigger_r_locked'] = trigger_r
-        logger.info(
+        self._bot_logger.info(
             f"LOCK: {script_name}: Profit-lock rung {trigger_r:.2f}R reached; "
             f"locking {lock_r:.2f}R with SL @ Rs{position['stop_loss']:.2f} "
             f"(favorable move: {favorable_move:.2f}%, current R: {current_r:.2f}, basis: {basis_percent:.2f}%)"
@@ -1845,7 +2051,7 @@ class TradingBot:
                 position['stop_loss'] = min(position['stop_loss'], entry_price)
             position['breakeven_done'] = True
             sl_updated = True
-            logger.info(f"INFO: {script_name}: 1:1 reached. SL moved to cost @ Rs{entry_price:.2f}")
+            self._bot_logger.info(f"INFO: {script_name}: 1:1 reached. SL moved to cost @ Rs{entry_price:.2f}")
 
         # Profit-lock ladder (R-based) runs after breakeven and before stepped trail.
         if self._apply_profit_lock_ladder(
@@ -1871,7 +2077,7 @@ class TradingBot:
 
             sl_updated = True
 
-            logger.info(
+            self._bot_logger.info(
                 f"UPDATE: {script_name}: Trailing SL updated to Rs{position['stop_loss']:.2f} "
                 f"(favorable move: {favorable_move:.2f}%, steps: {new_steps})"
             )
@@ -1928,7 +2134,7 @@ class TradingBot:
         position['money_lock_steps_locked'] = max(int(position.get('money_lock_steps_locked', 0)), rung)
         position['money_lock_pnl_locked'] = target_lock_pnl
         position['breakeven_done'] = True
-        logger.info(
+        self._bot_logger.info(
             f"MONEY-LOCK: {script_name} rung={rung} | max_favorable_pnl={max_favorable_pnl:.2f} | "
             f"locked_pnl={target_lock_pnl:.2f} | SL @ Rs{new_sl:.2f}"
         )
@@ -2009,12 +2215,11 @@ class TradingBot:
             if (
                 df_hist is None
                 and df_intraday is None
-                and self._is_mcx_instrument(instrument_key)
                 and self._should_attempt_contract_roll(script_name)
             ):
                 next_key = self._switch_to_next_contract(script_name, instrument_key)
                 if next_key != instrument_key:
-                    logger.info(
+                    self._bot_logger.info(
                         f"RETRY: {script_name} refetching market data with rolled contract {next_key}"
                     )
                     instrument_key = next_key
@@ -2045,14 +2250,14 @@ class TradingBot:
             if df is None or df.empty:
                 return None
             
-            logger.info(
+            self._bot_logger.info(
                 f" {script_name}: {len(df)} candles ({self.config.get('signal_interval', '1minute')}) "
                 f"| Latest: Rs{df['close'].iloc[-1]:.2f}"
             )
             return df
             
         except Exception as e:
-            logger.error(f"ERROR: Error fetching data for {script_name}: {e}")
+            self._bot_logger.error(f"ERROR: Error fetching data for {script_name}: {e}")
             return None
     
     def process_script(self, script_name, instrument_key):
@@ -2061,7 +2266,7 @@ class TradingBot:
             # Fetch market data
             df = self.fetch_market_data(script_name, instrument_key)
             if df is None or len(df) < self.config['ema_long']:
-                logger.warning(f"WARNING: Insufficient data for {script_name}")
+                self._bot_logger.warning(f"WARNING: Insufficient data for {script_name}")
                 return None
             
             # Calculate technical indicators
@@ -2157,7 +2362,7 @@ class TradingBot:
             }
             
         except Exception as e:
-            logger.error(f"ERROR: Error processing {script_name}: {e}")
+            self._bot_logger.error(f"ERROR: Error processing {script_name}: {e}")
             return None
     
     def print_status_table(self, script_data):
@@ -2182,7 +2387,7 @@ class TradingBot:
                 else:
                     signal_time_text = datetime.now().isoformat()
 
-                market_status_logger.info(
+                self._market_status_logger.info(
                     f"{script_name} | EMA={data['ema_short']:.2f}/{data['ema_long']:.2f} | "
                     f"Status={data['signal_status']} | Timestamp={signal_time_text}"
                 )
@@ -2233,7 +2438,7 @@ class TradingBot:
                 confirmed_time_text = confirmed_candle_timestamp.isoformat() if hasattr(confirmed_candle_timestamp, 'isoformat') else 'NA'
                 last_eval_ts = self.last_position_eval_logged.get(script_name)
                 if confirmed_time_text != 'NA' and last_eval_ts != confirmed_time_text:
-                    logger.info(
+                    self._bot_logger.info(
                         f"VERIFY: {script_name} open={position['type']} | entry={position['entry_price']:.2f} | "
                         f"closed_signal={confirmed_signal} | closed_crossover={bool(confirmed_crossover)} | "
                         f"closed_time={confirmed_time_text}"
@@ -2265,7 +2470,7 @@ class TradingBot:
                     or (prev_polled_price > stop_loss and current_price <= stop_loss)
                 ):
                     sl_reason = self._stoploss_reason(position)
-                    logger.warning(
+                    self._bot_logger.warning(
                         f"ALERT: SL hit for {script_name}. Closing BUY @ Rs{current_price:.2f} "
                         f"(SL: Rs{stop_loss:.2f}, prev_poll: Rs{prev_polled_price:.2f}, current: Rs{current_price:.2f})"
                     )
@@ -2310,7 +2515,7 @@ class TradingBot:
                     or (prev_polled_price < stop_loss and current_price >= stop_loss)
                 ):
                     sl_reason = self._stoploss_reason(position)
-                    logger.warning(
+                    self._bot_logger.warning(
                         f"ALERT: SL hit for {script_name}. Closing SELL @ Rs{current_price:.2f} "
                         f"(SL: Rs{stop_loss:.2f}, prev_poll: Rs{prev_polled_price:.2f}, current: Rs{current_price:.2f})"
                     )
@@ -2370,7 +2575,7 @@ class TradingBot:
                     )
                 )
                 if target_hit:
-                    logger.info(
+                    self._bot_logger.info(
                         f" Target hit for {script_name}. Closing {position['type']} @ Rs{current_price:.2f} "
                         f"(target: Rs{target_price:.2f}, prev_poll: Rs{prev_polled_price:.2f}, current: Rs{current_price:.2f}, move: {favorable_move:.2f}%)"
                     )
@@ -2436,7 +2641,7 @@ class TradingBot:
 
                 if ob_breached or crossover_exit:
                     reason = "OB_ZONE_BREACH" if ob_breached else "OPPOSITE_CROSSOVER"
-                    logger.info(
+                    self._bot_logger.info(
                         f"EXIT: {reason} for {script_name}. Closing {position['type']} @ Rs{current_price:.2f} "
                         f"(candle_close={candle_close:.2f} vs ob_boundary={ob_zone_boundary:.2f}, candle={candle_ts_str})"
                     )
@@ -2562,7 +2767,7 @@ class TradingBot:
                             self._log_skip_event(
                                 script_name, "BUY", entry_price, "EMA18_NOT_RISING", skip_extra
                             )
-                            logger.info(
+                            self._bot_logger.info(
                                 f"SKIP: {script_name} BUY ignored — EMA18 not rising "
                                 f"(ema18={entry_ema_long:.4f}, prev={entry_ema_long_prev:.4f})"
                             )
@@ -2581,7 +2786,7 @@ class TradingBot:
                             self._log_skip_event(
                                 script_name, "BUY", entry_price, "EMA_SEPARATION_TOO_SMALL", skip_extra
                             )
-                            logger.info(
+                            self._bot_logger.info(
                                 f"SKIP: {script_name} BUY ignored — EMA separation too small "
                                 f"(sep={ema_sep_pct:.4f}% < min={min_sep_pct:.4f}%)"
                             )
@@ -2604,7 +2809,7 @@ class TradingBot:
                             self._log_skip_event(
                                 script_name, "SELL", entry_price, "EMA18_NOT_FALLING", skip_extra
                             )
-                            logger.info(
+                            self._bot_logger.info(
                                 f"SKIP: {script_name} SELL ignored — EMA18 not falling "
                                 f"(ema18={entry_ema_long:.4f}, prev={entry_ema_long_prev:.4f})"
                             )
@@ -2623,7 +2828,7 @@ class TradingBot:
                             self._log_skip_event(
                                 script_name, "SELL", entry_price, "EMA_SEPARATION_TOO_SMALL", skip_extra
                             )
-                            logger.info(
+                            self._bot_logger.info(
                                 f"SKIP: {script_name} SELL ignored — EMA separation too small "
                                 f"(sep={ema_sep_pct:.4f}% < min={min_sep_pct:.4f}%)"
                             )
@@ -2647,7 +2852,7 @@ class TradingBot:
                             self._log_skip_event(
                                 script_name, side_text, entry_price, "ADX_TOO_WEAK", skip_extra
                             )
-                            logger.info(
+                            self._bot_logger.info(
                                 f"SKIP: {script_name} {side_text} ignored - ADX too weak "
                                 f"(adx={entry_adx:.2f} < min={min_adx:.2f})"
                             )
@@ -2669,7 +2874,7 @@ class TradingBot:
                             self._log_skip_event(
                                 script_name, "BUY", entry_price, "INVALID_SWING_SL", skip_extra
                             )
-                            logger.info(
+                            self._bot_logger.info(
                                 f"SKIP: {script_name} BUY ignored due to invalid swing SL "
                                 f"(sl={initial_sl}, entry={entry_price:.2f})"
                             )
@@ -2680,7 +2885,7 @@ class TradingBot:
                             script_name, True, ema_sep_pct, min_sep_pct, ob_percent, level_metrics
                         )
                         target_price = entry_price * (1 + self.config['target_percent'] / 100)
-                        logger.info(f"BUY signal for {script_name} at {entry_price:.2f}")
+                        self._bot_logger.info(f"BUY signal for {script_name} at {entry_price:.2f}")
                         success, order_result = self._place_order_with_result(
                             script_name,
                             "BUY",
@@ -2727,7 +2932,7 @@ class TradingBot:
                         self.positions[script_name]['trade_id'] = self._build_trade_id(
                             script_name, self.positions[script_name]['entry_time']
                         )
-                        logger.info(f" {script_name}: Initial SL set @ Rs{initial_sl:.2f}")
+                        self._bot_logger.info(f" {script_name}: Initial SL set @ Rs{initial_sl:.2f}")
                         self._log_order_event(
                             script_name,
                             action="ENTRY",
@@ -2772,7 +2977,7 @@ class TradingBot:
                             self._log_skip_event(
                                 script_name, "SELL", entry_price, "INVALID_SWING_SL", skip_extra
                             )
-                            logger.info(
+                            self._bot_logger.info(
                                 f"SKIP: {script_name} SELL ignored due to invalid swing SL "
                                 f"(sl={initial_sl}, entry={entry_price:.2f})"
                             )
@@ -2783,7 +2988,7 @@ class TradingBot:
                             script_name, True, ema_sep_pct, min_sep_pct, ob_percent, level_metrics
                         )
                         target_price = entry_price * (1 - self.config['target_percent'] / 100)
-                        logger.info(f"SELL signal for {script_name} at {entry_price:.2f}")
+                        self._bot_logger.info(f"SELL signal for {script_name} at {entry_price:.2f}")
                         success, order_result = self._place_order_with_result(
                             script_name,
                             "SELL",
@@ -2830,7 +3035,7 @@ class TradingBot:
                         self.positions[script_name]['trade_id'] = self._build_trade_id(
                             script_name, self.positions[script_name]['entry_time']
                         )
-                        logger.info(f" {script_name}: Initial SL set @ Rs{initial_sl:.2f}")
+                        self._bot_logger.info(f" {script_name}: Initial SL set @ Rs{initial_sl:.2f}")
                         self._log_order_event(
                             script_name,
                             action="ENTRY",
@@ -2860,116 +3065,229 @@ class TradingBot:
                             script_name, self.positions[script_name], entry_price
                         )
     
-    def run(self):
-        """Main trading loop"""
-        logger.info("="*80)
-        logger.info("STARTUP: Trading Bot Started")
-        logger.info("="*80)
-        
-        # Load previous state
-        self.load_state()
-        
-        # Verify credentials (retry: token may be pasted from dashboard after API starts)
+    def _wait_for_upstox(self) -> None:
+        """Block until this user's token works or self.running is False."""
         while self.running:
             self.client.refresh_credentials_if_changed()
             profile = self.client.get_user_profile()
             if profile:
-                logger.info(f"CONNECTED: Connected as: {profile.get('user_name', 'Unknown')}")
-                break
-            logger.warning(
-                "Upstox login failed (invalid or expired token). Credentials file: %s — "
-                "update token in dashboard or that file. If this path is not the repo you "
-                "edited, you are running a different copy of the bot. Retrying in 30s...",
-                CREDENTIALS_FILE.resolve(),
+                self._bot_logger.info(
+                    "CONNECTED: %s as Upstox user %s",
+                    self.username,
+                    profile.get("user_name", "Unknown"),
+                )
+                return
+            self._bot_logger.warning(
+                "Upstox login failed for [%s] (invalid or expired token). File: %s — "
+                "save token in dashboard for this user. Retrying in 30s...",
+                self.username,
+                credentials_file_for_user(self.username).resolve(),
             )
             for _ in range(30):
                 if not self.running:
                     return
                 time.sleep(1)
-        
+
+    def _scripts_for_cycle(self) -> list[tuple[str, str]]:
+        """Symbols to fetch this loop: user scope ∪ open positions (order preserved from TRADING_CONFIG)."""
+        prefs = read_trading_preferences(self.username)
+        raw = prefs.get("enabled_scripts")
+        all_items = list(self.config["scripts"].items())
+        order_names = [n for n, _ in all_items]
+        if raw is None:
+            chosen = set(order_names)
+        else:
+            keys = self.config["scripts"].keys()
+            chosen = {
+                str(x).strip().upper()
+                for x in raw
+                if str(x).strip().upper() in keys
+            }
+            if not chosen:
+                chosen = set(order_names)
+        for sym in self.positions.keys():
+            chosen.add(sym)
+        out: list[tuple[str, str]] = []
+        for name, key in all_items:
+            if name in chosen:
+                out.append((name, key))
+        return out
+
+    def _run_one_cycle(self) -> str:
+        """
+        Single iteration. Returns:
+        - "ok" — continue
+        - "stop_bot" — portfolio stop for this user only
+        - "shutdown_all" — daily shutdown (runner stops every account)
+        """
+        self.client.refresh_credentials_if_changed()
+        script_data = []
+        for script_name, instrument_key in self._scripts_for_cycle():
+            data = self.process_script(script_name, instrument_key)
+            script_data.append(data)
+
+        self.print_status_table(script_data)
+
+        allow_new_entries = self.entry_warmup_done
+
+        if not self.entry_warmup_done:
+            for data in script_data:
+                if data:
+                    self.entry_warmup_timestamps[data["script_name"]] = data.get(
+                        "entry_candle_timestamp"
+                    )
+            self.entry_warmup_done = True
+            self._bot_logger.info(
+                "ENTRY WARMUP: Startup snapshot captured. New entries will trigger only on fresh crossover candles."
+            )
+
+        latest_prices = {
+            data["script_name"]: data["current_price"]
+            for data in script_data
+            if data and data.get("current_price") is not None
+        }
+
+        now_ist = self._now_ist()
+        self._run_eod_squareoff(now_ist, latest_prices=latest_prices)
+
+        self.execute_trading_logic(script_data, allow_new_entries=allow_new_entries, now_ist=now_ist)
+
+        for script_name, position in self.positions.items():
+            current_price = latest_prices.get(script_name)
+            if current_price is None:
+                continue
+            self._queue_dashboard_trade_update(script_name, position, current_price)
+        self._flush_dashboard_trade_updates()
+
+        if self.total_pnl < -self.config["portfolio_stop_loss"]:
+            self._bot_logger.error(
+                f" Portfolio stop loss hit! Total loss: Rs{self.total_pnl:.2f}"
+            )
+            self._bot_logger.error(" Exiting all positions and stopping this account.")
+            self.positions.clear()
+            self.save_state()
+            self.running = False
+            return "stop_bot"
+
+        if self._is_after_daily_shutdown(now_ist):
+            shutdown_time_text = self.config.get("daily_shutdown_time", "23:21")
+            self._bot_logger.info(
+                f"AUTO SHUTDOWN: Reached {shutdown_time_text} IST. Archiving for [{self.username}]."
+            )
+            self.running = False
+            self.archive_requested = bool(self.config.get("auto_archive_on_shutdown", True))
+            return "shutdown_all"
+
+        self._bot_logger.info(
+            f"Next update in {self.config['loop_interval']} seconds...\n"
+        )
+        return "ok"
+
+    def run(self):
+        """Main trading loop for this user only."""
+        self._bot_logger.info("=" * 80)
+        self._bot_logger.info("STARTUP: Trading Bot — account %s", self.username)
+        self._bot_logger.info("=" * 80)
+
+        self.load_state()
+        self._wait_for_upstox()
+        if not self.running:
+            return
+
         try:
             while self.running:
                 try:
-                    self.client.refresh_credentials_if_changed()
-                    # Process all scripts
-                    script_data = []
-                    for script_name, instrument_key in self.config['scripts'].items():
-                        data = self.process_script(script_name, instrument_key)
-                        script_data.append(data)
-                    
-                    # Print status table
-                    self.print_status_table(script_data)
-
-                    allow_new_entries = self.entry_warmup_done
-
-                    if not self.entry_warmup_done:
-                        for data in script_data:
-                            if data:
-                                self.entry_warmup_timestamps[data['script_name']] = data.get('entry_candle_timestamp')
-                        self.entry_warmup_done = True
-                        logger.info("ENTRY WARMUP: Startup snapshot captured. New entries will trigger only on fresh crossover candles.")
-
-                    latest_prices = {
-                        data['script_name']: data['current_price']
-                        for data in script_data
-                        if data and data.get('current_price') is not None
-                    }
-
-                    now_ist = self._now_ist()
-                    self._run_eod_squareoff(now_ist, latest_prices=latest_prices)
-                    
-                    # Execute trading logic
-                    self.execute_trading_logic(script_data, allow_new_entries=allow_new_entries, now_ist=now_ist)
-
-                    # Queue and flush live MTM updates in batch
-                    for script_name, position in self.positions.items():
-                        current_price = latest_prices.get(script_name)
-                        if current_price is None:
-                            continue
-                        self._queue_dashboard_trade_update(script_name, position, current_price)
-                    self._flush_dashboard_trade_updates()
-                    
-                    # Check global stop loss
-                    if self.total_pnl < -self.config['portfolio_stop_loss']:
-                        logger.error(f" Portfolio stop loss hit! Total loss: Rs{self.total_pnl:.2f}")
-                        logger.error(" Exiting all positions and stopping bot.")
-                        self.positions.clear()
-                        self.save_state()
-                        self.running = False
+                    code = self._run_one_cycle()
+                    if code == "shutdown_all":
                         break
-
-                    # Daily auto-shutdown after configured time (IST)
-                    if self._is_after_daily_shutdown(now_ist):
-                        shutdown_time_text = self.config.get('daily_shutdown_time', '23:21')
-                        logger.info(
-                            f"AUTO SHUTDOWN: Reached {shutdown_time_text} IST. "
-                            "Stopping bot and archiving runtime artifacts."
-                        )
-                        self.running = False
-                        self.archive_requested = bool(self.config.get('auto_archive_on_shutdown', True))
+                    if code == "stop_bot":
                         break
-                    
-                    # Wait for next iteration
-                    logger.info(f"Next update in {self.config['loop_interval']} seconds...\n")
-                    time.sleep(self.config['loop_interval'])
-                    
+                    time.sleep(self.config["loop_interval"])
                 except KeyboardInterrupt:
-                    logger.info("\n Keyboard interrupt detected. Shutting down gracefully...")
+                    self._bot_logger.info(
+                        "\n Keyboard interrupt detected. Shutting down gracefully..."
+                    )
                     self.running = False
                     break
                 except Exception as e:
-                    logger.error(f" Error in trading loop: {e}")
-                    time.sleep(self.config['loop_interval'])
-        
+                    self._bot_logger.error(f" Error in trading loop: {e}")
+                    time.sleep(self.config["loop_interval"])
+
         finally:
             self.save_state()
-            logger.info("="*80)
-            logger.info(" Trading Bot Stopped")
-            logger.info("="*80)
-            should_archive = self.archive_requested
-            logging.shutdown()
-            if should_archive:
+            self._bot_logger.info("=" * 80)
+            self._bot_logger.info(" Trading Bot Stopped [%s]", self.username)
+            self._bot_logger.info("=" * 80)
+            if self.archive_requested:
                 self._run_daily_archive()
+
+
+class MultiAccountBotRunner:
+    """One OS process: round-robin one loop tick per dashboard user with a valid token."""
+
+    def __init__(self, bots: list[TradingBot]):
+        self.bots = [b for b in bots if b is not None]
+        self._runner_stop = False
+
+    def run(self):
+        if not self.bots:
+            return
+        print(
+            f"{Fore.CYAN}Multi-account mode: {len(self.bots)} trader(s) — "
+            f"{', '.join(b.username for b in self.bots)}{Style.RESET_ALL}"
+        )
+        for b in self.bots:
+            b._bot_logger.info("=" * 80)
+            b._bot_logger.info("STARTUP (multi): account %s", b.username)
+            b._bot_logger.info("=" * 80)
+            b.load_state()
+
+        pending = [b for b in self.bots]
+        for b in pending:
+            b._wait_for_upstox()
+        pending = [b for b in self.bots if b.running]
+        if not pending:
+            print("No accounts connected to Upstox; exiting.")
+            return
+
+        interval = max(1, int(self.bots[0].config.get("loop_interval", 10)))
+
+        try:
+            while not self._runner_stop and any(b.running for b in self.bots):
+                try:
+                    shutdown_all = False
+                    for b in self.bots:
+                        if not b.running:
+                            continue
+                        code = b._run_one_cycle()
+                        if code == "shutdown_all":
+                            shutdown_all = True
+                            break
+                        if code == "stop_bot":
+                            continue
+                    if shutdown_all:
+                        for x in self.bots:
+                            x.running = False
+                            x.archive_requested = bool(
+                                x.config.get("auto_archive_on_shutdown", True)
+                            )
+                        break
+                    time.sleep(interval)
+                except KeyboardInterrupt:
+                    print("\nKeyboard interrupt — stopping all accounts.")
+                    self._runner_stop = True
+                    for b in self.bots:
+                        b.running = False
+                    break
+                except Exception as e:
+                    logger.error("Multi-account loop error: %s", e)
+                    time.sleep(interval)
+        finally:
+            for b in self.bots:
+                b.save_state()
+                b._bot_logger.info("STOPPED [%s]", b.username)
+                if b.archive_requested:
+                    b._run_daily_archive()
 
 # ============================================================================
 # MAIN ENTRY POINT
@@ -3031,54 +3349,87 @@ def _acquire_single_instance_lock() -> bool:
     return False
 
 
+def _resolve_trading_usernames() -> list[str]:
+    """
+    Users to run in this process.
+    TRADING_USERS=admin,user-1,... overrides; otherwise all names from users_auth.json.
+    """
+    raw = (os.environ.get("TRADING_USERS") or "").strip()
+    if raw:
+        out = []
+        for part in raw.split(","):
+            u = sanitize_username(part.strip())
+            if u and u not in out:
+                out.append(u)
+        return out or ["user-1"]
+    names = list_usernames_from_auth_store()
+    return [sanitize_username(n) for n in names]
+
+
 def main():
-    """Main entry point"""
+    """Main entry point — one process can trade all dashboard users with separate Upstox files."""
     if not _acquire_single_instance_lock():
         return
 
     print(f"{Fore.CYAN}")
-    print("="*80)
-    print("   MULTI-SCRIPT TRADING BOT v2.0")
+    print("=" * 80)
+    print("   MULTI-SCRIPT TRADING BOT v2.0 (multi-account)")
     print("   EMA Crossover Strategy")
     print("   " + datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
-    print("="*80)
+    print("=" * 80)
     print(f"{Style.RESET_ALL}")
 
-    _creds0 = load_upstox_credentials()
-    _tok0 = (_creds0.get("access_token") or "").strip()
-    print(f"{Fore.CYAN}RUNNING SCRIPT:{Style.RESET_ALL} {Path(__file__).resolve()}")
-    print(f"{Fore.CYAN}CREDENTIALS FILE:{Style.RESET_ALL} {CREDENTIALS_FILE.resolve()}")
-    print(
-        f"{Fore.CYAN}ACCESS TOKEN:{Style.RESET_ALL} length={len(_tok0)} "
-        f"preview={mask_tail(_tok0) or '(empty)'}"
-    )
-    print(
-        f"{Fore.YELLOW}If login fails, confirm this CREDENTIALS FILE path matches where you "
-        f"saved the token in Cursor.{Style.RESET_ALL}\n"
-    )
-    
-    # Display public IP
+    print(f"{Fore.CYAN}RUNNING SCRIPT:{Style.RESET_ALL} {Path(__file__).resolve()}\n")
+
     try:
-        public_ip = requests.get('https://api.ipify.org', timeout=5).text
+        public_ip = requests.get("https://api.ipify.org", timeout=5).text
         print(f"{Fore.YELLOW} Public IP: {public_ip}{Style.RESET_ALL}\n")
-    except:
+    except Exception:
         pass
 
-    # Telegram test message
-    if not send_telegram_test_message():
-        print("Telegram test message failed – check bot token / chat ID.")
-    else:
-        print("Telegram test message sent successfully.")
+    usernames = _resolve_trading_usernames()
+    bots: list[TradingBot] = []
 
-    creds = load_upstox_credentials()
-    client = UpstoxClient(
-        creds.get("access_token") or "",
-        creds.get("base_url") or API_CONFIG["base_url"],
-    )
-    
-    # Initialize and run bot
-    bot = TradingBot(TRADING_CONFIG, client)
-    bot.run()
+    for un in usernames:
+        creds = load_upstox_credentials_for_user(un)
+        tok = (creds.get("access_token") or "").strip()
+        if not tok:
+            print(
+                f"{Fore.YELLOW}Skip [{un}]: no Upstox access token — "
+                f"save credentials in dashboard for this user.{Style.RESET_ALL}"
+            )
+            continue
+        base = creds.get("base_url") or API_CONFIG["base_url"]
+        client = UpstoxClient(tok, base, username=un, log=None)
+        bot = TradingBot(TRADING_CONFIG, client, username=un)
+        bots.append(bot)
+        cf = credentials_file_for_user(un)
+        print(
+            f"{Fore.CYAN}[{un}]{Style.RESET_ALL} token preview={mask_tail(tok)} file={cf}"
+        )
+
+    if not bots:
+        print(
+            f"{Fore.RED}No accounts with tokens. Open the dashboard, sign in as each user, "
+            f"and save Upstox credentials (per-user files under server/data/users/).{Style.RESET_ALL}"
+        )
+        return
+
+    if any(telegram_notifications_enabled_for_user(b.username) for b in bots):
+        if not send_telegram_test_message():
+            print("Telegram test message failed – check bot token / chat ID.")
+        else:
+            print("Telegram test message sent successfully.")
+    else:
+        print(
+            f"{Fore.YELLOW}Telegram test skipped (only the `admin` account sends Telegram).{Style.RESET_ALL}"
+        )
+
+    if len(bots) == 1:
+        bots[0].run()
+    else:
+        MultiAccountBotRunner(bots).run()
+
 
 if __name__ == "__main__":
     main()

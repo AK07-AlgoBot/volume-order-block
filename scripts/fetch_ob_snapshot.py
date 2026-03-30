@@ -6,7 +6,7 @@ Does not read orders.log or any other local trade logs.
 Run from repo root:
   python scripts/fetch_ob_snapshot.py
   python scripts/fetch_ob_snapshot.py --json
-  python scripts/fetch_ob_snapshot.py --scripts CRUDE NIFTY
+  python scripts/fetch_ob_snapshot.py --user user-1 --scripts CRUDE NIFTY
 """
 
 from __future__ import annotations
@@ -31,19 +31,29 @@ def main() -> None:
         nargs="*",
         help="Subset of script names (default: all TRADING_CONFIG scripts)",
     )
+    parser.add_argument(
+        "--user",
+        default="user-1",
+        help="Dashboard user whose server/data/users/<user>/upstox_credentials.json to use",
+    )
     args = parser.parse_args()
 
     # Import after path fix; reduce noise when not --json
     from trading_bot import TRADING_CONFIG, TradingBot, UpstoxClient
-    from upstox_credentials_store import load_upstox_credentials
+    from upstox_credentials_store import load_upstox_credentials_for_user
 
     if args.json:
         logging.getLogger().handlers.clear()
         logging.basicConfig(level=logging.WARNING)
 
-    creds = load_upstox_credentials()
-    client = UpstoxClient(creds.get("access_token") or "", creds.get("base_url") or "")
-    bot = TradingBot(TRADING_CONFIG, client)
+    creds = load_upstox_credentials_for_user(args.user)
+    client = UpstoxClient(
+        creds.get("access_token") or "",
+        creds.get("base_url") or "",
+        username=args.user,
+        log=None,
+    )
+    bot = TradingBot(TRADING_CONFIG, client, username=args.user)
 
     all_scripts = list(TRADING_CONFIG.get("scripts", {}).items())
     if args.scripts:

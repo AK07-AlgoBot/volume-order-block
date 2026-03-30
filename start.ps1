@@ -73,10 +73,10 @@ python trading_bot.py
     exit 0
 }
 
-$uiPath = Join-Path $repoRoot "dashboard-ui"
+$uiPath = Join-Path $repoRoot "client"
 
 if (-not (Test-Path $uiPath)) {
-    throw "dashboard-ui folder not found at $uiPath"
+    throw "client folder not found at $uiPath"
 }
 
 # Resolve Node/npm (system first, fallback to local portable Node)
@@ -129,8 +129,9 @@ if (-not (Test-Path (Join-Path $uiPath "node_modules"))) {
     }
 }
 
-$apiUp = Test-HttpEndpoint -Url "http://127.0.0.1:8000/api/dashboard/initial"
+$apiUp = Test-HttpEndpoint -Url "http://127.0.0.1:8000/api/health"
 $uiUp = Test-HttpEndpoint -Url "http://127.0.0.1:5173"
+$serverSrc = Join-Path $repoRoot "server\src"
 
 if ($apiUp -and -not $Force) {
     Write-Host "API already running on http://localhost:8000 (use -Force to start another)."
@@ -138,7 +139,8 @@ if ($apiUp -and -not $Force) {
 else {
     Start-ManagedProcess -Name "Dashboard API" -WorkingDirectory $repoRoot -Command @"
 Set-Location '$repoRoot'
-python -m uvicorn dashboard_api:app --host 0.0.0.0 --port 8000 --reload
+`$env:PYTHONPATH = '$serverSrc'
+python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 "@
 }
 

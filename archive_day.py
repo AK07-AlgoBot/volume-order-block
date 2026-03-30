@@ -1,16 +1,24 @@
 from datetime import datetime
 from pathlib import Path
+import os
+import re
 import shutil
 
 ROOT = Path(__file__).resolve().parent
-ARCHIVE_ROOT = ROOT / "archive"
+# Whose active logs/state we archive (bot sets this per account on shutdown).
+_raw = os.environ.get("TRADING_USER", "AK07").strip() or "AK07"
+TRADING_USER = re.sub(r"[^a-zA-Z0-9._-]", "", _raw) or "AK07"
+USER_ROOT = ROOT / "server" / "data" / "users" / TRADING_USER
+LOGS_DIR = USER_ROOT / "logs"
+# Per-user snapshots: server/data/users/<user>/archive/<timestamp>/...
+ARCHIVE_ROOT = USER_ROOT / "archive"
 
 FILES_TO_ARCHIVE = [
-    "trading_bot.log",
-    "orders.log",
-    "market_status.log",
-    "bot_output.txt",
-    "trading_state.json",
+    LOGS_DIR / "trading_bot.log",
+    LOGS_DIR / "orders.log",
+    LOGS_DIR / "market_status.log",
+    ROOT / "bot_output.txt",
+    USER_ROOT / "trading_state.json",
 ]
 
 DIRS_TO_ARCHIVE = [
@@ -41,8 +49,7 @@ def main():
     state_dir.mkdir(parents=True, exist_ok=True)
     cache_dir.mkdir(parents=True, exist_ok=True)
 
-    for name in FILES_TO_ARCHIVE:
-        src = ROOT / name
+    for src in FILES_TO_ARCHIVE:
         if not src.exists():
             continue
 
@@ -60,6 +67,7 @@ def main():
     print("=" * 80)
     print("DAY ARCHIVE SUMMARY")
     print("=" * 80)
+    print(f"User: {TRADING_USER}")
     print(f"Archive folder: {run_archive_dir}")
 
     if moved:

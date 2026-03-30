@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import re
+import sys
 from collections import defaultdict, deque
 from dataclasses import dataclass
 from datetime import datetime
@@ -9,8 +10,8 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-ORDER_LOG = ROOT / "orders.log"
-ARCHIVE_ROOT = ROOT / "archive"
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 LOT_SIZES = {
     "NIFTY": 65,
@@ -65,12 +66,22 @@ def parse_extra(extra_text: str | None) -> dict[str, str]:
     return parsed
 
 
-def list_order_logs(include_archive: bool) -> list[Path]:
+def list_order_logs(include_archive: bool, user: str) -> list[Path]:
+    from upstox_credentials_store import (
+        legacy_admin_bucket_order_logs,
+        sanitize_username,
+        user_archive_order_logs,
+        user_data_dir,
+    )
+
+    ud = user_data_dir(sanitize_username(user))
+    order_log = ud / "logs" / "orders.log"
     files: list[Path] = []
-    if ORDER_LOG.exists():
-        files.append(ORDER_LOG)
-    if include_archive and ARCHIVE_ROOT.exists():
-        files.extend(sorted(ARCHIVE_ROOT.glob("*/logs/orders.log")))
+    if order_log.exists():
+        files.append(order_log)
+    if include_archive:
+        files.extend(user_archive_order_logs(user))
+        files.extend(legacy_admin_bucket_order_logs(user))
     deduped: list[Path] = []
     seen: set[str] = set()
     for f in files:
@@ -82,9 +93,11 @@ def list_order_logs(include_archive: bool) -> list[Path]:
     return deduped
 
 
-def read_events(include_archive: bool, date_filter: str | None) -> list[Event]:
+def read_events(
+    include_archive: bool, date_filter: str | None, user: str
+) -> list[Event]:
     events: list[Event] = []
-    for order_file in list_order_logs(include_archive):
+    for order_file in list_order_logs(include_archive, user):
         text = order_file.read_text(encoding="utf-8", errors="ignore")
         for line in text.splitlines():
             match = LINE_RE.search(line.strip())
@@ -289,12 +302,21 @@ def main() -> None:
         action="store_true",
         help="Use only active orders.log (exclude archive/*/logs/orders.log)",
     )
+    parser.add_argument(
+        "--user",
+        default="user-1",
+        help="Dashboard user (server/data/users/<user>/logs/orders.log)",
+    )
     args = parser.parse_args()
 
     if args.date:
         datetime.strptime(args.date, "%Y-%m-%d")
 
-    events = read_events(include_archive=not args.no_archive, date_filter=args.date)
+    events = read_events(
+        include_archive=not args.no_archive,
+        date_filter=args.date,
+        user=args.user,
+    )
     completed, skips = compute_reports(events)
     print_report(completed, skips)
 

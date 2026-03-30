@@ -1,132 +1,132 @@
 # Multi-Script Trading Bot v2.0
 
-A professional-grade automated trading bot for Indian markets using Upstox API v2 with EMA crossover strategy.
+Automated trading bot for Indian markets using Upstox API v2 with an EMA crossover strategy, plus a FastAPI + React dashboard for auth, per-user broker credentials, and trade visibility.
 
 ## Features
 
-✅ **Real-time Market Data**: Fetches historical + intraday 5-minute candles  
-✅ **EMA Crossover Strategy**: 5-period and 18-period exponential moving averages  
-✅ **Multi-Script Support**: NIFTY, BANKNIFTY, SENSEX, FINNIFTY  
-✅ **Risk Management**: Portfolio stop loss & trailing stop loss per position  
-✅ **State Persistence**: Saves and loads trading state across restarts  
-✅ **Color-Coded Display**: Visual status table with buy/sell signals  
-✅ **Comprehensive Logging**: Detailed logs of all activities  
+- **Real-time market data**: Historical + intraday 5-minute candles  
+- **EMA crossover strategy**: Short and long exponential moving averages  
+- **Multi-script support**: NIFTY, BANKNIFTY, SENSEX, FINNIFTY (configurable)  
+- **Risk management**: Portfolio stop loss and trailing stop per position  
+- **State persistence**: Trading state survives restarts (per user)  
+- **Dashboard**: JWT login, per-user Upstox credentials, live trade updates  
 
 ## Requirements
 
 - Python 3.8+
-- Active Upstox Pro account
-- Valid Upstox API access token
+- Node.js (for the `client/` dashboard)
+- Active Upstox Pro account and API access token
+
+## Repository layout
+
+| Path | Role |
+|------|------|
+| `client/` | React + Vite UI (`npm install`, `npm run dev` / `npm run build`) |
+| `server/src/app/` | FastAPI app (`PYTHONPATH=server/src`, `uvicorn app.main:app`) |
+| `server/data/` | Runtime data (gitignored): `users_auth.json`, per-user dirs under `users/<username>/` |
+| `server/templates/upstox_credentials.example.json` | Example shape for `upstox_credentials.json` when creating a user file by hand |
+| `trading_bot.py` | Trading worker; posts to the API with `X-Trading-User` and optional `X-Bot-Token` |
+
+### Root-level (outside `client/` and `server/`)
+
+These stay at the repo root so `python trading_bot.py` and `PYTHONPATH=server/src` imports stay simple (shared modules are imported from the project root).
+
+| Path | Role |
+|------|------|
+| `trading_bot.py` | Bot entrypoint (multi-account loop). |
+| `upstox_credentials_store.py` | Paths + read/write for per-user `server/data/users/<user>/upstox_credentials.json` (used by bot and API). |
+| `bot_process_control.py` | Start/stop/recycle bot process; imported by the FastAPI app. |
+| `archive_day.py` | Moves a user’s logs/state into `archive/<timestamp>/` (uses `TRADING_USER` env). |
+| `scripts/` | Standalone tools (`fetch_ob_snapshot.py`, trade analysis). Run from repo root. |
+| `requirements.txt` | `pip install -r` for bot + scripts (API deps are `server/requirements.txt`). |
+| `docker-compose.yml` | Optional local stack: API container + nginx for `client/dist`. |
+| `start.bat`, `start.ps1` | Launch API, Vite client, and/or bot on Windows. |
+| `archive/` | Runtime daily archives produced by `archive_day.py` / shutdown (mostly **gitignored**; only `archive/unused/` is tracked). |
+| `README.md`, `QUICKSTART.md`, `DASHBOARD_SETUP.md`, `CHANGELOG.md`, `STRATEGY_LOGIC.md` | Documentation. |
+
+**Noise you may see at repo root:** `trading_bot.log`, `orders.log`, `market_status.log`, `trading_state.json`, `trading_bot.lock`, or `upstox_credentials.json` are **legacy or leftover** if the bot was run with an old layout, or copy-paste errors. Active per-user data belongs under `server/data/users/<user>/`. Those patterns are in `.gitignore`; delete stray root copies if you do not need them.
+
+**Demo users** (bcrypt-hashed in `server/data/users_auth.json`): `admin` / `admin`, `user-1` / `user-1`, … `user-5` / `user-5`. Admins can use **View as** to inspect another user’s trades.
+
+**Environment:** Copy `server/.env.example` to `server/.env` and set `JWT_SECRET`. For the bot calling the API from a non-localhost host, set `BOT_API_TOKEN` on the server and the same value in the bot’s environment.
+
+**Logs:** Order and bot logs live under `server/data/users/<username>/logs/` (e.g. `orders.log`, `trading_bot.log`). Audit JSON lines rotate under `server/data/logs/audit/<actor>/actions.log`.
 
 ## Installation
 
 ```bash
-# Install dependencies
 pip install -r requirements.txt
+pip install -r server/requirements.txt
 
-# Run the bot
+cd client && npm install && npm run dev
+
+# From repo root — multi-account bot (see “Running the bot”)
 python trading_bot.py
 ```
+
+## Running the bot
+
+- **Which accounts:** Set `TRADING_USERS=admin,user-1,user-2` (comma-separated). If unset, usernames are taken from `users_auth.json` (all known users). Users without a saved Upstox token in `server/data/users/<user>/upstox_credentials.json` are skipped.
+- **API posts:** The bot sends `X-Trading-User` (per account) and `X-Bot-Token` when `BOT_API_TOKEN` is set. From localhost, the API may accept bot posts without the token for local development (see server security settings).
+
+**Windows:** `start.bat` or `.\start.ps1` starts the API, UI, and bot; `start.bat -BotOnly` runs only the bot.
 
 ## Configuration
 
-Edit the configuration section in `trading_bot.py`:
+Edit `TRADING_CONFIG` in `trading_bot.py` (scripts, interval, EMAs, stops, loop interval).
 
-```python
-TRADING_CONFIG = {
-    "scripts": {
-        "NIFTY": "NSE_INDEX|Nifty 50",
-        "BANKNIFTY": "NSE_INDEX|Nifty Bank",
-        # Add more scripts
-    },
-    "interval": "5minute",  # 1minute, 5minute, 30minute, day
-    "ema_short": 5,
-    "ema_long": 18,
-    "portfolio_stop_loss": 10000,  # ₹10,000
-    "trailing_stop_loss_percent": 1.0,  # 1%
-    "loop_interval": 10  # seconds
-}
-```
+## Trading strategy (summary)
 
-## Trading Strategy
+- **Entry:** EMA(short) crosses above (BUY) or below (SELL) EMA(long) as configured  
+- **Exit:** Opposite crossover, trailing stop, or portfolio stop  
 
-### Entry Signals
-- **BUY**: When EMA(5) crosses above EMA(18)
-- **SELL**: When EMA(5) crosses below EMA(18)
+## Files generated (per user)
 
-### Exit Conditions
-1. Opposite crossover signal
-2. Trailing stop loss hit (1% from entry)
-3. Portfolio stop loss hit (₹10,000)
+Under `server/data/users/<username>/`:
 
-## Files Generated
+- `logs/trading_bot.log` — operational log (errors, signals, EOD, VERIFY lines). Also echoed to **stdout** with a `[username]` prefix when multiple accounts run in one process (files stay separate; only the console is shared).
+- `logs/orders.log` — **only** structured trade lines (`ACTION=ENTRY|EXIT|SKIP|…`) for the dashboard and scripts; not a copy of `trading_bot.log`.
+- `logs/market_status.log` — optional per-loop EMA/signal snapshot per script (similar information appears in the colored console table). Set `TRADING_BOT_WRITE_MARKET_STATUS_LOG=0` to disable this file.
+- `trading_state.json` — open positions / persisted state  
+- `trading_preferences.json` — optional subset of symbols to trade today (`enabled_scripts`); `null` means all instruments from `TRADING_CONFIG`. Set in the dashboard **Symbols to trade** card; the bot reloads it every loop.
 
-- `trading_bot.log` - Detailed activity logs
-- `trading_state.json` - Persistent trading state
-
-## Safety Features
-
-🛡️ **Paper Trading Mode**: Currently configured for testing (orders commented out)  
-🛡️ **Stop Loss Protection**: Automatic position exit on adverse moves  
-🛡️ **Portfolio Risk Management**: Global stop loss across all positions  
-🛡️ **State Recovery**: Resumes positions after restart  
-
-## Usage
-
-```bash
-# Start the bot
-python trading_bot.py
-
-# Stop with Ctrl+C (saves state automatically)
-```
-
-### Windows launchers
-
-- `start.bat` (or `.\start.ps1`): starts dashboard API, dashboard UI, and trading bot in one step
-- `start.bat -BotOnly` (or `.\start.ps1 -BotOnly`): trading bot only (no dashboard)
+A stray `orders.log` at the **repo root** is legacy; the bot only writes under `server/data/users/<user>/logs/`.
 
 ## API credentials
 
-Upstox access token, API key, and API secret are stored in `upstox_credentials.json` (gitignored). Copy `upstox_credentials.example.json` to that name on the server, or use **Dashboard → Upstox credentials** after the API is running. Optional env fallbacks (only where the file has no value yet): `UPSTOX_ACCESS_TOKEN`, `UPSTOX_API_KEY`, `UPSTOX_API_SECRET`. `UPSTOX_BASE_URL` applies only before `upstox_credentials.json` exists.
+Upstox tokens are **per dashboard user**, stored at:
 
-On a public host, set `DASHBOARD_ADMIN_TOKEN` on the server and paste the same value in the dashboard “admin token” field before saving credentials. Use `DASHBOARD_CORS_ORIGINS` (comma-separated) if the UI is not served from `localhost:5173`.
+`server/data/users/<username>/upstox_credentials.json` (gitignored).
 
-After a successful credential save, the dashboard API **recycles `trading_bot.py`**: it stops the process recorded in `trading_bot.lock` and starts a new one (same Python as `uvicorn`, or override with `TRADING_BOT_PYTHON`). Set `DASHBOARD_RESTART_BOT_ON_SAVE=0` to disable. On Linux, if the bot is a **systemd** unit, set `DASHBOARD_SYSTEMD_UNIT=your-bot.service` instead of direct spawn (the API runs `systemctl restart`; ensure the `uvicorn` user may run that, e.g. `sudoers`).
+Users save credentials in the UI; admins can save on behalf of another user. To seed a file without the UI, copy `server/templates/upstox_credentials.example.json` to that path and edit.
 
-## Production Deployment
+**Optional:** `DASHBOARD_ADMIN_TOKEN` for legacy admin flows; `DASHBOARD_CORS_ORIGINS` if the UI is not on `localhost:5173`.
 
-To enable live trading, uncomment these lines:
+**Bot recycle on save:** After saving Upstox credentials, the API can restart `trading_bot.py` using `trading_bot.lock`. Set `DASHBOARD_RESTART_BOT_ON_SAVE=0` to disable. For systemd, set `DASHBOARD_SYSTEMD_UNIT=your-bot.service`. Override Python with `TRADING_BOT_PYTHON` if needed.
 
-```python
-# In execute_trading_logic method
-self.client.place_order(data['instrument_key'], 1, "BUY")
-self.client.place_order(data['instrument_key'], 1, "SELL")
-```
+## Helper scripts
 
-⚠️ **Warning**: Only enable live trading after thorough testing!
-
-## Support
-
-For issues or questions:
-- Check logs in `trading_bot.log`
-- Verify API token validity
-- Ensure market hours for data availability
-
-## License
-
-MIT License - Use at your own risk. Trading involves financial risk.
-
----
-
-**Disclaimer**: This software is for educational purposes. Past performance does not guarantee future results. Always test thoroughly before live trading.
-Volume order block and EMA crossover
-
-## OB% from Upstox (not `orders.log`)
-
-To print **BUY and SELL** OB% / OB volume for all configured symbols using **live Upstox candles** (same logic as the bot):
+OB% snapshot (uses the same candle logic as the bot; credentials for `--user`):
 
 ```bash
 python scripts/fetch_ob_snapshot.py
 python scripts/fetch_ob_snapshot.py --json
-python scripts/fetch_ob_snapshot.py --scripts CRUDE NIFTY --json
+python scripts/fetch_ob_snapshot.py --user user-1 --scripts CRUDE NIFTY --json
 ```
+
+Analysis scripts accept `--user` (default `user-1`) for log paths under `server/data/users/<user>/`:
+
+```bash
+python scripts/analyze_trade_patterns.py --user user-1
+python scripts/trade_probability_report.py --user user-1
+```
+
+## Production notes
+
+Live order placement in code is intentionally disabled / commented for safety. Only enable after thorough testing.
+
+## License
+
+MIT License — use at your own risk. Trading involves financial risk.
+
+**Disclaimer:** Educational purposes. Past performance does not guarantee future results.

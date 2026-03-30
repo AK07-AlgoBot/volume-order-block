@@ -1,27 +1,20 @@
 """
-Upstox credentials on disk (upstox_credentials.json, gitignored).
+Per-user Upstox credentials: server/data/users/<username>/upstox_credentials.json
 
-Env vars fill empty token/key/secret fields. If upstox_credentials.json exists,
-on-disk values win for those fields (so a stale UPSTOX_ACCESS_TOKEN env var cannot
-override a token saved from the dashboard). UPSTOX_BASE_URL applies only when the
-credentials file does not exist yet.
+Single source of truth on disk — no repo-root credential file and no env-based overrides.
 """
 
 from __future__ import annotations
 
 import json
-import os
+import re
 from pathlib import Path
 
 DEFAULT_BASE_URL = "https://api.upstox.com/v2"
-CREDENTIALS_FILE = Path(__file__).resolve().parent / "upstox_credentials.json"
+REPO_ROOT = Path(__file__).resolve().parent
 
 
 def normalize_access_token(token: str) -> str:
-    """
-    Strip wrapping quotes, whitespace, accidental 'Bearer ' prefix, and BOM debris.
-    JWTs have no spaces; removing whitespace fixes paste errors.
-    """
     t = str(token or "").strip().strip("\ufeff")
     t = t.strip().strip('"').strip("'")
     t = "".join(t.split())
@@ -30,24 +23,62 @@ def normalize_access_token(token: str) -> str:
     return t.strip()
 
 
-def _env(name: str) -> str | None:
-    v = (os.environ.get(name) or "").strip()
-    return v or None
+def sanitize_username(username: str) -> str:
+    u = (username or "").strip()
+    u = re.sub(r"[^a-zA-Z0-9._-]", "", u)
+    return u or "user-1"
 
 
-def read_credentials_file() -> dict[str, str]:
-    """Values as stored on disk only (no env overlay)."""
-    base = {
+def user_data_dir(username: str) -> Path:
+    return REPO_ROOT / "server" / "data" / "users" / sanitize_username(username)
+
+
+def user_archive_order_logs(username: str) -> list[Path]:
+    """users/<user>/archive/<timestamp>/logs/orders.log"""
+    ud = user_data_dir(username)
+    ar = ud / "archive"
+    if not ar.exists():
+        return []
+    return sorted(ar.glob("*/logs/orders.log"))
+
+
+def legacy_admin_bucket_order_logs(username: str) -> list[Path]:
+    """Transitional: users/<holder>/archive/<username>/<timestamp>/logs/orders.log (holder was admin, now AK07)."""
+    u = sanitize_username(username)
+    seen: set[str] = set()
+    out: list[Path] = []
+    for holder in ("AK07", "admin"):
+        base = REPO_ROOT / "server" / "data" / "users" / holder / "archive" / u
+        if not base.is_dir():
+            continue
+        for p in sorted(base.glob("*/logs/orders.log")):
+            key = str(p.resolve())
+            if key not in seen:
+                seen.add(key)
+                out.append(p)
+    return out
+
+
+def credentials_file_for_user(username: str) -> Path:
+    return user_data_dir(username) / "upstox_credentials.json"
+
+
+def _empty_credential_dict() -> dict[str, str]:
+    return {
         "access_token": "",
         "api_key": "",
         "api_secret": "",
         "base_url": DEFAULT_BASE_URL,
     }
-    if not CREDENTIALS_FILE.exists():
+
+
+def _read_file_raw(path: Path) -> dict[str, str]:
+    base = _empty_credential_dict()
+    if not path.exists():
         return base
     try:
-        raw = json.loads(CREDENTIALS_FILE.read_text(encoding="utf-8-sig"))
-    except (json.JSONDecodeError, OSError):
+        raw = json.loads(path.read_text(encoding="utf-8-sig"))
+    except (OSError, json.JSONDecodeError):
         return base
     if not isinstance(raw, dict):
         return base
@@ -59,21 +90,15 @@ def read_credentials_file() -> dict[str, str]:
     return base
 
 
-def load_upstox_credentials() -> dict[str, str]:
-    """File first; env vars fill only empty fields (dashboard saves must not be overridden)."""
-    data = read_credentials_file()
-    if not data.get("access_token", "").strip():
-        if _env("UPSTOX_ACCESS_TOKEN"):
-            data["access_token"] = normalize_access_token(_env("UPSTOX_ACCESS_TOKEN") or "")
-    if not data.get("api_key", "").strip():
-        if _env("UPSTOX_API_KEY"):
-            data["api_key"] = _env("UPSTOX_API_KEY") or ""
-    if not data.get("api_secret", "").strip():
-        if _env("UPSTOX_API_SECRET"):
-            data["api_secret"] = _env("UPSTOX_API_SECRET") or ""
-    if not CREDENTIALS_FILE.exists() and _env("UPSTOX_BASE_URL"):
-        data["base_url"] = _env("UPSTOX_BASE_URL") or data["base_url"]
-    return data
+def read_credentials_file_for_user(username: str) -> dict[str, str]:
+    """On-disk values for this user only."""
+    path = credentials_file_for_user(sanitize_username(username))
+    return _read_file_raw(path)
+
+
+def load_upstox_credentials_for_user(username: str) -> dict[str, str]:
+    """Credentials used by the bot and API (file only)."""
+    return read_credentials_file_for_user(username)
 
 
 def mask_tail(value: str, tail: int = 4) -> str:
@@ -84,14 +109,33 @@ def mask_tail(value: str, tail: int = 4) -> str:
     return "•••" + value[-tail:]
 
 
-def persist_credentials(data: dict[str, str]) -> dict[str, str]:
-    """Write a full credential dict to disk (caller merges partial updates)."""
+def persist_credentials_for_user(username: str, data: dict[str, str]) -> dict[str, str]:
     out = {
         "access_token": normalize_access_token(str(data.get("access_token", ""))),
         "api_key": str(data.get("api_key", "")).strip(),
         "api_secret": str(data.get("api_secret", "")).strip(),
         "base_url": str(data.get("base_url") or "").strip() or DEFAULT_BASE_URL,
     }
-    CREDENTIALS_FILE.parent.mkdir(parents=True, exist_ok=True)
-    CREDENTIALS_FILE.write_text(json.dumps(out, indent=2) + "\n", encoding="utf-8")
+    path = credentials_file_for_user(username)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(out, indent=2) + "\n", encoding="utf-8")
     return out
+
+
+def list_usernames_from_auth_store() -> list[str]:
+    """Usernames from server/data/users_auth.json (dashboard users)."""
+    path = REPO_ROOT / "server" / "data" / "users_auth.json"
+    if not path.exists():
+        return ["AK07", "user-1", "user-2", "user-3", "user-4", "user-5"]
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return ["user-1"]
+    users = raw.get("users")
+    if not isinstance(users, list):
+        return ["user-1"]
+    names = []
+    for u in users:
+        if isinstance(u, dict) and u.get("username"):
+            names.append(str(u["username"]).strip())
+    return names or ["user-1"]

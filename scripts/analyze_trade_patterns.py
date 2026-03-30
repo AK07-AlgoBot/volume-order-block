@@ -1,11 +1,13 @@
 """
-Scan orders.log + archive/*/logs/orders.log for closed-trade patterns.
+Scan per-user orders.log + users/<user>/archive/*/logs/orders.log +
+legacy users/<holder>/archive/<user>/*/logs/orders.log for closed-trade patterns.
 
-Reconstructs trades with the same LIFO opposite-side pairing as dashboard_api,
-attaches EXIT REASON and ENTRY chart_pct when present in log lines.
+Reconstructs trades with the same LIFO opposite-side pairing as the dashboard,
+attaches EXIT REASON and ENTRY chart_pct/chart_vol when present in log lines.
 """
 from __future__ import annotations
 
+import argparse
 import re
 import sys
 from collections import Counter, defaultdict, deque
@@ -24,6 +26,7 @@ LINE_PATTERN = re.compile(
 ORDER_ID_PATTERN = re.compile(r"order_id=(?P<order_id>\d+)")
 REASON_PATTERN = re.compile(r"REASON=(?P<reason>[^|]+)")
 CHART_PCT_PATTERN = re.compile(r"chart_pct=(?P<v>[\d.]+)")
+CHART_VOL_PATTERN = re.compile(r"chart_vol=(?P<v>[\d.]+)")
 
 LOT_SIZES = {
     "NIFTY": 65,
@@ -39,14 +42,21 @@ def _parse_ts(ts_str: str) -> datetime:
     return datetime.strptime(ts_str, "%Y-%m-%d %H:%M:%S,%f")
 
 
-def _get_order_log_files() -> list[Path]:
+def _get_order_log_files(user: str) -> list[Path]:
+    from upstox_credentials_store import (
+        legacy_admin_bucket_order_logs,
+        sanitize_username,
+        user_archive_order_logs,
+        user_data_dir,
+    )
+
+    ud = user_data_dir(sanitize_username(user))
     files: list[Path] = []
-    main = ROOT / "orders.log"
+    main = ud / "logs" / "orders.log"
     if main.exists():
         files.append(main)
-    archive = ROOT / "archive"
-    if archive.exists():
-        files.extend(sorted(archive.glob("*/logs/orders.log")))
+    files.extend(user_archive_order_logs(user))
+    files.extend(legacy_admin_bucket_order_logs(user))
     seen: set[str] = set()
     out: list[Path] = []
     for p in files:
@@ -73,9 +83,9 @@ def _pop_matching_entry(entry_queue: deque, exit_side: str) -> dict | None:
     return None
 
 
-def load_events() -> list[tuple]:
+def load_events(user: str) -> list[tuple]:
     parsed: list[tuple] = []
-    for order_file in _get_order_log_files():
+    for order_file in _get_order_log_files(user):
         text = order_file.read_text(encoding="utf-8", errors="ignore")
         for raw in text.splitlines():
             stripped = raw.strip()
@@ -95,11 +105,15 @@ def load_events() -> list[tuple]:
                 if rm:
                     reason = rm.group("reason").strip()
             chart_pct = None
+            chart_vol = None
             if action == "ENTRY":
                 cm = CHART_PCT_PATTERN.search(stripped)
                 if cm:
                     chart_pct = float(cm.group("v"))
-            parsed.append((ts, script, action, side, price, order_id, reason, chart_pct))
+                vm = CHART_VOL_PATTERN.search(stripped)
+                if vm:
+                    chart_vol = float(vm.group("v"))
+            parsed.append((ts, script, action, side, price, order_id, reason, chart_pct, chart_vol))
 
     parsed.sort(key=lambda e: e[0])
     seen: set[tuple] = set()
@@ -124,7 +138,7 @@ def reconstruct_trades(events: list[tuple]) -> list[dict]:
     entries: dict[str, deque] = defaultdict(deque)
     trades: list[dict] = []
     seq = 0
-    for ts, script, action, side, price, _oid, reason, chart_pct in events:
+    for ts, script, action, side, price, _oid, reason, chart_pct, chart_vol in events:
         if action == "ENTRY":
             entries[script].append(
                 {
@@ -132,6 +146,7 @@ def reconstruct_trades(events: list[tuple]) -> list[dict]:
                     "price": price,
                     "ts": ts,
                     "chart_pct": chart_pct,
+                    "chart_volume": chart_vol,
                 }
             )
             continue
@@ -160,6 +175,7 @@ def reconstruct_trades(events: list[tuple]) -> list[dict]:
                 "closed_at": ts,
                 "exit_reason": reason or "UNKNOWN",
                 "chart_pct": entry.get("chart_pct"),
+                "chart_volume": entry.get("chart_volume"),
             }
         )
     return trades
@@ -180,7 +196,14 @@ def bucket_chart_pct(v: float | None) -> str:
 
 
 def main() -> None:
-    events = load_events()
+    parser = argparse.ArgumentParser(description="Scan per-user orders.log for trade patterns")
+    parser.add_argument(
+        "--user",
+        default="user-1",
+        help="Dashboard user (server/data/users/<user>/logs/orders.log)",
+    )
+    args = parser.parse_args()
+    events = load_events(args.user)
     trades = reconstruct_trades(events)
     if not trades:
         print("No reconstructed trades found.")
@@ -199,7 +222,7 @@ def main() -> None:
             out.append((reason, len(pnls), sum(pnls), sum(pnls) / len(pnls)))
         return out
 
-    print("=== Trade pattern scan (orders.log + archive) ===\n")
+    print(f"=== Trade pattern scan (user={args.user}) ===\n")
     print(f"Total closed (reconstructed): {len(trades)}")
     print(f"Winners: {len(winners)}  Losers: {len(losers)}  Breakeven: {len(flat)}")
     if trades:

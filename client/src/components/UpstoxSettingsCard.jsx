@@ -1,7 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-
-const API_BASE =
-  (import.meta.env.VITE_DASHBOARD_API_BASE || "").trim() || "http://127.0.0.1:8000";
+import { apiFetch, getStoredAuth } from "../api/client";
 
 function formatApiErrorDetail(detail) {
   if (detail == null) {
@@ -18,7 +16,22 @@ function formatApiErrorDetail(detail) {
   return String(detail);
 }
 
+function settingsUrl(forUser) {
+  const base = "/api/settings/upstox";
+  if (forUser) {
+    return `${base}?for_user=${encodeURIComponent(forUser)}`;
+  }
+  return base;
+}
+
 export function UpstoxSettingsCard() {
+  const { role, username } = getStoredAuth();
+  const isAdmin = role === "admin";
+
+  /** Admin: whose Upstox file we are editing (empty = own account). */
+  const [credentialTarget, setCredentialTarget] = useState("");
+  const [userOptions, setUserOptions] = useState([]);
+
   const [baseUrl, setBaseUrl] = useState("");
   const [accessToken, setAccessToken] = useState("");
   const [apiKey, setApiKey] = useState("");
@@ -37,12 +50,25 @@ export function UpstoxSettingsCard() {
   });
   const [credentialsFile, setCredentialsFile] = useState("");
   const [credentialsPath, setCredentialsPath] = useState("");
+  const [credentialSubject, setCredentialSubject] = useState("");
   const [status, setStatus] = useState("");
   const [loading, setLoading] = useState(true);
 
+  useEffect(() => {
+    if (!isAdmin) {
+      return;
+    }
+    apiFetch("/api/auth/users")
+      .then((r) => r.json())
+      .then((rows) => setUserOptions(Array.isArray(rows) ? rows : []))
+      .catch(() => setUserOptions([]));
+  }, [isAdmin]);
+
+  const effectiveForUser = isAdmin && credentialTarget ? credentialTarget : "";
+
   const loadSettings = useCallback(() => {
     setLoading(true);
-    fetch(`${API_BASE}/api/settings/upstox`)
+    apiFetch(settingsUrl(effectiveForUser))
       .then((r) => r.json())
       .then((data) => {
         setBaseUrl(data.base_url || "");
@@ -57,6 +83,7 @@ export function UpstoxSettingsCard() {
         });
         setCredentialsFile(data.credentials_file || "");
         setCredentialsPath(data.credentials_path || "");
+        setCredentialSubject(data.credential_subject || username || "");
         setStatus("");
       })
       .catch((e) => {
@@ -64,7 +91,7 @@ export function UpstoxSettingsCard() {
         setStatus("Could not load settings (is the API running on port 8000?)");
       })
       .finally(() => setLoading(false));
-  }, []);
+  }, [effectiveForUser, username]);
 
   useEffect(() => {
     loadSettings();
@@ -83,29 +110,34 @@ export function UpstoxSettingsCard() {
     if (adminToken.trim()) {
       headers["X-Dashboard-Admin-Token"] = adminToken.trim();
     }
-    fetch(`${API_BASE}/api/settings/upstox`, {
+    const body = {
+      access_token: accessToken,
+      api_key: apiKey,
+      api_secret: apiSecret,
+      base_url: baseUrl,
+    };
+    if (isAdmin && credentialTarget) {
+      body.for_user = credentialTarget;
+    }
+    apiFetch("/api/settings/upstox", {
       method: "POST",
       headers,
-      body: JSON.stringify({
-        access_token: accessToken,
-        api_key: apiKey,
-        api_secret: apiSecret,
-        base_url: baseUrl,
-      }),
+      body: JSON.stringify(body),
     })
       .then(async (r) => {
-        const body = await r.json().catch(() => ({}));
+        const saved = await r.json().catch(() => ({}));
         if (!r.ok) {
-          const msg = formatApiErrorDetail(body.detail) || r.statusText || "Save failed";
+          const msg = formatApiErrorDetail(saved.detail) || r.statusText || "Save failed";
           throw new Error(msg);
         }
-        return body;
+        return saved;
       })
       .then((savedBody) => {
         setAccessToken("");
         setApiKey("");
         setApiSecret("");
         const br = savedBody.bot_restart;
+        const who = savedBody.credential_subject || credentialSubject;
         let extra = "";
         if (br?.skipped) {
           extra = ` Bot: ${br.skipped}`;
@@ -115,10 +147,10 @@ export function UpstoxSettingsCard() {
             : ` Bot systemd restart failed${br.systemctl_message ? `: ${br.systemctl_message}` : ""}.`;
         } else if (br?.mode === "process") {
           extra = br.restarted
-            ? " Stopped prior bot process and started a new trading_bot.py."
+            ? " Bot process recycled."
             : ` Bot recycle incomplete: ${JSON.stringify(br.spawn || br.terminate || br)}`;
         }
-        setStatus(`Saved.${extra || " (no bot restart — no fields changed.)"}`);
+        setStatus(`Saved for ${who}.${extra || " (no bot restart — no fields changed.)"}`);
         loadSettings();
       })
       .catch((e) => {
@@ -130,20 +162,43 @@ export function UpstoxSettingsCard() {
     <section className="card upstox-settings">
       <h2>Upstox credentials</h2>
       <p className="upstox-settings-help">
-        Daily access token and API key/secret are stored in{" "}
-        <code className="inline-code">{credentialsFile || "upstox_credentials.json"}</code> on the
-        server (not in source code). Leave a field empty to keep the current value. Saving a
-        changed field also restarts the trading bot on the server so a new token applies without SSH.
+        Each dashboard user has a separate file on the server:{" "}
+        <code className="inline-code">server/data/users/&lt;user&gt;/upstox_credentials.json</code>.
+        Sign in as that user (or as admin and pick an account below) to paste tokens. The trading bot loads
+        every user who has a saved access token and trades in one process.
         {credentialsPath ? (
           <>
             {" "}
-            Full path: <code className="inline-code">{credentialsPath}</code>
+            Current file: <code className="inline-code">{credentialsPath}</code>
           </>
         ) : null}
       </p>
+      {isAdmin ? (
+        <label className="upstox-field">
+          <span>Save / edit credentials for</span>
+          <select
+            className="admin-view-select"
+            value={credentialTarget}
+            onChange={(e) => setCredentialTarget(e.target.value)}
+            style={{ maxWidth: "100%" }}
+          >
+            <option value="">My admin account ({username})</option>
+            {userOptions.map((u) => (
+              <option key={u.username} value={u.username}>
+                {u.username} ({u.role})
+              </option>
+            ))}
+          </select>
+        </label>
+      ) : null}
+      {!isAdmin ? (
+        <p className="subtle">
+          Signed in as <strong>{username}</strong>. Only you (and admins) can change these credentials.
+        </p>
+      ) : null}
       {flags.admin_token_configured ? (
         <label className="upstox-field">
-          <span>Dashboard admin token</span>
+          <span>Dashboard admin token (legacy)</span>
           <input
             type="password"
             autoComplete="off"
@@ -157,6 +212,9 @@ export function UpstoxSettingsCard() {
         <p className="subtle">Loading…</p>
       ) : (
         <>
+          <p className="subtle">
+            Editing: <strong>{credentialSubject}</strong>
+          </p>
           <div className="upstox-previews subtle">
             {flags.has_access_token ? (
               <span>Current access token: {previews.access_token_preview || "set"}</span>

@@ -5,13 +5,14 @@ Get your trading bot running in **5 minutes**!
 ## Step 1: Install Dependencies ⏱️ 1 min
 ```powershell
 pip install -r requirements.txt
+pip install -r server/requirements.txt
 ```
 
 ## Step 2: Upstox credentials ⏱️ 1 min
 
-**Option A (recommended):** Start the stack (`start.bat`), open the dashboard at `http://localhost:5173`, scroll to **Upstox credentials**, paste your daily access token (and key/secret if you use them), then save.
+**Option A (recommended):** Start the stack (`start.bat`), open `http://localhost:5173`, sign in as **admin** / **admin**, scroll to **Upstox credentials**, paste your daily access token (and key/secret if you use them), then save.
 
-**Option B:** Copy `upstox_credentials.example.json` to `upstox_credentials.json` in the project root and edit the values (this file is gitignored).
+**Option B:** Copy `server/templates/upstox_credentials.example.json` to `server/data/users/<username>/upstox_credentials.json` (create the folder if needed) and edit. That path is gitignored.
 
 ## Step 3: Run the Bot + UI ⏱️ 30 sec
 
@@ -25,7 +26,7 @@ This starts everything:
 
 - Dashboard API (`http://localhost:8000`)
 - Dashboard UI (`http://localhost:5173`)
-- Trading bot (waits and retries until a valid token is on file or in env)
+- Trading bot (skips users with no token until credentials are saved for them)
 
 Bot only (no dashboard):
 
@@ -161,7 +162,7 @@ Want to change settings? Edit these in `trading_bot.py`:
 ### Before Going Live:
 
 1. ✅ Run bot for 1-2 days in paper trading mode
-2. ✅ Review logs in `trading_bot.log`
+2. ✅ Review logs under `server/data/users/<user>/logs/`
 3. ✅ Verify signals are accurate
 4. ✅ Test stop loss triggers
 5. ✅ Understand all configurations
@@ -183,7 +184,8 @@ This means:
 
 ## 📝 Log Files
 
-### `trading_bot.log`
+Per user: `server/data/users/<user>/logs/trading_bot.log`
+
 Detailed logs with timestamps:
 ```
 2026-03-04 10:30:00 - INFO - 🚀 Trading Bot Started
@@ -192,7 +194,8 @@ Detailed logs with timestamps:
 2026-03-04 10:30:03 - INFO - 🟢 BUY signal for FINNIFTY at ₹22890.30
 ```
 
-### `trading_state.json`
+### `trading_state.json` (same user folder)
+
 Current positions (auto-saved):
 ```json
 {
@@ -219,7 +222,7 @@ pip install -r requirements.txt
 
 ### "Invalid token" error
 - Get new token from Upstox
-- Update via dashboard **Upstox credentials** or edit `upstox_credentials.json`
+- Update via dashboard **Upstox credentials** or edit `server/data/users/<user>/upstox_credentials.json`
 
 ### "No data fetched" error
 - Check if market is open (9:15 AM - 3:30 PM IST)
@@ -227,7 +230,7 @@ pip install -r requirements.txt
 - Ensure historical data access in Upstox
 
 ### Bot keeps restarting?
-- Check `trading_bot.log` for errors
+- Check `server/data/users/<user>/logs/trading_bot.log` for errors
 - Verify token hasn't expired
 - Ensure sufficient API quota
 
@@ -236,7 +239,7 @@ pip install -r requirements.txt
 ## 🎓 Next Steps
 
 1. **Monitor for a day** - Let it run and observe signals
-2. **Review logs** - Check `trading_bot.log` for patterns
+2. **Review logs** - Check `server/data/users/<user>/logs/trading_bot.log` for patterns
 3. **Adjust parameters** - Fine-tune EMA periods if needed
 4. **Backtest strategy** - Use historical data to validate
 5. **Enable live trading** - Only when confident!
@@ -245,7 +248,7 @@ pip install -r requirements.txt
 
 ## 📞 Need Help?
 
-1. Check `trading_bot.log` for errors
+1. Check per-user `server/data/users/<user>/logs/trading_bot.log` for errors
 2. Read the full [README.md](README.md)
 3. Review [CHANGELOG.md](CHANGELOG.md)
 

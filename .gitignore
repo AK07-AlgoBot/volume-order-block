@@ -11,12 +11,22 @@ ENV/
 dist/
 build/
 
-# Trading Bot Files
+# Trading Bot Files (per-user under server/data/users/)
 trading_state.json
+trading_bot.lock
 trading_bot.log
 trading_log.txt
 live_status.log
+orders.log
+market_status.log
 *.log
+
+# Server runtime data (auth, per-user logs, audit)
+server/data/users/
+server/data/logs/
+server/data/users_auth.json
+server/.env
+client/.env
 
 # Old files
 old/
@@ -38,8 +48,8 @@ Thumbs.db
 
 # Local tooling/build
 .tools/
-dashboard-ui/node_modules/
-dashboard-ui/dist/
+client/node_modules/
+client/dist/
 
 # Sensitive
 config.json

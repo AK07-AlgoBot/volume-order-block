@@ -92,6 +92,69 @@ body {
   align-items: start;
 }
 
+.pnl-charts-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  min-width: 0;
+}
+
+.admin-data-hint {
+  margin-top: 0.65rem;
+  margin-bottom: -0.25rem;
+  padding: 0.55rem 0.75rem;
+  border-radius: 10px;
+  border: 1px solid #334155;
+  background: rgba(30, 41, 59, 0.6);
+  font-size: 0.78rem;
+  color: #cbd5e1;
+}
+
+.admin-data-hint code {
+  font-size: 0.72rem;
+  color: #94a3b8;
+}
+
+.pnl-mode-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-top: 0.55rem;
+  flex-wrap: wrap;
+}
+
+.pnl-mode-toggle {
+  display: inline-flex;
+  border: 1px solid #334155;
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.pnl-mode-toggle button {
+  border: 0;
+  margin: 0;
+  padding: 0.3rem 0.65rem;
+  font-size: 0.75rem;
+  background: rgba(15, 23, 42, 0.9);
+  color: #94a3b8;
+  cursor: pointer;
+}
+
+.pnl-mode-toggle button + button {
+  border-left: 1px solid #334155;
+}
+
+.pnl-mode-toggle button.active {
+  background: rgba(34, 197, 94, 0.15);
+  color: #4ade80;
+}
+
+.ist-month-line {
+  margin-top: 0.35rem;
+  font-size: 0.78rem;
+  color: #cbd5e1;
+}
+
 .card {
   background: rgba(15, 23, 42, 0.8);
   border: 1px solid #1e293b;
@@ -495,6 +558,193 @@ tr:last-child td {
   margin: 0.5rem 0 0;
   font-size: 0.8rem;
   color: #fcd34d;
+}
+
+.header-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.65rem;
+  justify-content: flex-end;
+}
+
+.admin-view-label {
+  display: inline-flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  font-size: 0.65rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: #94a3b8;
+}
+
+.admin-view-select {
+  min-width: 10rem;
+  padding: 0.35rem 0.5rem;
+  border-radius: 8px;
+  border: 1px solid #334155;
+  background: #0f172a;
+  color: #e2e8f0;
+  font-size: 0.85rem;
+}
+
+.user-chip {
+  font-size: 0.75rem;
+  color: #cbd5e1;
+  max-width: 14rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.btn-logout {
+  border: 1px solid #475569;
+  background: transparent;
+  color: #e2e8f0;
+  border-radius: 8px;
+  padding: 0.35rem 0.65rem;
+  font-size: 0.75rem;
+  cursor: pointer;
+}
+
+.btn-logout:hover {
+  border-color: #94a3b8;
+}
+
+.login-wrap {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: 1.5rem;
+}
+
+.login-card {
+  width: min(400px, 100%);
+  padding: 1.75rem;
+  border-radius: 16px;
+  border: 1px solid #1e293b;
+  background: rgba(15, 23, 42, 0.85);
+  box-shadow: 0 20px 50px rgba(0, 0, 0, 0.35);
+}
+
+.login-logo {
+  margin-bottom: 1rem;
+}
+
+.login-title {
+  margin: 0 0 0.5rem;
+  font-size: 1.35rem;
+}
+
+.login-hint {
+  margin: 0 0 1.25rem;
+  font-size: 0.8rem;
+  color: #94a3b8;
+  line-height: 1.4;
+}
+
+.login-hint code {
+  font-size: 0.75rem;
+  color: #5eead4;
+}
+
+.login-form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.85rem;
+}
+
+.login-label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  font-size: 0.8rem;
+  color: #cbd5e1;
+}
+
+.login-input {
+  padding: 0.55rem 0.65rem;
+  border-radius: 10px;
+  border: 1px solid #334155;
+  background: #020617;
+  color: #f1f5f9;
+  font-size: 0.95rem;
+}
+
+.login-input:focus {
+  outline: 2px solid #22c55e55;
+  border-color: #22c55e;
+}
+
+.login-error {
+  font-size: 0.8rem;
+  color: #fca5a5;
+}
+
+.login-submit {
+  margin-top: 0.25rem;
+  padding: 0.6rem 1rem;
+  border: none;
+  border-radius: 10px;
+  background: linear-gradient(145deg, #22c55e, #06b6d4);
+  color: #020617;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.login-submit:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.section-title {
+  margin: 0 0 0.35rem;
+  font-size: 1rem;
+  font-weight: 700;
+  color: #e2e8f0;
+}
+
+.trading-scope-card {
+  margin-top: 1.25rem;
+}
+
+.trading-scope-all {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.85rem;
+  color: #cbd5e1;
+  margin-bottom: 0.65rem;
+  cursor: pointer;
+}
+
+.trading-scope-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-bottom: 0.5rem;
+}
+
+.trading-scope-grid--disabled {
+  opacity: 0.55;
+  pointer-events: none;
+}
+
+.trading-scope-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 0.78rem;
+  color: #e2e8f0;
+  border: 1px solid #334155;
+  border-radius: 8px;
+  padding: 0.35rem 0.55rem;
+  background: rgba(15, 23, 42, 0.6);
+  cursor: pointer;
+}
+
+.trading-scope-chip input {
+  accent-color: #22c55e;
 }
 
 @media (max-width: 980px) {

@@ -15,9 +15,7 @@ import sys
 import time
 from pathlib import Path
 
-from upstox_credentials_store import CREDENTIALS_FILE
-
-REPO_ROOT = CREDENTIALS_FILE.resolve().parent
+REPO_ROOT = Path(__file__).resolve().parent
 LOCK_FILE = REPO_ROOT / "trading_bot.lock"
 BOT_SCRIPT = REPO_ROOT / "trading_bot.py"
 
