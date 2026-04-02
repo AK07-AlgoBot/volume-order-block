@@ -53,6 +53,7 @@ export function UpstoxSettingsCard() {
   const [credentialSubject, setCredentialSubject] = useState("");
   const [status, setStatus] = useState("");
   const [loading, setLoading] = useState(true);
+  const [testing, setTesting] = useState(false);
 
   useEffect(() => {
     if (!isAdmin) {
@@ -156,6 +157,37 @@ export function UpstoxSettingsCard() {
       .catch((e) => {
         setStatus(e.message || String(e));
       });
+  };
+
+  const testConnection = () => {
+    setTesting(true);
+    setStatus("Testing saved Upstox token…");
+    const path = effectiveForUser
+      ? `/api/settings/upstox/test?for_user=${encodeURIComponent(effectiveForUser)}`
+      : "/api/settings/upstox/test";
+    apiFetch(path, { method: "POST" })
+      .then(async (r) => {
+        const body = await r.json().catch(() => ({}));
+        if (!r.ok) {
+          const msg = formatApiErrorDetail(body.detail) || r.statusText || "Upstox test failed";
+          throw new Error(msg);
+        }
+        return body;
+      })
+      .then((body) => {
+        const profile = body.profile || {};
+        const who =
+          profile.user_name ||
+          profile.email ||
+          profile.user_id ||
+          body.credential_subject ||
+          credentialSubject;
+        setStatus(`Connection OK for ${who}. Saved token can access Upstox profile successfully.`);
+      })
+      .catch((e) => {
+        setStatus(e.message || String(e));
+      })
+      .finally(() => setTesting(false));
   };
 
   return (
@@ -270,6 +302,9 @@ export function UpstoxSettingsCard() {
           <div className="upstox-actions">
             <button type="button" className="btn-primary" onClick={save}>
               Save to server
+            </button>
+            <button type="button" className="btn-ghost" onClick={testConnection} disabled={testing}>
+              {testing ? "Testing…" : "Test connection"}
             </button>
             <button type="button" className="btn-ghost" onClick={loadSettings}>
               Reload

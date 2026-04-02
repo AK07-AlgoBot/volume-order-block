@@ -67,6 +67,7 @@ export function WeeklyPnlChart({
 
   const mtd = istMonth || {};
   const mtdTotal = Number(mtd.total ?? 0);
+  const currentWeekTotal = Number(weekTotal || 0);
 
   return (
     <div className="card">
@@ -81,27 +82,20 @@ export function WeeklyPnlChart({
       >
         <div>
           <h2 style={{ margin: 0 }}>P&amp;L</h2>
-          <div className="subtle">{rangeText}</div>
+          <div>
+            Week total:{" "}
+            <span className={currentWeekTotal >= 0 ? "pnl-pos" : "pnl-neg"} style={{ fontWeight: 700 }}>
+              {currentWeekTotal.toFixed(2)}
+            </span>
+          </div>
           <div className="ist-month-line">
             Month to date (IST):{" "}
             <span className={mtdTotal >= 0 ? "pnl-pos" : "pnl-neg"} style={{ fontWeight: 700 }}>
               {mtdTotal.toFixed(2)}
             </span>
-            {mtd.range_start && mtd.range_end ? (
-              <span className="subtle">
-                {" "}
-                · {mtd.range_start} to {mtd.range_end}
-              </span>
-            ) : null}
           </div>
         </div>
         <div className="subtle" style={{ textAlign: "right", lineHeight: 1.5 }}>
-          <div>
-            {isWeek ? "Week" : "Month"} total:{" "}
-            <span className={total >= 0 ? "pnl-pos" : "pnl-neg"} style={{ fontWeight: 700 }}>
-              {total.toFixed(2)}
-            </span>
-          </div>
           <div>
             Best day: <span style={{ color: "#4ade80", fontWeight: 700 }}>{maxGain.toFixed(2)}</span>
           </div>
