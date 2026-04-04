@@ -3314,31 +3314,37 @@ def main():
 
     usernames = ["AK07"]
     bots: list[TradingBot] = []
+    try:
+        poll_s = int(os.environ.get("BOT_CREDENTIALS_POLL_SECONDS", "60"))
+    except ValueError:
+        poll_s = 60
+    poll_s = max(15, poll_s)
 
-    for un in usernames:
-        creds = load_upstox_credentials_for_user(un)
-        tok = (creds.get("access_token") or "").strip()
-        if not tok:
+    while True:
+        bots.clear()
+        for un in usernames:
+            creds = load_upstox_credentials_for_user(un)
+            tok = (creds.get("access_token") or "").strip()
+            if not tok:
+                continue
+            base = creds.get("base_url") or API_CONFIG["base_url"]
+            client = UpstoxClient(tok, base, username=un, log=None)
+            bot = TradingBot(TRADING_CONFIG, client, username=un)
+            bots.append(bot)
+            cf = credentials_file_for_user(un)
             print(
-                f"{Fore.YELLOW}Skip [{un}]: no Upstox access token — "
-                f"save credentials in dashboard for this user.{Style.RESET_ALL}"
+                f"{Fore.CYAN}[{un}]{Style.RESET_ALL} token preview={mask_tail(tok)} file={cf}"
             )
-            continue
-        base = creds.get("base_url") or API_CONFIG["base_url"]
-        client = UpstoxClient(tok, base, username=un, log=None)
-        bot = TradingBot(TRADING_CONFIG, client, username=un)
-        bots.append(bot)
-        cf = credentials_file_for_user(un)
-        print(
-            f"{Fore.CYAN}[{un}]{Style.RESET_ALL} token preview={mask_tail(tok)} file={cf}"
-        )
 
-    if not bots:
+        if bots:
+            break
+
         print(
-            f"{Fore.RED}No Upstox token. Sign in to the dashboard as AK07 and save credentials "
-            f"(src/server/data/users/AK07/).{Style.RESET_ALL}"
+            f"{Fore.RED}No Upstox access token. Sign in to the dashboard as AK07 and save Upstox "
+            f"credentials (written to {credentials_file_for_user('AK07')}). "
+            f"Retrying in {poll_s}s…{Style.RESET_ALL}"
         )
-        return
+        time.sleep(poll_s)
 
     if any(telegram_notifications_enabled_for_user(b.username) for b in bots):
         if not send_telegram_test_message():
