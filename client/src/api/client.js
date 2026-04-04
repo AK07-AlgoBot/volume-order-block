@@ -1,18 +1,27 @@
-const API_BASE =
-  (import.meta.env.VITE_DASHBOARD_API_BASE || "").trim() || "http://127.0.0.1:8000";
+function runtimeApiBase() {
+  const env = (import.meta.env.VITE_DASHBOARD_API_BASE || "").trim();
+  if (env) {
+    return env.replace(/\/$/, "");
+  }
+  if (typeof window !== "undefined" && window.location?.origin) {
+    return window.location.origin;
+  }
+  return "http://127.0.0.1:8000";
+}
 
 const TOKEN_KEY = "ak07_access_token";
 const USER_KEY = "ak07_username";
 const ROLE_KEY = "ak07_role";
 
 export function getApiBase() {
-  return API_BASE;
+  return runtimeApiBase();
 }
 
 export function getWsBase() {
-  return API_BASE.startsWith("https://")
-    ? API_BASE.replace("https://", "wss://")
-    : API_BASE.replace("http://", "ws://");
+  const base = getApiBase();
+  return base.startsWith("https://")
+    ? base.replace("https://", "wss://")
+    : base.replace("http://", "ws://");
 }
 
 export function getStoredAuth() {
@@ -36,7 +45,6 @@ export function clearStoredAuth() {
   window.localStorage.removeItem(TOKEN_KEY);
   window.localStorage.removeItem(USER_KEY);
   window.localStorage.removeItem(ROLE_KEY);
-  window.localStorage.removeItem("dashboardAdminToken");
 }
 
 export function authHeaders() {
@@ -45,17 +53,13 @@ export function authHeaders() {
 }
 
 /**
- * @param {string} path — e.g. /api/dashboard/initial or api/dashboard/weekly-pnl?week_offset=0
+ * @param {string} path — e.g. /api/dashboard/initial
  * @param {RequestInit} options
- * @param {string} [viewAs] — admin: scope data to another user
  */
-export async function apiFetch(path, options = {}, viewAs) {
-  const base = API_BASE.replace(/\/$/, "");
+export async function apiFetch(path, options = {}) {
+  const base = getApiBase().replace(/\/$/, "");
   const rel = path.replace(/^\//, "");
   const u = new URL(rel, `${base}/`);
-  if (viewAs) {
-    u.searchParams.set("view_as", viewAs);
-  }
   const headers = {
     ...(options.headers || {}),
     ...authHeaders(),

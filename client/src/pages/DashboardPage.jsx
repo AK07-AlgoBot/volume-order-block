@@ -60,10 +60,7 @@ function dedupeLiveTrades(trades) {
 export default function DashboardPage() {
   const navigate = useNavigate();
   const auth = getStoredAuth();
-  const { token, username, role } = auth;
-  /** Admin defaults to user-1 data so past trades/P&L show without picking View as each time. */
-  const [viewAs, setViewAs] = useState(() => (auth.role === "admin" ? "user-1" : ""));
-  const [userOptions, setUserOptions] = useState([]);
+  const { token, username } = auth;
 
   const [todayDateText] = useState(getLocalDateIso);
   const [liveTrades, setLiveTrades] = useState([]);
@@ -93,10 +90,7 @@ export default function DashboardPage() {
   const selectedWeekOffsetRef = useRef(selectedWeekOffset);
   const selectedMonthOffsetRef = useRef(selectedMonthOffset);
   const perfDaysRef = useRef(perfDays);
-  const viewAsRef = useRef(viewAs);
   const appReadySentRef = useRef(false);
-
-  const effectiveViewAs = role === "admin" && viewAs ? viewAs : undefined;
 
   const markAppReady = () => {
     if (appReadySentRef.current) {
@@ -111,16 +105,6 @@ export default function DashboardPage() {
       navigate("/login", { replace: true });
     }
   }, [token, navigate]);
-
-  useEffect(() => {
-    if (role !== "admin") {
-      return;
-    }
-    apiFetch("/api/auth/users")
-      .then((r) => r.json())
-      .then((rows) => setUserOptions(Array.isArray(rows) ? rows : []))
-      .catch(() => setUserOptions([]));
-  }, [role]);
 
   useEffect(() => {
     selectedClosedDateRef.current = selectedClosedDate;
@@ -139,22 +123,13 @@ export default function DashboardPage() {
   }, [perfDays]);
 
   useEffect(() => {
-    viewAsRef.current = effectiveViewAs;
-  }, [effectiveViewAs]);
-
-  useEffect(() => {
     if (!token) {
       return undefined;
     }
     let active = true;
-    const va = effectiveViewAs;
 
     const loadWeeklyPnl = (weekOffset = selectedWeekOffsetRef.current) => {
-      apiFetch(
-        `/api/dashboard/weekly-pnl?week_offset=${encodeURIComponent(weekOffset)}`,
-        {},
-        va
-      )
+      apiFetch(`/api/dashboard/weekly-pnl?week_offset=${encodeURIComponent(weekOffset)}`)
         .then((response) => response.json())
         .then((payload) => {
           if (!active) {
@@ -174,11 +149,7 @@ export default function DashboardPage() {
     };
 
     const loadMonthlyPnl = (monthOffset = selectedMonthOffsetRef.current) => {
-      apiFetch(
-        `/api/dashboard/monthly-pnl?month_offset=${encodeURIComponent(monthOffset)}`,
-        {},
-        va
-      )
+      apiFetch(`/api/dashboard/monthly-pnl?month_offset=${encodeURIComponent(monthOffset)}`)
         .then((response) => response.json())
         .then((payload) => {
           if (!active) {
@@ -199,11 +170,7 @@ export default function DashboardPage() {
 
     const loadSymbolPerformance = () => {
       const days = perfDaysRef.current;
-      apiFetch(
-        `/api/dashboard/symbol-performance?days=${encodeURIComponent(days)}`,
-        {},
-        va
-      )
+      apiFetch(`/api/dashboard/symbol-performance?days=${encodeURIComponent(days)}`)
         .then((response) => response.json())
         .then((payload) => {
           if (!active) {
@@ -221,7 +188,7 @@ export default function DashboardPage() {
         });
     };
 
-    apiFetch("/api/dashboard/initial", {}, va)
+    apiFetch("/api/dashboard/initial")
       .then((response) => {
         if (response.status === 401) {
           clearStoredAuth();
@@ -262,9 +229,6 @@ export default function DashboardPage() {
 
     const wsBase = getWsBase();
     const q = new URLSearchParams({ token });
-    if (va) {
-      q.set("view_as", va);
-    }
     const socket = new WebSocket(`${wsBase}/ws/trades?${q.toString()}`);
     socket.onopen = () => setConnected(true);
     socket.onclose = () => setConnected(false);
@@ -292,13 +256,10 @@ export default function DashboardPage() {
               (item) => liveTradeIdentityKey(item) !== liveTradeIdentityKey(message.trade)
             )
           );
-          const v = viewAsRef.current;
           apiFetch(
             `/api/dashboard/closed-trades?date=${encodeURIComponent(
               selectedClosedDateRef.current
-            )}`,
-            {},
-            v
+            )}`
           )
             .then((response) => response.json())
             .then((payload) => {
@@ -361,18 +322,14 @@ export default function DashboardPage() {
       window.clearInterval(perfRefresh);
       socket.close();
     };
-  }, [todayDateText, token, effectiveViewAs, navigate]);
+  }, [todayDateText, token, navigate]);
 
   useEffect(() => {
     if (!token) {
       return undefined;
     }
     let active = true;
-    apiFetch(
-      `/api/dashboard/weekly-pnl?week_offset=${encodeURIComponent(selectedWeekOffset)}`,
-      {},
-      effectiveViewAs
-    )
+    apiFetch(`/api/dashboard/weekly-pnl?week_offset=${encodeURIComponent(selectedWeekOffset)}`)
       .then((response) => response.json())
       .then((payload) => {
         if (!active) {
@@ -391,18 +348,14 @@ export default function DashboardPage() {
     return () => {
       active = false;
     };
-  }, [selectedWeekOffset, token, effectiveViewAs]);
+  }, [selectedWeekOffset, token]);
 
   useEffect(() => {
     if (!token) {
       return undefined;
     }
     let active = true;
-    apiFetch(
-      `/api/dashboard/monthly-pnl?month_offset=${encodeURIComponent(selectedMonthOffset)}`,
-      {},
-      effectiveViewAs
-    )
+    apiFetch(`/api/dashboard/monthly-pnl?month_offset=${encodeURIComponent(selectedMonthOffset)}`)
       .then((response) => response.json())
       .then((payload) => {
         if (!active) {
@@ -421,18 +374,14 @@ export default function DashboardPage() {
     return () => {
       active = false;
     };
-  }, [selectedMonthOffset, token, effectiveViewAs]);
+  }, [selectedMonthOffset, token]);
 
   useEffect(() => {
     if (!token) {
       return undefined;
     }
     let active = true;
-    apiFetch(
-      `/api/dashboard/closed-trades?date=${encodeURIComponent(selectedClosedDate)}`,
-      {},
-      effectiveViewAs
-    )
+    apiFetch(`/api/dashboard/closed-trades?date=${encodeURIComponent(selectedClosedDate)}`)
       .then((response) => response.json())
       .then((payload) => {
         if (!active) {
@@ -447,18 +396,14 @@ export default function DashboardPage() {
     return () => {
       active = false;
     };
-  }, [selectedClosedDate, token, effectiveViewAs]);
+  }, [selectedClosedDate, token]);
 
   useEffect(() => {
     if (!token) {
       return undefined;
     }
     let active = true;
-    apiFetch(
-      `/api/dashboard/symbol-performance?days=${encodeURIComponent(perfDays)}`,
-      {},
-      effectiveViewAs
-    )
+    apiFetch(`/api/dashboard/symbol-performance?days=${encodeURIComponent(perfDays)}`)
       .then((response) => response.json())
       .then((payload) => {
         if (!active) {
@@ -477,7 +422,7 @@ export default function DashboardPage() {
     return () => {
       active = false;
     };
-  }, [perfDays, token, effectiveViewAs]);
+  }, [perfDays, token]);
 
   const todayRealized = useMemo(
     () => Number(weeklyPnl.find((point) => point.date === todayDateText)?.pnl || 0),
@@ -505,25 +450,6 @@ export default function DashboardPage() {
             </div>
           </div>
           <div className="header-actions">
-            {role === "admin" ? (
-              <label className="admin-view-label">
-                View as
-                <select
-                  className="admin-view-select"
-                  value={viewAs}
-                  onChange={(e) => setViewAs(e.target.value)}
-                >
-                  <option value="">My account ({username})</option>
-                  {userOptions
-                    .filter((u) => u.username !== username)
-                    .map((u) => (
-                      <option key={u.username} value={u.username}>
-                        {u.username}
-                      </option>
-                    ))}
-                </select>
-              </label>
-            ) : null}
             <span className="user-chip">
               {username}
               {dataUserLabel && dataUserLabel !== username ? (
@@ -540,13 +466,6 @@ export default function DashboardPage() {
           </div>
         </div>
       </header>
-
-      {role === "admin" && !effectiveViewAs ? (
-        <div className="container admin-data-hint">
-          You are viewing <strong>{username}</strong> data (often empty). Use <strong>View as</strong> to select{' '}
-          <strong>user-1</strong> (or another account) where the bot writes <code>orders.log</code>.
-        </div>
-      ) : null}
 
       <main className="container">
         <div className="layout">
@@ -588,7 +507,7 @@ export default function DashboardPage() {
           />
         </div>
 
-        <TradingScriptsCard forUser={effectiveViewAs} />
+        <TradingScriptsCard />
 
         <UpstoxSettingsCard />
 

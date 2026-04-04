@@ -6,7 +6,7 @@ Does not read orders.log or any other local trade logs.
 Run from repo root:
   python scripts/fetch_ob_snapshot.py
   python scripts/fetch_ob_snapshot.py --json
-  python scripts/fetch_ob_snapshot.py --user user-1 --scripts CRUDE NIFTY
+  python scripts/fetch_ob_snapshot.py --user AK07 --scripts CRUDE NIFTY
 """
 
 from __future__ import annotations
@@ -33,7 +33,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--user",
-        default="user-1",
+        default="AK07",
         help="Dashboard user whose server/data/users/<user>/upstox_credentials.json to use",
     )
     args = parser.parse_args()

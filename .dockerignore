@@ -1,0 +1,15 @@
+.git
+.github
+.venv
+venv
+env
+**/__pycache__
+*.py[cod]
+*.log
+client/node_modules
+client/dist
+archive
+.tools
+.secrets
+*.md
+!README.md

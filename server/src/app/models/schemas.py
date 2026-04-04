@@ -31,15 +31,12 @@ class UpstoxSettingsBody(BaseModel):
     api_key: str = ""
     api_secret: str = ""
     base_url: str = ""
-    # Admin only: save credentials for another dashboard user
-    for_user: str | None = None
 
 
 class TradingScriptsBody(BaseModel):
     """enabled_scripts=null means trade all configured symbols; otherwise a non-empty subset."""
 
     enabled_scripts: list[str] | None = None
-    for_user: str | None = None
 
 
 class LoginBody(BaseModel):

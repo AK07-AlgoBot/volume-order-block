@@ -1,4 +1,4 @@
-"""FastAPI dependencies: auth, effective data tenant, bot headers."""
+"""FastAPI dependencies: auth and bot headers."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from fastapi import HTTPException, Request
 
 from app.config.settings import get_settings, repo_root
+from app.constants import DASHBOARD_USERNAME
 from app.services.trade_context import TradeUserContext, get_trade_context, _safe_username
 from app.utils.security import decode_token
 
@@ -26,7 +27,7 @@ def _claims_from_authorization(request: Request) -> UserClaims | None:
     if not payload:
         return None
     sub = str(payload.get("sub") or "").strip()
-    if not sub:
+    if sub != DASHBOARD_USERNAME:
         return None
     return UserClaims(username=sub, role=str(payload.get("role", "user")))
 
@@ -41,43 +42,29 @@ async def require_user(request: Request) -> UserClaims:
     return c
 
 
-async def require_admin_dep(request: Request) -> UserClaims:
-    c = await require_user(request)
-    if c.role != "admin":
-        raise HTTPException(status_code=403, detail="Admin role required.")
-    return c
-
-
-def effective_data_username(claims: UserClaims, view_as: str | None) -> str:
-    if claims.role == "admin" and view_as and view_as.strip():
-        return _safe_username(view_as.strip())
-    if view_as and view_as.strip() and claims.role != "admin":
-        raise HTTPException(status_code=403, detail="Only admin may use view_as.")
-    return claims.username
-
-
-def trade_context_for(
-    claims: UserClaims,
-    view_as: str | None,
-) -> TradeUserContext:
-    user = effective_data_username(claims, view_as)
-    return get_trade_context(repo_root(), user)
+def trade_context_for(claims: UserClaims) -> TradeUserContext:
+    return get_trade_context(repo_root(), claims.username)
 
 
 def verify_bot_trading_user(request: Request) -> str:
-    """Identify target user for trading-bot HTTP posts."""
+    """Identify target user for trading-bot HTTP posts (always AK07)."""
     s = get_settings()
     token = (request.headers.get("X-Bot-Token") or "").strip()
-    user = _safe_username((request.headers.get("X-Trading-User") or "user-1").strip())
+    header_user = (request.headers.get("X-Trading-User") or "").strip()
+    if header_user and _safe_username(header_user) != DASHBOARD_USERNAME:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Only {DASHBOARD_USERNAME} is supported as X-Trading-User.",
+        )
 
     if s.bot_api_token:
         if token != s.bot_api_token:
             raise HTTPException(status_code=401, detail="Invalid or missing X-Bot-Token.")
-        return user
+        return DASHBOARD_USERNAME
 
     client_host = request.client.host if request.client else ""
     if client_host in ("127.0.0.1", "localhost", "::1", "0.0.0.0"):
-        return user
+        return DASHBOARD_USERNAME
     raise HTTPException(
         status_code=401,
         detail="Set BOT_API_TOKEN on the server and send it as X-Bot-Token from remote hosts.",
@@ -96,10 +83,10 @@ def claims_from_token_query(token: str | None) -> UserClaims:
     if not payload:
         raise HTTPException(status_code=401, detail="Invalid WebSocket token.")
     sub = str(payload.get("sub") or "").strip()
-    if not sub:
+    if sub != DASHBOARD_USERNAME:
         raise HTTPException(status_code=401, detail="Invalid token subject.")
     return UserClaims(username=sub, role=str(payload.get("role", "user")))
 
 
-def trade_context_for_ws(claims: UserClaims, view_as: str | None) -> TradeUserContext:
-    return trade_context_for(claims, view_as)
+def trade_context_for_ws(claims: UserClaims) -> TradeUserContext:
+    return trade_context_for(claims)

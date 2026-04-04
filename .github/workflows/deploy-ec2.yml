@@ -1,0 +1,46 @@
+# Build is validated on GitHub; deploy SSHs into EC2 and rebuilds containers there.
+#
+# Required repository secrets:
+#   EC2_HOST          e.g. 204.168.232.148
+#   EC2_USER          e.g. ubuntu
+#   EC2_SSH_KEY       private key (full PEM, including BEGIN/END lines)
+#   DEPLOY_PATH       absolute path to this repo on the server, e.g. /home/ubuntu/volume-order-block
+#
+# On the EC2 instance (once):
+#   - Install Docker and docker compose plugin
+#   - Clone this repository to DEPLOY_PATH and checkout branch AK07
+#   - Create DEPLOY_PATH/.env from .env.example with production values (JWT_SECRET, AK07_PASSWORD, BOT_API_TOKEN, …)
+#   - Optionally install host nginx + TLS for https://ak07.in proxying to 127.0.0.1:8080 (see README)
+
+name: Deploy to EC2
+
+on:
+  push:
+    branches:
+      - AK07
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Deploy over SSH
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          script_stop: true
+          script: |
+            set -e
+            cd "${{ secrets.DEPLOY_PATH }}"
+            git fetch origin
+            git checkout AK07
+            git pull origin AK07
+            docker compose build --pull
+            docker compose up -d

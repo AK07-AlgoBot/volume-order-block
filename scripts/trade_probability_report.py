@@ -304,7 +304,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--user",
-        default="user-1",
+        default="AK07",
         help="Dashboard user (server/data/users/<user>/logs/orders.log)",
     )
     args = parser.parse_args()

@@ -7,6 +7,6 @@ React + Vite app under `client/`.
 1. `npm install`
 2. `npm run dev`
 
-The UI expects the API at `http://localhost:8000` (override with `VITE_DASHBOARD_API_BASE` in `.env` — see `.env.example`).
+The UI talks to the API using `VITE_DASHBOARD_API_BASE` if set; otherwise it uses the current browser origin (works with the Docker nginx bundle that proxies `/api` and `/ws`).
 
-Sign in at `/login`. Demo users: `admin`/`admin`, `user-1`/`user-1`, … `user-5`/`user-5`. Admins can use **View as** to load another user’s trade data.
+Sign in at `/login` with username **AK07** and the password configured on the server (`AK07_PASSWORD` on first seed — see root `README.md`).

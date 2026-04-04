@@ -1,6 +1,6 @@
-# Multi-Script Trading Bot v2.0
+# Multi-Script Trading Bot v2.0 (AK07)
 
-Automated trading bot for Indian markets using Upstox API v2 with an EMA crossover strategy, plus a FastAPI + React dashboard for auth, per-user broker credentials, and trade visibility.
+Automated trading bot for Indian markets using Upstox API v2 with an EMA crossover strategy, plus a FastAPI + React dashboard. This branch is **single-tenant**: dashboard login is **AK07** only; data and Upstox credentials live under `server/data/users/AK07/`.
 
 ## Features
 
@@ -8,13 +8,14 @@ Automated trading bot for Indian markets using Upstox API v2 with an EMA crossov
 - **EMA crossover strategy**: Short and long exponential moving averages  
 - **Multi-script support**: NIFTY, BANKNIFTY, SENSEX, FINNIFTY (configurable)  
 - **Risk management**: Portfolio stop loss and trailing stop per position  
-- **State persistence**: Trading state survives restarts (per user)  
-- **Dashboard**: JWT login, per-user Upstox credentials, live trade updates  
+- **State persistence**: Trading state survives restarts  
+- **Dashboard**: JWT login (AK07), Upstox credentials, live trade updates  
 
 ## Requirements
 
-- Python 3.8+
-- Node.js (for the `client/` dashboard)
+- Python 3.8+ (bot + local API)
+- Node.js 20+ (for the `client/` dashboard)
+- Docker + Compose (optional production stack)
 - Active Upstox Pro account and API access token
 
 ## Repository layout
@@ -23,36 +24,33 @@ Automated trading bot for Indian markets using Upstox API v2 with an EMA crossov
 |------|------|
 | `client/` | React + Vite UI (`npm install`, `npm run dev` / `npm run build`) |
 | `server/src/app/` | FastAPI app (`PYTHONPATH=server/src`, `uvicorn app.main:app`) |
-| `server/data/` | Runtime data (gitignored): `users_auth.json`, per-user dirs under `users/<username>/` |
-| `server/templates/upstox_credentials.example.json` | Example shape for `upstox_credentials.json` when creating a user file by hand |
-| `trading_bot.py` | Trading worker; posts to the API with `X-Trading-User` and optional `X-Bot-Token` |
+| `server/data/` | Runtime data (gitignored): `users_auth.json`, `users/AK07/` |
+| `deploy/docker/` | `Dockerfile.api`, `Dockerfile.ui`, nginx config for the UI container |
+| `trading_bot.py` | Trading worker for AK07; posts to the API with `X-Trading-User: AK07` and `X-Bot-Token` when required |
 
-### Root-level (outside `client/` and `server/`)
+### Root-level Python modules
 
-These stay at the repo root so `python trading_bot.py` and `PYTHONPATH=server/src` imports stay simple (shared modules are imported from the project root).
+Shared between the API and the bot (imports from repo root):
 
 | Path | Role |
 |------|------|
-| `trading_bot.py` | Bot entrypoint (multi-account loop). |
-| `upstox_credentials_store.py` | Paths + read/write for per-user `server/data/users/<user>/upstox_credentials.json` (used by bot and API). |
-| `bot_process_control.py` | Start/stop/recycle bot process; imported by the FastAPI app. |
-| `archive_day.py` | Moves a user’s logs/state into `archive/<timestamp>/` (uses `TRADING_USER` env). |
-| `scripts/` | Standalone tools (`fetch_ob_snapshot.py`, trade analysis). Run from repo root. |
-| `requirements.txt` | `pip install -r` for bot + scripts (API deps are `server/requirements.txt`). |
-| `docker-compose.yml` | Optional local stack: API container + nginx for `client/dist`. |
-| `start.bat`, `start.ps1` | Launch API, Vite client, and/or bot on Windows. |
-| `archive/` | Runtime daily archives produced by `archive_day.py` / shutdown (mostly **gitignored**; only `archive/unused/` is tracked). |
-| `README.md`, `QUICKSTART.md`, `DASHBOARD_SETUP.md`, `CHANGELOG.md`, `STRATEGY_LOGIC.md` | Documentation. |
+| `trading_bot.py` | Bot entrypoint (AK07 only). |
+| `upstox_credentials_store.py` | Paths + read/write for `server/data/users/AK07/upstox_credentials.json`. |
+| `bot_process_control.py` | Start/stop/recycle bot process; used by the API after credential save. |
+| `trading_preferences_store.py`, `trading_script_constants.py` | Symbol scope for the bot. |
+| `archive_day.py` | Archives logs/state (uses `TRADING_USER` env; use `AK07`). |
+| `scripts/` | Standalone tools. Run from repo root. |
+| `requirements.txt` | Bot + scripts; API also uses `server/requirements.txt`. |
+| `docker-compose.yml` | **api** + **web** (nginx + static build, proxies `/api/` and `/ws/` to the API). |
 
-**Noise you may see at repo root:** `trading_bot.log`, `orders.log`, `market_status.log`, `trading_state.json`, `trading_bot.lock`, or `upstox_credentials.json` are **legacy or leftover** if the bot was run with an old layout, or copy-paste errors. Active per-user data belongs under `server/data/users/<user>/`. Those patterns are in `.gitignore`; delete stray root copies if you do not need them.
+**Legacy files at repo root** (`trading_bot.log`, `orders.log`, root `upstox_credentials.json`, etc.) are ignored or safe to delete; live data belongs under `server/data/users/AK07/`.
 
-**Demo users** (bcrypt-hashed in `server/data/users_auth.json`): `admin` / `admin`, `user-1` / `user-1`, … `user-5` / `user-5`. Admins can use **View as** to inspect another user’s trades.
+## Authentication
 
-**Environment:** Copy `server/.env.example` to `server/.env` and set `JWT_SECRET`. For the bot calling the API from a non-localhost host, set `BOT_API_TOKEN` on the server and the same value in the bot’s environment.
+- Single dashboard user: **`AK07`**. Password is seeded from **`AK07_PASSWORD`** when `users_auth.json` is first created (see `server/src/app/services/users_store.py`). After that, rotate by updating the file on disk or removing it once to re-seed.
+- **JWT:** Set `JWT_SECRET` in `.env` (see `server/.env.example` for local uvicorn, or repo root `.env.example` for Docker).
 
-**Logs:** Order and bot logs live under `server/data/users/<username>/logs/` (e.g. `orders.log`, `trading_bot.log`). Audit JSON lines rotate under `server/data/logs/audit/<actor>/actions.log`.
-
-## Installation
+## Installation (local dev)
 
 ```bash
 pip install -r requirements.txt
@@ -60,16 +58,37 @@ pip install -r server/requirements.txt
 
 cd client && npm install && npm run dev
 
-# From repo root — multi-account bot (see “Running the bot”)
+# Terminal: API (from repo root)
+set PYTHONPATH=server\src
+uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
+
+# Terminal: bot
 python trading_bot.py
 ```
 
+On Windows, `start.bat` / `start.ps1` can still launch pieces; ensure `TRADING_USER`/env matches AK07 where used.
+
 ## Running the bot
 
-- **Which accounts:** Set `TRADING_USERS=admin,user-1,user-2` (comma-separated). If unset, usernames are taken from `users_auth.json` (all known users). Users without a saved Upstox token in `server/data/users/<user>/upstox_credentials.json` are skipped.
-- **API posts:** The bot sends `X-Trading-User` (per account) and `X-Bot-Token` when `BOT_API_TOKEN` is set. From localhost, the API may accept bot posts without the token for local development (see server security settings).
+- The bot runs **only for AK07** and reads `server/data/users/AK07/upstox_credentials.json`.
+- **API posts:** Send `X-Trading-User: AK07` and `X-Bot-Token` matching `BOT_API_TOKEN` when not calling from loopback (required in production / Docker).
 
-**Windows:** `start.bat` or `.\start.ps1` starts the API, UI, and bot; `start.bat -BotOnly` runs only the bot.
+## Docker (production-style)
+
+1. Copy **`.env.example`** to **`.env`** at the repo root and set `JWT_SECRET`, `AK07_PASSWORD`, `BOT_API_TOKEN`, and `DASHBOARD_CORS_ORIGINS` as needed.
+2. `docker compose up -d --build`  
+   - **api** on the internal network (port 8000 not published by default).  
+   - **web** on **host `8080`** → nginx serves the SPA and proxies API/WebSocket to `api`.
+
+For **https://ak07.in** (server example **204.168.232.148**), terminate TLS on the **host** with nginx (or another edge) and `proxy_pass` to `127.0.0.1:8080`. See `deploy/host-nginx-ak07.conf.example`.
+
+The UI build uses **same-origin** API URLs by default (empty `VITE_DASHBOARD_API_BASE`), so the browser talks to `/api/...` and `/ws/...` through the web container.
+
+## GitHub Actions → EC2
+
+Workflow: **`.github/workflows/deploy-ec2.yml`** (on push to **`AK07`**).
+
+Configure repository **secrets**: `EC2_HOST`, `EC2_USER`, `EC2_SSH_KEY`, `DEPLOY_PATH`. On the instance, install Docker, clone this repo to `DEPLOY_PATH`, create `.env`, then pushes will run `git pull` and `docker compose up -d`.
 
 ## Configuration
 
@@ -80,50 +99,25 @@ Edit `TRADING_CONFIG` in `trading_bot.py` (scripts, interval, EMAs, stops, loop 
 - **Entry:** EMA(short) crosses above (BUY) or below (SELL) EMA(long) as configured  
 - **Exit:** Opposite crossover, trailing stop, or portfolio stop  
 
-## Files generated (per user)
+## Files under `server/data/users/AK07/`
 
-Under `server/data/users/<username>/`:
+- `logs/trading_bot.log`, `logs/orders.log`, `logs/market_status.log`  
+- `trading_state.json`  
+- `trading_preferences.json` — symbol subset; configured in the dashboard  
+- `upstox_credentials.json` — Upstox tokens (via dashboard)  
 
-- `logs/trading_bot.log` — operational log (errors, signals, EOD, VERIFY lines). Also echoed to **stdout** with a `[username]` prefix when multiple accounts run in one process (files stay separate; only the console is shared).
-- `logs/orders.log` — **only** structured trade lines (`ACTION=ENTRY|EXIT|SKIP|…`) for the dashboard and scripts; not a copy of `trading_bot.log`.
-- `logs/market_status.log` — optional per-loop EMA/signal snapshot per script (similar information appears in the colored console table). Set `TRADING_BOT_WRITE_MARKET_STATUS_LOG=0` to disable this file.
-- `trading_state.json` — open positions / persisted state  
-- `trading_preferences.json` — optional subset of symbols to trade today (`enabled_scripts`); `null` means all instruments from `TRADING_CONFIG`. Set in the dashboard **Symbols to trade** card; the bot reloads it every loop.
-
-A stray `orders.log` at the **repo root** is legacy; the bot only writes under `server/data/users/<user>/logs/`.
-
-## API credentials
-
-Upstox tokens are **per dashboard user**, stored at:
-
-`server/data/users/<username>/upstox_credentials.json` (gitignored).
-
-Users save credentials in the UI; admins can save on behalf of another user. To seed a file without the UI, copy `server/templates/upstox_credentials.example.json` to that path and edit.
-
-**Optional:** `DASHBOARD_ADMIN_TOKEN` for legacy admin flows; `DASHBOARD_CORS_ORIGINS` if the UI is not on `localhost:5173`.
-
-**Bot recycle on save:** After saving Upstox credentials, the API can restart `trading_bot.py` using `trading_bot.lock`. Set `DASHBOARD_RESTART_BOT_ON_SAVE=0` to disable. For systemd, set `DASHBOARD_SYSTEMD_UNIT=your-bot.service`. Override Python with `TRADING_BOT_PYTHON` if needed.
+Audit JSON lines: `server/data/logs/audit/<actor>/actions.log`.
 
 ## Helper scripts
 
-OB% snapshot (uses the same candle logic as the bot; credentials for `--user`):
-
 ```bash
-python scripts/fetch_ob_snapshot.py
-python scripts/fetch_ob_snapshot.py --json
-python scripts/fetch_ob_snapshot.py --user user-1 --scripts CRUDE NIFTY --json
-```
-
-Analysis scripts accept `--user` (default `user-1`) for log paths under `server/data/users/<user>/`:
-
-```bash
-python scripts/analyze_trade_patterns.py --user user-1
-python scripts/trade_probability_report.py --user user-1
+python scripts/fetch_ob_snapshot.py --user AK07 --scripts CRUDE NIFTY --json
+python scripts/analyze_trade_patterns.py --user AK07
 ```
 
 ## Production notes
 
-Live order placement in code is intentionally disabled / commented for safety. Only enable after thorough testing.
+Live order placement may be disabled for safety; enable only after thorough testing.
 
 ## License
 

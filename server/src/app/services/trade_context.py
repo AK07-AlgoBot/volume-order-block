@@ -13,6 +13,8 @@ from zoneinfo import ZoneInfo
 
 from fastapi import WebSocket
 
+from app.constants import DASHBOARD_USERNAME
+
 # Log timestamps and trading day boundaries use IST (matches typical Indian market usage).
 IST = ZoneInfo("Asia/Kolkata")
 
@@ -652,7 +654,7 @@ _contexts: dict[str, TradeUserContext] = {}
 def _safe_username(username: str) -> str:
     u = (username or "").strip()
     if not u or any(c in u for c in "/\\:\0"):
-        return "user-1"
+        return DASHBOARD_USERNAME
     return u
 
 

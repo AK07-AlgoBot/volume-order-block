@@ -2,9 +2,11 @@ import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { getApiBase, setStoredAuth } from "../api/client";
 
+const ALLOWED_USER = "AK07";
+
 export default function LoginPage() {
   const navigate = useNavigate();
-  const [username, setUsername] = useState("");
+  const [username, setUsername] = useState(ALLOWED_USER);
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
@@ -12,12 +14,16 @@ export default function LoginPage() {
   const onSubmit = (e) => {
     e.preventDefault();
     setError("");
+    if ((username || "").trim() !== ALLOWED_USER) {
+      setError("Only the AK07 account can sign in.");
+      return;
+    }
     setLoading(true);
     const base = getApiBase();
     fetch(`${base}/api/auth/login`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ username, password }),
+      body: JSON.stringify({ username: ALLOWED_USER, password }),
     })
       .then(async (r) => {
         const body = await r.json().catch(() => ({}));
@@ -47,8 +53,8 @@ export default function LoginPage() {
         <div className="logo-box login-logo">AK07</div>
         <h1 className="login-title">Sign in</h1>
         <p className="login-hint">
-          Demo: <code>AK07</code>/<code>admin</code> or <code>user-1</code>/<code>user-1</code> …{" "}
-          <code>user-5</code>/<code>user-5</code>
+          Use username <code>AK07</code> and the password configured on the server (
+          <code>AK07_PASSWORD</code> when the account is first created).
         </p>
         <form onSubmit={onSubmit} className="login-form">
           <label className="login-label">

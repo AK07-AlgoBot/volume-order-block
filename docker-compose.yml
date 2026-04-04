@@ -1,26 +1,46 @@
-# Optional local stack: API + static client (build client first: cd client && npm run build)
+# Two services: FastAPI (api) + static UI with nginx reverse proxy to the API.
+# TLS for https://ak07.in is expected on the host (e.g. certbot nginx) forwarding to web:80 or 127.0.0.1:8080.
+#
+# Copy .env.example to .env in the repo root and set secrets before first up.
+# Persist trading/auth data:
+#   docker compose up -d
+#
 services:
   api:
-    image: python:3.12-slim
-    working_dir: /app
-    volumes:
-      - .:/app
-    ports:
-      - "8000:8000"
+    build:
+      context: .
+      dockerfile: deploy/docker/Dockerfile.api
+    restart: unless-stopped
+    env_file:
+      - .env
     environment:
       PYTHONPATH: /app/server/src
-      JWT_SECRET: ${JWT_SECRET:-change-me-in-production}
-      BOT_API_TOKEN: ${BOT_API_TOKEN:-}
-      DASHBOARD_CORS_ORIGINS: http://localhost:8080,http://127.0.0.1:8080
-    command: >
-      sh -c "pip install -q -r server/requirements.txt &&
-      uvicorn app.main:app --host 0.0.0.0 --port 8000"
+      # Bot recycling from inside the API container is usually disabled; run trading_bot on the host or a separate service.
+      DASHBOARD_RESTART_BOT_ON_SAVE: ${DASHBOARD_RESTART_BOT_ON_SAVE:-0}
+    volumes:
+      - ak07_server_data:/app/server/data
+    expose:
+      - "8000"
+    networks:
+      - ak07
 
-  client:
-    image: nginx:alpine
+  web:
+    build:
+      context: .
+      dockerfile: deploy/docker/Dockerfile.ui
+      args:
+        VITE_DASHBOARD_API_BASE: ""
+    restart: unless-stopped
     ports:
       - "8080:80"
-    volumes:
-      - ./client/dist:/usr/share/nginx/html:ro
     depends_on:
       - api
+    networks:
+      - ak07
+
+networks:
+  ak07:
+    driver: bridge
+
+volumes:
+  ak07_server_data:

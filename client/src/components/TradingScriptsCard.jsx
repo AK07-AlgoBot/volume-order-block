@@ -1,19 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
-import { apiFetch, getStoredAuth } from "../api/client";
+import { apiFetch } from "../api/client";
 
-function tradingScriptsUrl(forUser) {
-  const base = "/api/settings/trading-scripts";
-  if (forUser) {
-    return `${base}?for_user=${encodeURIComponent(forUser)}`;
-  }
-  return base;
-}
-
-/**
- * @param {{ forUser?: string }} props — Admin "View as" target; when set, scope applies to that user.
- */
-export function TradingScriptsCard({ forUser }) {
-  const { role } = getStoredAuth();
+export function TradingScriptsCard() {
   const [available, setAvailable] = useState([]);
   const [tradeAll, setTradeAll] = useState(true);
   const [selected, setSelected] = useState(() => new Set());
@@ -25,7 +13,7 @@ export function TradingScriptsCard({ forUser }) {
   const load = useCallback(() => {
     setLoading(true);
     setStatus("");
-    apiFetch(tradingScriptsUrl(forUser || undefined))
+    apiFetch("/api/settings/trading-scripts")
       .then((r) => {
         if (!r.ok) {
           throw new Error(`HTTP ${r.status}`);
@@ -49,7 +37,7 @@ export function TradingScriptsCard({ forUser }) {
         setStatus("Could not load trading scope.");
       })
       .finally(() => setLoading(false));
-  }, [forUser]);
+  }, []);
 
   useEffect(() => {
     load();
@@ -77,9 +65,6 @@ export function TradingScriptsCard({ forUser }) {
       const payload = {
         enabled_scripts: tradeAll ? null : Array.from(selected),
       };
-      if (role === "admin" && forUser) {
-        payload.for_user = forUser;
-      }
       if (!tradeAll && selected.size === 0) {
         setStatus("Pick at least one symbol, or use “Trade all symbols”.");
         setSaving(false);
@@ -98,7 +83,7 @@ export function TradingScriptsCard({ forUser }) {
       }
       setStatus("Saved. Bot reads this each loop — no restart needed.");
       setScopeLabel(tradeAll ? "All symbols" : "Custom subset");
-    } catch (e) {
+    } catch {
       setStatus("Save failed.");
     } finally {
       setSaving(false);
@@ -111,7 +96,7 @@ export function TradingScriptsCard({ forUser }) {
         <h2 className="section-title">Symbols to trade (today)</h2>
         <p>
           The bot only requests market data and opens new trades for the symbols you enable. Open
-          positions on other symbols are still managed until closed. Applies per dashboard user.
+          positions on other symbols are still managed until closed.
         </p>
         {scopeLabel ? (
           <p className="subtle">

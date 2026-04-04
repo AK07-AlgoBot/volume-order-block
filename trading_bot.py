@@ -23,7 +23,6 @@ from colorama import Fore, Style, init
 from upstox_credentials_store import (
     DEFAULT_BASE_URL,
     credentials_file_for_user,
-    list_usernames_from_auth_store,
     load_upstox_credentials_for_user,
     mask_tail,
     sanitize_username,
@@ -44,7 +43,7 @@ TELEGRAM_GROUP_CHAT_ID = -5105991026
 
 
 def telegram_notifications_enabled_for_user(username: str) -> bool:
-    """Only the dashboard holder (admin role) account should send Telegram (avoid duplicate alerts per Upstox account)."""
+    """Telegram alerts for the single dashboard account."""
     return sanitize_username(username) == "AK07"
 
 
@@ -3222,73 +3221,6 @@ class TradingBot:
                 self._run_daily_archive()
 
 
-class MultiAccountBotRunner:
-    """One OS process: round-robin one loop tick per dashboard user with a valid token."""
-
-    def __init__(self, bots: list[TradingBot]):
-        self.bots = [b for b in bots if b is not None]
-        self._runner_stop = False
-
-    def run(self):
-        if not self.bots:
-            return
-        print(
-            f"{Fore.CYAN}Multi-account mode: {len(self.bots)} trader(s) — "
-            f"{', '.join(b.username for b in self.bots)}{Style.RESET_ALL}"
-        )
-        for b in self.bots:
-            b._bot_logger.info("=" * 80)
-            b._bot_logger.info("STARTUP (multi): account %s", b.username)
-            b._bot_logger.info("=" * 80)
-            b.load_state()
-
-        pending = [b for b in self.bots]
-        for b in pending:
-            b._wait_for_upstox()
-        pending = [b for b in self.bots if b.running]
-        if not pending:
-            print("No accounts connected to Upstox; exiting.")
-            return
-
-        interval = max(1, int(self.bots[0].config.get("loop_interval", 10)))
-
-        try:
-            while not self._runner_stop and any(b.running for b in self.bots):
-                try:
-                    shutdown_all = False
-                    for b in self.bots:
-                        if not b.running:
-                            continue
-                        code = b._run_one_cycle()
-                        if code == "shutdown_all":
-                            shutdown_all = True
-                            break
-                        if code == "stop_bot":
-                            continue
-                    if shutdown_all:
-                        for x in self.bots:
-                            x.running = False
-                            x.archive_requested = bool(
-                                x.config.get("auto_archive_on_shutdown", True)
-                            )
-                        break
-                    time.sleep(interval)
-                except KeyboardInterrupt:
-                    print("\nKeyboard interrupt — stopping all accounts.")
-                    self._runner_stop = True
-                    for b in self.bots:
-                        b.running = False
-                    break
-                except Exception as e:
-                    logger.error("Multi-account loop error: %s", e)
-                    time.sleep(interval)
-        finally:
-            for b in self.bots:
-                b.save_state()
-                b._bot_logger.info("STOPPED [%s]", b.username)
-                if b.archive_requested:
-                    b._run_daily_archive()
-
 # ============================================================================
 # MAIN ENTRY POINT
 # ============================================================================
@@ -3349,31 +3281,14 @@ def _acquire_single_instance_lock() -> bool:
     return False
 
 
-def _resolve_trading_usernames() -> list[str]:
-    """
-    Users to run in this process.
-    TRADING_USERS=admin,user-1,... overrides; otherwise all names from users_auth.json.
-    """
-    raw = (os.environ.get("TRADING_USERS") or "").strip()
-    if raw:
-        out = []
-        for part in raw.split(","):
-            u = sanitize_username(part.strip())
-            if u and u not in out:
-                out.append(u)
-        return out or ["user-1"]
-    names = list_usernames_from_auth_store()
-    return [sanitize_username(n) for n in names]
-
-
 def main():
-    """Main entry point — one process can trade all dashboard users with separate Upstox files."""
+    """Main entry point — single tenant (AK07)."""
     if not _acquire_single_instance_lock():
         return
 
     print(f"{Fore.CYAN}")
     print("=" * 80)
-    print("   MULTI-SCRIPT TRADING BOT v2.0 (multi-account)")
+    print("   MULTI-SCRIPT TRADING BOT v2.0 (AK07)")
     print("   EMA Crossover Strategy")
     print("   " + datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
     print("=" * 80)
@@ -3387,7 +3302,7 @@ def main():
     except Exception:
         pass
 
-    usernames = _resolve_trading_usernames()
+    usernames = ["AK07"]
     bots: list[TradingBot] = []
 
     for un in usernames:
@@ -3410,8 +3325,8 @@ def main():
 
     if not bots:
         print(
-            f"{Fore.RED}No accounts with tokens. Open the dashboard, sign in as each user, "
-            f"and save Upstox credentials (per-user files under server/data/users/).{Style.RESET_ALL}"
+            f"{Fore.RED}No Upstox token. Sign in to the dashboard as AK07 and save credentials "
+            f"(server/data/users/AK07/).{Style.RESET_ALL}"
         )
         return
 
@@ -3421,14 +3336,9 @@ def main():
         else:
             print("Telegram test message sent successfully.")
     else:
-        print(
-            f"{Fore.YELLOW}Telegram test skipped (only the `admin` account sends Telegram).{Style.RESET_ALL}"
-        )
+        print(f"{Fore.YELLOW}Telegram test skipped.{Style.RESET_ALL}")
 
-    if len(bots) == 1:
-        bots[0].run()
-    else:
-        MultiAccountBotRunner(bots).run()
+    bots[0].run()
 
 
 if __name__ == "__main__":

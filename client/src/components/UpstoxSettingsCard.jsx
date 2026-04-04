@@ -16,29 +16,13 @@ function formatApiErrorDetail(detail) {
   return String(detail);
 }
 
-function settingsUrl(forUser) {
-  const base = "/api/settings/upstox";
-  if (forUser) {
-    return `${base}?for_user=${encodeURIComponent(forUser)}`;
-  }
-  return base;
-}
-
 export function UpstoxSettingsCard() {
-  const { role, username } = getStoredAuth();
-  const isAdmin = role === "admin";
-
-  /** Admin: whose Upstox file we are editing (empty = own account). */
-  const [credentialTarget, setCredentialTarget] = useState("");
-  const [userOptions, setUserOptions] = useState([]);
+  const { username } = getStoredAuth();
 
   const [baseUrl, setBaseUrl] = useState("");
   const [accessToken, setAccessToken] = useState("");
   const [apiKey, setApiKey] = useState("");
   const [apiSecret, setApiSecret] = useState("");
-  const [adminToken, setAdminToken] = useState(() =>
-    typeof window !== "undefined" ? window.localStorage.getItem("dashboardAdminToken") || "" : ""
-  );
   const [previews, setPreviews] = useState({
     access_token_preview: "",
     api_key_preview: "",
@@ -46,30 +30,16 @@ export function UpstoxSettingsCard() {
   });
   const [flags, setFlags] = useState({
     has_access_token: false,
-    admin_token_configured: false,
   });
-  const [credentialsFile, setCredentialsFile] = useState("");
   const [credentialsPath, setCredentialsPath] = useState("");
   const [credentialSubject, setCredentialSubject] = useState("");
   const [status, setStatus] = useState("");
   const [loading, setLoading] = useState(true);
   const [testing, setTesting] = useState(false);
 
-  useEffect(() => {
-    if (!isAdmin) {
-      return;
-    }
-    apiFetch("/api/auth/users")
-      .then((r) => r.json())
-      .then((rows) => setUserOptions(Array.isArray(rows) ? rows : []))
-      .catch(() => setUserOptions([]));
-  }, [isAdmin]);
-
-  const effectiveForUser = isAdmin && credentialTarget ? credentialTarget : "";
-
   const loadSettings = useCallback(() => {
     setLoading(true);
-    apiFetch(settingsUrl(effectiveForUser))
+    apiFetch("/api/settings/upstox")
       .then((r) => r.json())
       .then((data) => {
         setBaseUrl(data.base_url || "");
@@ -80,49 +50,33 @@ export function UpstoxSettingsCard() {
         });
         setFlags({
           has_access_token: Boolean(data.has_access_token),
-          admin_token_configured: Boolean(data.admin_token_configured),
         });
-        setCredentialsFile(data.credentials_file || "");
         setCredentialsPath(data.credentials_path || "");
         setCredentialSubject(data.credential_subject || username || "");
         setStatus("");
       })
       .catch((e) => {
         console.error(e);
-        setStatus("Could not load settings (is the API running on port 8000?)");
+        setStatus("Could not load settings (is the API running?)");
       })
       .finally(() => setLoading(false));
-  }, [effectiveForUser, username]);
+  }, [username]);
 
   useEffect(() => {
     loadSettings();
   }, [loadSettings]);
 
-  const persistAdminToken = (value) => {
-    setAdminToken(value);
-    if (typeof window !== "undefined") {
-      window.localStorage.setItem("dashboardAdminToken", value);
-    }
-  };
-
   const save = () => {
     setStatus("Saving…");
-    const headers = { "Content-Type": "application/json" };
-    if (adminToken.trim()) {
-      headers["X-Dashboard-Admin-Token"] = adminToken.trim();
-    }
     const body = {
       access_token: accessToken,
       api_key: apiKey,
       api_secret: apiSecret,
       base_url: baseUrl,
     };
-    if (isAdmin && credentialTarget) {
-      body.for_user = credentialTarget;
-    }
     apiFetch("/api/settings/upstox", {
       method: "POST",
-      headers,
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     })
       .then(async (r) => {
@@ -162,10 +116,7 @@ export function UpstoxSettingsCard() {
   const testConnection = () => {
     setTesting(true);
     setStatus("Testing saved Upstox token…");
-    const path = effectiveForUser
-      ? `/api/settings/upstox/test?for_user=${encodeURIComponent(effectiveForUser)}`
-      : "/api/settings/upstox/test";
-    apiFetch(path, { method: "POST" })
+    apiFetch("/api/settings/upstox/test", { method: "POST" })
       .then(async (r) => {
         const body = await r.json().catch(() => ({}));
         if (!r.ok) {
@@ -194,10 +145,9 @@ export function UpstoxSettingsCard() {
     <section className="card upstox-settings">
       <h2>Upstox credentials</h2>
       <p className="upstox-settings-help">
-        Each dashboard user has a separate file on the server:{" "}
-        <code className="inline-code">server/data/users/&lt;user&gt;/upstox_credentials.json</code>.
-        Sign in as that user (or as admin and pick an account below) to paste tokens. The trading bot loads
-        every user who has a saved access token and trades in one process.
+        Credentials are stored on the server at{" "}
+        <code className="inline-code">server/data/users/AK07/upstox_credentials.json</code>. The trading bot
+        uses this file for the AK07 account.
         {credentialsPath ? (
           <>
             {" "}
@@ -205,41 +155,9 @@ export function UpstoxSettingsCard() {
           </>
         ) : null}
       </p>
-      {isAdmin ? (
-        <label className="upstox-field">
-          <span>Save / edit credentials for</span>
-          <select
-            className="admin-view-select"
-            value={credentialTarget}
-            onChange={(e) => setCredentialTarget(e.target.value)}
-            style={{ maxWidth: "100%" }}
-          >
-            <option value="">My admin account ({username})</option>
-            {userOptions.map((u) => (
-              <option key={u.username} value={u.username}>
-                {u.username} ({u.role})
-              </option>
-            ))}
-          </select>
-        </label>
-      ) : null}
-      {!isAdmin ? (
-        <p className="subtle">
-          Signed in as <strong>{username}</strong>. Only you (and admins) can change these credentials.
-        </p>
-      ) : null}
-      {flags.admin_token_configured ? (
-        <label className="upstox-field">
-          <span>Dashboard admin token (legacy)</span>
-          <input
-            type="password"
-            autoComplete="off"
-            placeholder="Matches DASHBOARD_ADMIN_TOKEN on server"
-            value={adminToken}
-            onChange={(e) => persistAdminToken(e.target.value)}
-          />
-        </label>
-      ) : null}
+      <p className="subtle">
+        Signed in as <strong>{username}</strong>.
+      </p>
       {loading ? (
         <p className="subtle">Loading…</p>
       ) : (

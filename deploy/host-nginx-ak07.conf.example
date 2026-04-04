@@ -1,0 +1,27 @@
+# Example host nginx site for TLS termination at https://ak07.in
+# pointing to docker compose `web` service on 127.0.0.1:8080.
+#
+# Install: copy to /etc/nginx/sites-available/ak07, symlink sites-enabled, certbot --nginx -d ak07.in
+
+server {
+    listen 80;
+    server_name ak07.in www.ak07.in;
+    return 301 https://ak07.in$request_uri;
+}
+
+server {
+    listen 443 ssl http2;
+    server_name ak07.in;
+
+    ssl_certificate     /etc/letsencrypt/live/ak07.in/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/ak07.in/privkey.pem;
+
+    location / {
+        proxy_pass http://127.0.0.1:8080;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}

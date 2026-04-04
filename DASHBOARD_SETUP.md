@@ -1,36 +1,13 @@
-# AK07 Dashboard Setup
+# Dashboard setup (AK07 branch)
 
-## 1) Start FastAPI backend
+Single-tenant stack: only **`AK07`** can sign in. See the root **`README.md`** for environment variables, Docker, and EC2 deployment.
 
-```powershell
-pip install -r server/requirements.txt
-$env:PYTHONPATH = "$PWD\server\src"
-python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
-```
+Local quick path:
 
-Copy `server/.env.example` to `server/.env` and set `JWT_SECRET` (and `BOT_API_TOKEN` if the bot runs off localhost).
+1. `pip install -r requirements.txt` and `pip install -r server/requirements.txt`
+2. Copy `server/.env.example` → `server/.env`, set `JWT_SECRET` and `AK07_PASSWORD`
+3. `cd client && npm install && npm run dev`
+4. From repo root: `set PYTHONPATH=server\src` then `uvicorn app.main:app --reload --host 127.0.0.1 --port 8000`
+5. Open the Vite URL (usually `http://localhost:5173`) and log in as **AK07**
 
-## 2) Start React dashboard
-
-From `client/`:
-
-```powershell
-npm install
-npm run dev
-```
-
-Open the URL shown by Vite (usually `http://localhost:5173`). Sign in (e.g. `admin` / `admin`).
-
-## 3) Bot integration
-
-The bot runs one **multi-account** process: set `TRADING_USERS=admin,user-1,...` or omit it to use all usernames from `users_auth.json`. Each loop posts with `X-Trading-User` for that account and `X-Bot-Token` when `BOT_API_TOKEN` is set.
-
-Endpoints:
-
-- `POST /api/trade/open` on entry
-- `POST /api/trade/close` on exit
-- `POST /api/trades/update-batch` for live MTM updates (batched each loop)
-
-Weekly P&L and closed trades are derived from `server/data/users/<user>/logs/orders.log` (and that user’s archived day folders under `archive/`).
-
-The UI uses JWT-authenticated `GET /api/dashboard/*` and `WS /ws/trades?token=...` (optional `view_as=` for admin).
+The bot posts trades with `X-Trading-User: AK07` and `X-Bot-Token` when `BOT_API_TOKEN` is set on the API.

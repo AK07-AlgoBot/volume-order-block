@@ -9,12 +9,11 @@ router = APIRouter(tags=["websocket"])
 async def ws_trades(
     websocket: WebSocket,
     token: str | None = Query(None),
-    view_as: str | None = Query(None),
 ):
     await websocket.accept()
     try:
         claims = claims_from_token_query(token)
-        ctx = trade_context_for_ws(claims, view_as)
+        ctx = trade_context_for_ws(claims)
     except HTTPException:
         await websocket.close(code=1008)
         return

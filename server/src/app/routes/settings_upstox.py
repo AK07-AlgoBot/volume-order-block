@@ -1,14 +1,12 @@
 import asyncio
-import os
 
 import requests
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException
 
 from app.dependencies import UserClaims, require_user
 from app.models.schemas import UpstoxSettingsBody
 from app.services.audit_log import log_action
-from app.services.users_store import get_user_record
 
 router = APIRouter(prefix="/api/settings", tags=["settings"])
 
@@ -24,29 +22,8 @@ def _ensure_repo_on_path() -> None:
         sys.path.insert(0, r)
 
 
-def _resolve_credential_subject(
-    actor: UserClaims,
-    for_user: str | None,
-) -> str:
-    target = (for_user or "").strip()
-    if not target:
-        return actor.username
-    if actor.role != "admin":
-        raise HTTPException(
-            status_code=403,
-            detail="Only admin may use for_user to view or save another account's credentials.",
-        )
-    rec = get_user_record(target)
-    if not rec:
-        raise HTTPException(status_code=404, detail=f"Unknown user: {target}")
-    return target
-
-
 @router.get("/upstox")
-async def get_upstox_settings(
-    user: UserClaims = Depends(require_user),
-    for_user: str | None = Query(None, description="Admin: read another user's credential previews"),
-):
+async def get_upstox_settings(user: UserClaims = Depends(require_user)):
     _ensure_repo_on_path()
     from upstox_credentials_store import (  # noqa: PLC0415
         credentials_file_for_user,
@@ -55,10 +32,8 @@ async def get_upstox_settings(
         sanitize_username,
     )
 
-    subject = _resolve_credential_subject(user, for_user)
-    safe = sanitize_username(subject)
+    safe = sanitize_username(user.username)
     data = read_credentials_file_for_user(safe)
-    admin_required = bool(os.environ.get("DASHBOARD_ADMIN_TOKEN", "").strip())
     cred_path = credentials_file_for_user(safe)
     return {
         "base_url": data["base_url"],
@@ -71,35 +46,18 @@ async def get_upstox_settings(
         "credentials_file": cred_path.name,
         "credentials_path": str(cred_path.resolve()),
         "credential_subject": safe,
-        "admin_token_configured": admin_required,
     }
 
 
-def _require_legacy_dashboard_admin_token(request: Request) -> None:
-    expected = os.environ.get("DASHBOARD_ADMIN_TOKEN", "").strip()
-    if not expected:
-        return
-    got = (request.headers.get("X-Dashboard-Admin-Token") or "").strip()
-    if got != expected:
-        raise HTTPException(
-            status_code=401,
-            detail="Set header X-Dashboard-Admin-Token to match DASHBOARD_ADMIN_TOKEN on the server.",
-        )
-
-
 @router.post("/upstox/test")
-async def test_upstox_settings(
-    actor: UserClaims = Depends(require_user),
-    for_user: str | None = Query(None, description="Admin: test another user's saved credentials"),
-):
+async def test_upstox_settings(actor: UserClaims = Depends(require_user)):
     _ensure_repo_on_path()
     from upstox_credentials_store import (  # noqa: PLC0415
         read_credentials_file_for_user,
         sanitize_username,
     )
 
-    subject = _resolve_credential_subject(actor, for_user)
-    safe = sanitize_username(subject)
+    safe = sanitize_username(actor.username)
     creds = read_credentials_file_for_user(safe)
     access_token = (creds.get("access_token") or "").strip()
     base_url = (creds.get("base_url") or "").strip()
@@ -167,11 +125,9 @@ async def test_upstox_settings(
 
 @router.post("/upstox")
 async def post_upstox_settings(
-    request: Request,
     body: UpstoxSettingsBody,
     actor: UserClaims = Depends(require_user),
 ):
-    _require_legacy_dashboard_admin_token(request)
     _ensure_repo_on_path()
     from bot_process_control import restart_trading_bot_after_credential_save  # noqa: PLC0415
     from upstox_credentials_store import (  # noqa: PLC0415
@@ -182,11 +138,7 @@ async def post_upstox_settings(
         sanitize_username,
     )
 
-    if body.for_user and body.for_user.strip() and actor.role != "admin":
-        raise HTTPException(status_code=403, detail="Only admin may set for_user.")
-    subject = _resolve_credential_subject(actor, body.for_user)
-    safe = sanitize_username(subject)
-
+    safe = sanitize_username(actor.username)
     current = read_credentials_file_for_user(safe)
     updated = False
     if body.access_token.strip():

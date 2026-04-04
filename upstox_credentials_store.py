@@ -26,7 +26,7 @@ def normalize_access_token(token: str) -> str:
 def sanitize_username(username: str) -> str:
     u = (username or "").strip()
     u = re.sub(r"[^a-zA-Z0-9._-]", "", u)
-    return u or "user-1"
+    return u or "AK07"
 
 
 def user_data_dir(username: str) -> Path:
@@ -123,19 +123,5 @@ def persist_credentials_for_user(username: str, data: dict[str, str]) -> dict[st
 
 
 def list_usernames_from_auth_store() -> list[str]:
-    """Usernames from server/data/users_auth.json (dashboard users)."""
-    path = REPO_ROOT / "server" / "data" / "users_auth.json"
-    if not path.exists():
-        return ["AK07", "user-1", "user-2", "user-3", "user-4", "user-5"]
-    try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return ["user-1"]
-    users = raw.get("users")
-    if not isinstance(users, list):
-        return ["user-1"]
-    names = []
-    for u in users:
-        if isinstance(u, dict) and u.get("username"):
-            names.append(str(u["username"]).strip())
-    return names or ["user-1"]
+    """Single-tenant dashboard: only AK07."""
+    return ["AK07"]
