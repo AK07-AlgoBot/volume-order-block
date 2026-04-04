@@ -3,6 +3,11 @@ function runtimeApiBase() {
   if (env) {
     return env.replace(/\/$/, "");
   }
+  // Vite dev serves the UI on :5173; the API runs on :8000. Same-origin only applies when
+  // nginx (or similar) proxies /api to the backend (e.g. Docker production build).
+  if (import.meta.env.DEV) {
+    return "http://127.0.0.1:8000";
+  }
   if (typeof window !== "undefined" && window.location?.origin) {
     return window.location.origin;
   }
