@@ -69,6 +69,19 @@ Push branch **`AK07`** runs `.github/workflows/deploy-ec2.yml`. Secrets: `EC2_HO
 
 `docker compose -f configs/docker-compose.yml up -d`
 
+## Deploy (Option B — SSH from your PC)
+
+**Do not commit private keys** (`.pem`, `id_rsa`, etc.) to git.
+
+1. On EC2 (once): install Docker + Compose + Git; clone this repo to e.g. `/home/ubuntu/volume-order-block`; checkout **`AK07`**; copy **`configs/.env.example`** to repo root **`.env`** and set secrets.
+2. From Windows (repo root), after pushing your latest commits to `origin`:
+
+```powershell
+.\configs\deploy-manual-ec2.ps1 -Ec2Host "YOUR_PUBLIC_IP_OR_DNS" -KeyPath "C:\Users\pavan\arun\id_rsa"
+```
+
+Adjust **`-Ec2User`** and **`-RemotePath`** if your server layout differs.
+
 ## More docs
 
 - `docs/QUICKSTART.md` — short checklist  
