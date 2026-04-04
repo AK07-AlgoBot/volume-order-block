@@ -54,13 +54,16 @@ def telegram_notifications_enabled_for_user(username: str) -> bool:
     return sanitize_username(username) == "AK07"
 
 
-# Dashboard API
+# Dashboard API (override base URL in Docker: DASHBOARD_API_BASE=http://api:8000)
 DASHBOARD_CONFIG = {
     "enabled": True,
     "base_url": "http://localhost:8000",
     "timeout_seconds": 2.0,
     "batch_size": 50,
 }
+_dash_api_base = os.environ.get("DASHBOARD_API_BASE", "").strip()
+if _dash_api_base:
+    DASHBOARD_CONFIG = {**DASHBOARD_CONFIG, "base_url": _dash_api_base.rstrip("/")}
 
 MCX_INSTRUMENTS_URL = "https://assets.upstox.com/market-quote/instruments/exchange/MCX.json.gz"
 NSE_INSTRUMENTS_URL = "https://assets.upstox.com/market-quote/instruments/exchange/NSE.json.gz"

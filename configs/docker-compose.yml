@@ -21,6 +21,24 @@ services:
     networks:
       - ak07
 
+  # Shares ak07_server_data with api so orders.log and credentials live in one place.
+  bot:
+    build:
+      context: ..
+      dockerfile: configs/docker/Dockerfile.api
+    restart: unless-stopped
+    command: ["python", "-u", "src/bot/trading_bot.py"]
+    env_file:
+      - ../.env
+    environment:
+      DASHBOARD_API_BASE: http://api:8000
+    volumes:
+      - ak07_server_data:/app/src/server/data
+    depends_on:
+      - api
+    networks:
+      - ak07
+
   web:
     build:
       context: ..
