@@ -31,4 +31,5 @@ icacls $KeyPath /inheritance:r /grant:r "$($env:USERNAME):(R)" 2>$null | Out-Nul
 $remote = "set -e; cd '$RemotePath'; git fetch origin; git checkout '$Branch'; git pull origin '$Branch'; docker compose -f configs/docker-compose.yml build --pull; docker compose -f configs/docker-compose.yml up -d; docker compose -f configs/docker-compose.yml ps"
 
 Write-Host "Connecting to ${Ec2User}@${Ec2Host} ..."
-ssh -i "$KeyPath" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new "${Ec2User}@${Ec2Host}" $remote
+# BatchMode=yes fails fast if the key needs a passphrase (run from an interactive terminal instead).
+ssh -i "$KeyPath" -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=accept-new "${Ec2User}@${Ec2Host}" $remote
