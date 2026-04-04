@@ -1,0 +1,21 @@
+FROM python:3.12-slim
+
+WORKDIR /app
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends gcc \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY src/server/requirements.txt src/server/requirements.txt
+COPY requirements.txt requirements.txt
+RUN pip install --no-cache-dir -r src/server/requirements.txt -r requirements.txt
+
+COPY src/server/ src/server/
+COPY src/bot/ src/bot/
+COPY src/lib/ src/lib/
+
+ENV PYTHONPATH=/app/src/server/src
+
+EXPOSE 8000
+
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

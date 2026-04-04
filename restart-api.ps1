@@ -3,7 +3,7 @@
 
 $ErrorActionPreference = "Continue"
 $repoRoot = $PSScriptRoot
-$serverSrc = Join-Path $repoRoot "server\src"
+$serverSrc = Join-Path $repoRoot "src\server\src"
 
 function Stop-ListenerOnPort {
     param([int]$Port)

@@ -1,0 +1,87 @@
+from datetime import datetime
+from pathlib import Path
+import os
+import re
+import shutil
+
+# repo/src/bot/archive_day.py -> repository root
+ROOT = Path(__file__).resolve().parents[2]
+# Whose active logs/state we archive (bot sets this per account on shutdown).
+_raw = os.environ.get("TRADING_USER", "AK07").strip() or "AK07"
+TRADING_USER = re.sub(r"[^a-zA-Z0-9._-]", "", _raw) or "AK07"
+USER_ROOT = ROOT / "src" / "server" / "data" / "users" / TRADING_USER
+LOGS_DIR = USER_ROOT / "logs"
+# Per-user snapshots: src/server/data/users/<user>/archive/<timestamp>/...
+ARCHIVE_ROOT = USER_ROOT / "archive"
+
+FILES_TO_ARCHIVE = [
+    LOGS_DIR / "trading_bot.log",
+    LOGS_DIR / "orders.log",
+    LOGS_DIR / "market_status.log",
+    ROOT / "bot_output.txt",
+    USER_ROOT / "trading_state.json",
+]
+
+DIRS_TO_ARCHIVE = [
+    "__pycache__",
+]
+
+
+def move_item(src: Path, dst_dir: Path):
+    dst = dst_dir / src.name
+    if dst.exists():
+        stamp = datetime.now().strftime("%H%M%S")
+        dst = dst_dir / f"{src.stem}_{stamp}{src.suffix}"
+
+    shutil.move(str(src), str(dst))
+    return dst
+
+
+def main():
+    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    run_archive_dir = ARCHIVE_ROOT / timestamp
+    logs_dir = run_archive_dir / "logs"
+    state_dir = run_archive_dir / "state"
+    cache_dir = run_archive_dir / "cache"
+
+    moved = []
+
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    state_dir.mkdir(parents=True, exist_ok=True)
+    cache_dir.mkdir(parents=True, exist_ok=True)
+
+    for src in FILES_TO_ARCHIVE:
+        if not src.exists():
+            continue
+
+        target_dir = state_dir if src.name == "trading_state.json" else logs_dir
+        dst = move_item(src, target_dir)
+        moved.append((src.name, dst))
+
+    for name in DIRS_TO_ARCHIVE:
+        src = ROOT / name
+        if not src.exists():
+            continue
+        dst = move_item(src, cache_dir)
+        moved.append((src.name, dst))
+
+    print("=" * 80)
+    print("DAY ARCHIVE SUMMARY")
+    print("=" * 80)
+    print(f"User: {TRADING_USER}")
+    print(f"Archive folder: {run_archive_dir}")
+
+    if moved:
+        print("Moved items:")
+        for original, destination in moved:
+            rel = destination.relative_to(ROOT)
+            print(f"- {original} -> {rel}")
+    else:
+        print("No matching runtime artifacts found to archive.")
+
+    print("\nWorkspace is clean for next run.")
+    print("=" * 80)
+
+
+if __name__ == "__main__":
+    main()

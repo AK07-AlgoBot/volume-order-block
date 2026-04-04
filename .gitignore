@@ -11,7 +11,7 @@ ENV/
 dist/
 build/
 
-# Trading Bot Files (per-user under server/data/users/)
+# Trading bot / runtime logs (anywhere)
 trading_state.json
 trading_bot.lock
 trading_bot.log
@@ -21,12 +21,17 @@ orders.log
 market_status.log
 *.log
 
-# Server runtime data (auth, per-user logs, audit)
-server/data/users/
-server/data/logs/
-server/data/users_auth.json
-server/.env
-client/.env
+# Server runtime data (under src/server/)
+src/server/data/users/
+src/server/data/logs/
+src/server/data/users_auth.json
+src/server/.env
+src/client/.env
+
+# Old paths (pre-restructure)
+server/data/
+client/node_modules/
+client/dist/
 
 # Old files
 old/
@@ -48,8 +53,8 @@ Thumbs.db
 
 # Local tooling/build
 .tools/
-client/node_modules/
-client/dist/
+src/client/node_modules/
+src/client/dist/
 
 # Sensitive
 config.json

@@ -1,0 +1,43 @@
+# Run from repository root:
+#   docker compose -f configs/docker-compose.yml up -d --build
+#
+# Copy configs/.env.example to the repo root as `.env` (compose loads ../.env from this file location).
+
+services:
+  api:
+    build:
+      context: ..
+      dockerfile: configs/docker/Dockerfile.api
+    restart: unless-stopped
+    env_file:
+      - ../.env
+    environment:
+      PYTHONPATH: /app/src/server/src
+      DASHBOARD_RESTART_BOT_ON_SAVE: ${DASHBOARD_RESTART_BOT_ON_SAVE:-0}
+    volumes:
+      - ak07_server_data:/app/src/server/data
+    expose:
+      - "8000"
+    networks:
+      - ak07
+
+  web:
+    build:
+      context: ..
+      dockerfile: configs/docker/Dockerfile.ui
+      args:
+        VITE_DASHBOARD_API_BASE: ""
+    restart: unless-stopped
+    ports:
+      - "8080:80"
+    depends_on:
+      - api
+    networks:
+      - ak07
+
+networks:
+  ak07:
+    driver: bridge
+
+volumes:
+  ak07_server_data:

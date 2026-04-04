@@ -1,13 +1,13 @@
 .git
-.github
 .venv
 venv
 env
 **/__pycache__
 *.py[cod]
 *.log
-client/node_modules
-client/dist
+src/client/node_modules
+src/client/dist
+src/server/data
 archive
 .tools
 .secrets

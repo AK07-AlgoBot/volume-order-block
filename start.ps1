@@ -65,7 +65,7 @@ if ($BotOnly) {
     else {
         Start-ManagedProcess -Name "Trading Bot" -WorkingDirectory $repoRoot -Command @"
 Set-Location '$repoRoot'
-python trading_bot.py
+python src\bot\trading_bot.py
 "@
     }
     Write-Host ""
@@ -73,7 +73,7 @@ python trading_bot.py
     exit 0
 }
 
-$uiPath = Join-Path $repoRoot "client"
+$uiPath = Join-Path $repoRoot "src\client"
 
 if (-not (Test-Path $uiPath)) {
     throw "client folder not found at $uiPath"
@@ -131,7 +131,7 @@ if (-not (Test-Path (Join-Path $uiPath "node_modules"))) {
 
 $apiUp = Test-HttpEndpoint -Url "http://127.0.0.1:8000/api/health"
 $uiUp = Test-HttpEndpoint -Url "http://127.0.0.1:5173"
-$serverSrc = Join-Path $repoRoot "server\src"
+$serverSrc = Join-Path $repoRoot "src\server\src"
 
 if ($apiUp -and -not $Force) {
     Write-Host "API already running on http://localhost:8000 (use -Force to start another)."
@@ -193,7 +193,7 @@ if ($botRunning -and -not $Force) {
 else {
     Start-ManagedProcess -Name "Trading Bot" -WorkingDirectory $repoRoot -Command @"
 Set-Location '$repoRoot'
-python trading_bot.py
+python src\bot\trading_bot.py
 "@
 }
 
