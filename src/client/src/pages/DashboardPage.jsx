@@ -67,7 +67,7 @@ export default function DashboardPage() {
   const [liveTrades, setLiveTrades] = useState([]);
   const [closedTrades, setClosedTrades] = useState([]);
   const [closedTradeDates, setClosedTradeDates] = useState([]);
-  const [selectedClosedDate, setSelectedClosedDate] = useState(todayDateText);
+  const [selectedClosedDate, setSelectedClosedDate] = useState("");
   const [weeklyPnl, setWeeklyPnl] = useState([]);
   const [weeklyTotal, setWeeklyTotal] = useState(0);
   const [weeklyFilterOptions, setWeeklyFilterOptions] = useState([]);
@@ -125,7 +125,7 @@ export default function DashboardPage() {
   }, [perfDays]);
 
   useEffect(() => {
-    if (!token) {
+    if (!token || !selectedClosedDate) {
       return undefined;
     }
     let active = true;
