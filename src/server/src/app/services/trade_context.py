@@ -32,6 +32,11 @@ LINE_PATTERN = re.compile(
     r"(?P<script>[^|]+) \| ACTION=(?P<action>ENTRY|EXIT) \| SIDE=(?P<side>BUY|SELL) "
     r"\| PRICE=(?P<price>\d+(?:\.\d+)?)"
 )
+PAPER_LINE_PATTERN = re.compile(
+    r"^(?P<ts>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3}) - "
+    r"(?P<script>[^|]+) \| ACTION=(?P<action>PAPER_ENTRY|PAPER_EXIT) \| SIDE=(?P<side>BUY|SELL) "
+    r"\| PRICE=(?P<price>\d+(?:\.\d+)?) \| REASON=(?P<reason>[^|]+) \| qty=(?P<qty>\d+(?:\.\d+)?)"
+)
 ORDER_ID_PATTERN = re.compile(r"order_id=(?P<order_id>\d+)")
 
 
@@ -42,6 +47,10 @@ class UserDataPaths:
     @property
     def orders_log(self) -> Path:
         return self.user_root / "logs" / "orders.log"
+
+    @property
+    def paper_orders_log(self) -> Path:
+        return self.user_root / "logs" / "paper_orders.log"
 
     @property
     def archive_root(self) -> Path:
@@ -185,6 +194,95 @@ class TradeUserContext:
             deduped.append(event)
 
         return deduped
+
+    def _parse_paper_order_events(self) -> list[tuple]:
+        path = self.paths.paper_orders_log
+        if not path.is_file():
+            return []
+        parsed_events = []
+        for raw in path.read_text(encoding="utf-8", errors="ignore").splitlines():
+            stripped = raw.strip()
+            match = PAPER_LINE_PATTERN.search(stripped)
+            if not match:
+                continue
+            action = "ENTRY" if match.group("action") == "PAPER_ENTRY" else "EXIT"
+            parsed_events.append(
+                (
+                    self._parse_ts(match.group("ts")),
+                    match.group("script").strip(),
+                    action,
+                    match.group("side"),
+                    float(match.group("price")),
+                    float(match.group("qty")),
+                )
+            )
+
+        parsed_events.sort(key=lambda event: event[0])
+
+        deduped = []
+        seen = set()
+        for event in parsed_events:
+            key = (
+                event[0].isoformat(timespec="milliseconds"),
+                event[1],
+                event[2],
+                event[3],
+                round(float(event[4]), 4),
+                round(float(event[5]), 4),
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(event)
+
+        return deduped
+
+    def _build_closed_trades_from_paper_log(self, limit: int = 300) -> list[dict]:
+        parsed_events = self._parse_paper_order_events()
+        if not parsed_events:
+            return []
+        entries = defaultdict(deque)
+        reconstructed: list[dict] = []
+        sequence = 0
+
+        for ts, script, action, side, price, qty in parsed_events:
+            if action == "ENTRY":
+                entries[script].append({"side": side, "price": price, "ts": ts, "qty": qty})
+                continue
+
+            if not entries[script]:
+                continue
+
+            entry = self._pop_matching_entry(entries[script], side)
+            if entry is None:
+                continue
+            lot = float(entry["qty"])
+            if entry["side"] == "BUY" and side == "SELL":
+                realized = (price - entry["price"]) * lot
+            elif entry["side"] == "SELL" and side == "BUY":
+                realized = (entry["price"] - price) * lot
+            else:
+                realized = 0.0
+
+            sequence += 1
+            reconstructed.append(
+                {
+                    "id": f"paper-{script}-{int(ts.timestamp() * 1000)}-{sequence}",
+                    "symbol": script,
+                    "side": entry["side"],
+                    "quantity": lot,
+                    "entry_price": float(entry["price"]),
+                    "exit_price": float(price),
+                    "last_price": float(price),
+                    "unrealized_pnl": 0.0,
+                    "realized_pnl": round(realized, 2),
+                    "opened_at": entry["ts"].isoformat(),
+                    "closed_at": ts.isoformat(),
+                }
+            )
+
+        reconstructed.reverse()
+        return reconstructed[:limit]
 
     @staticmethod
     def _pop_matching_entry(entry_queue: deque, exit_side: str) -> dict | None:
@@ -574,6 +672,35 @@ class TradeUserContext:
             "server_time": datetime.utcnow().isoformat(),
             "data_user": self.username,
             **self._trading_scripts_payload(),
+        }
+
+    def paper_closed_trades_response(self, date: str | None) -> dict:
+        if date and not re.match(r"^\d{4}-\d{2}-\d{2}$", date):
+            return {
+                "closed_trades": [],
+                "closed_trade_dates": [],
+                "selected_date": date,
+                "paper_total_realized": 0.0,
+            }
+        all_trades = self._build_closed_trades_from_paper_log(limit=2000)
+        available_dates = self._closed_trade_dates(all_trades)
+        total_realized = round(
+            sum(self._trade_realized_value(t) for t in all_trades),
+            2,
+        )
+        today_text = self._today_ist().isoformat()
+        effective_date = date
+        if not effective_date:
+            effective_date = (
+                today_text
+                if today_text in available_dates
+                else (available_dates[0] if available_dates else today_text)
+            )
+        return {
+            "closed_trades": self._filter_closed_trades_by_date(all_trades, effective_date),
+            "closed_trade_dates": available_dates,
+            "selected_date": effective_date,
+            "paper_total_realized": total_realized,
         }
 
     def closed_trades_response(self, date: str | None) -> dict:

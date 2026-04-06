@@ -10,6 +10,7 @@ import logging
 import json
 import sys
 import os
+import html
 import atexit
 import gzip
 from datetime import datetime, timedelta
@@ -36,6 +37,7 @@ from upstox_credentials_store import (
     user_data_dir,
 )
 from trading_preferences_store import read_trading_preferences
+from trading_script_constants import is_paper_script
 
 # Initialize colorama
 init(autoreset=True)
@@ -173,6 +175,80 @@ def send_trade_notification(trade: dict, chat_id: int | str = None) -> bool:
         return False
 
 
+def send_paper_trade_notification(trade: dict, is_entry: bool, chat_id: int | str = None) -> bool:
+    """
+    Paper trades: Telegram HTML with blockquote (amber cue via emoji; no true per-message background in Bot API).
+    """
+    chat_id = chat_id or TELEGRAM_GROUP_CHAT_ID
+    symbol = html.escape(str(trade.get("symbol") or ""))
+    action = html.escape(str(trade.get("action") or "").upper())
+    quantity = trade.get("quantity")
+    price_raw = trade.get("price")
+    price_txt = html.escape(f"{float(price_raw):.2f}" if price_raw is not None else "")
+    reason = html.escape(str(trade.get("reason") or "").upper())
+    stop_loss = trade.get("stop_loss")
+    target_price = trade.get("target_price")
+    realized_pnl = trade.get("realized_pnl")
+    win_percent = trade.get("win_percent")
+    chart_percent = trade.get("chart_percent")
+    chart_volume = trade.get("chart_volume")
+    entry_adx = trade.get("entry_adx")
+    entry_plus_di = trade.get("entry_plus_di")
+    entry_minus_di = trade.get("entry_minus_di")
+    note = trade.get("note")
+    timestamp = trade.get("timestamp")
+    acct = html.escape(str(trade.get("account") or "").strip())
+
+    if isinstance(timestamp, datetime):
+        ts_str = html.escape(timestamp.strftime("%Y-%m-%d %H:%M:%S"))
+    else:
+        ts_str = html.escape(str(timestamp))
+
+    label = "PAPER ENTRY" if is_entry else "PAPER EXIT"
+    header = f"🟨 <b>{html.escape(label)}</b>"
+
+    block_parts: list[str] = [
+        f"<b>Symbol</b>: <code>{symbol}</code>",
+        f"<b>Action</b>: <b>{action}</b>",
+        f"<b>Qty</b>: <code>{html.escape(str(quantity))}</code>",
+        f"<b>Price</b>: <code>{price_txt}</code>",
+    ]
+    if acct:
+        block_parts.insert(0, f"<b>Account</b>: <code>{acct}</code>")
+    if reason:
+        block_parts.append(f"<b>Reason</b>: <code>{reason}</code>")
+    if stop_loss is not None:
+        block_parts.append(f"<b>SL</b>: <code>{float(stop_loss):.2f}</code>")
+    if target_price is not None:
+        block_parts.append(f"<b>Target</b>: <code>{float(target_price):.2f}</code>")
+    if chart_percent is not None:
+        block_parts.append(f"<b>Chart %</b>: <code>{float(chart_percent):.2f}%</code>")
+    if chart_volume is not None:
+        block_parts.append(f"<b>Chart Vol</b>: <code>{float(chart_volume):.0f}</code>")
+    if win_percent is not None:
+        block_parts.append(f"<b>Win %</b>: <code>{float(win_percent):.1f}%</code>")
+    if realized_pnl is not None:
+        block_parts.append(f"<b>Trade P&amp;L</b>: <code>{float(realized_pnl):.2f}</code>")
+    if entry_adx is not None:
+        block_parts.append(f"<b>ADX</b>: <code>{float(entry_adx):.2f}</code>")
+    if entry_plus_di is not None:
+        block_parts.append(f"<b>+DI</b>: <code>{float(entry_plus_di):.2f}</code>")
+    if entry_minus_di is not None:
+        block_parts.append(f"<b>−DI</b>: <code>{float(entry_minus_di):.2f}</code>")
+    if note:
+        block_parts.append(f"<b>Note</b>: {html.escape(str(note))}")
+    block_parts.append(f"<b>Time</b>: <code>{ts_str}</code>")
+
+    message = f"{header}\n\n<blockquote>{chr(10).join(block_parts)}</blockquote>"
+    payload = {"chat_id": chat_id, "text": message, "parse_mode": "HTML"}
+    try:
+        resp = requests.post(TELEGRAM_API_URL, json=payload, timeout=10)
+        return resp.ok
+    except Exception as e:
+        logging.getLogger(__name__).error(f"Failed to send paper Telegram notification: {e}")
+        return False
+
+
 def send_telegram_test_message(message: str = "Hi from VOLUME-ORDER-BLOCK bot") -> bool:
     """
     Send a simple test message to the configured Telegram group.
@@ -287,6 +363,11 @@ TRADING_CONFIG = {
         "BHARTIARTL": "",
         "MARUTI": "",
         "SUNPHARMA": "",
+        "TITAN": "",
+        "ULTRACEMCO": "",
+        "NESTLEIND": "",
+        "POWERGRID": "",
+        "HCLTECH": "",
     },
     # Separate tokens for order placement (FUTURES/COMMODITIES)
     "order_tokens": {
@@ -311,6 +392,11 @@ TRADING_CONFIG = {
         "BHARTIARTL": "",
         "MARUTI": "",
         "SUNPHARMA": "",
+        "TITAN": "",
+        "ULTRACEMCO": "",
+        "NESTLEIND": "",
+        "POWERGRID": "",
+        "HCLTECH": "",
     },
     "lot_sizes": {
         "NIFTY": 65,
@@ -335,6 +421,11 @@ TRADING_CONFIG = {
         "BHARTIARTL": 0,
         "MARUTI": 0,
         "SUNPHARMA": 0,
+        "TITAN": 0,
+        "ULTRACEMCO": 0,
+        "NESTLEIND": 0,
+        "POWERGRID": 0,
+        "HCLTECH": 0,
     },
     "interval": "1minute",  # API fetch interval (Upstox accepts 1minute reliably)
     "signal_interval": "5minute",  # Strategy timeframe (EMA runs on 5-minute candles)
@@ -472,6 +563,7 @@ TRADING_CONFIG = {
             "RELIANCE", "HDFCBANK", "ICICIBANK", "SBIN", "TCS",
             "INFY", "AXISBANK", "KOTAKBANK", "LT", "ITC",
             "HINDUNILVR", "BAJFINANCE", "BHARTIARTL", "MARUTI", "SUNPHARMA",
+            "TITAN", "ULTRACEMCO", "NESTLEIND", "POWERGRID", "HCLTECH",
         ],
         "MCX": ["CRUDE", "GOLDMINI", "SILVERMINI"]
     },
@@ -708,6 +800,8 @@ class TradingBot:
     - orders.log — Structured ENTRY / EXIT / SKIP / ORDER_FAILED lines only; parsed by the dashboard
       for P&L and history. Kept separate and smaller on disk.
 
+    - paper_orders.log — PAPER_ENTRY / PAPER_EXIT for non-live symbols (no broker orders); dashboard paper P&L.
+
     - Set TRADING_BOT_WRITE_MARKET_STATUS_LOG=0 to skip writing market-status lines to the file
       (console-only for that stream).
     """
@@ -749,6 +843,14 @@ class TradingBot:
         oh.setFormatter(logging.Formatter("%(asctime)s - %(message)s"))
         self._order_logger.addHandler(oh)
 
+        self._paper_logger = logging.getLogger(f"paper_orders.{self.username}")
+        self._paper_logger.setLevel(logging.INFO)
+        self._paper_logger.propagate = False
+        self._paper_logger.handlers.clear()
+        ph = logging.FileHandler(logs_dir / "paper_orders.log", encoding="utf-8")
+        ph.setFormatter(logging.Formatter("%(asctime)s - %(message)s"))
+        self._paper_logger.addHandler(ph)
+
         self._market_status_logger = logging.getLogger(f"market_status.{self.username}")
         self._market_status_logger.setLevel(logging.INFO)
         self._market_status_logger.propagate = False
@@ -759,6 +861,8 @@ class TradingBot:
             self._market_status_logger.addHandler(logging.NullHandler())
 
         self.positions = {}
+        self.paper_positions = {}
+        self.paper_total_pnl = 0.0
         self.total_pnl = 0
         self.running = True
         self.analyzer = TechnicalAnalyzer()
@@ -794,9 +898,15 @@ class TradingBot:
                 with open(self.state_file, "r", encoding="utf-8") as f:
                     state = json.load(f)
                     self.positions = state.get("positions", {})
+                    self.paper_positions = state.get("paper_positions", {})
+                    self.paper_total_pnl = float(state.get("paper_total_pnl", 0.0))
                     self.total_pnl = state.get("total_pnl", 0)
                     self.eod_squareoff_done = state.get("eod_squareoff_done", {})
-                    self._bot_logger.info(f"STATE LOADED: {len(self.positions)} positions")
+                    for _sn, _pos in list(self.paper_positions.items()):
+                        self._ensure_position_fields(_pos, _sn)
+                    self._bot_logger.info(
+                        f"STATE LOADED: {len(self.positions)} live + {len(self.paper_positions)} paper positions"
+                    )
         except Exception as e:
             self._bot_logger.warning(f"WARNING: Could not load state: {e}")
 
@@ -806,6 +916,8 @@ class TradingBot:
             self.state_file.parent.mkdir(parents=True, exist_ok=True)
             state = {
                 "positions": self.positions,
+                "paper_positions": self.paper_positions,
+                "paper_total_pnl": self.paper_total_pnl,
                 "total_pnl": self.total_pnl,
                 "eod_squareoff_done": self.eod_squareoff_done,
                 "timestamp": datetime.now().isoformat(),
@@ -1056,6 +1168,11 @@ class TradingBot:
         )
 
     def _log_skip_event(self, script_name, side, price, reason, extra=""):
+        if is_paper_script(script_name):
+            self._bot_logger.info(
+                f"PAPER SKIP: {script_name} {side} @ Rs{price:.2f} | {reason} | {extra}"
+            )
+            return
         self._log_order_event(
             script_name=script_name,
             action="SKIP",
@@ -1072,6 +1189,65 @@ class TradingBot:
         self._order_logger.info(
             f"{script_name} | ACTION=ORDER_FAILED | SIDE={side} | PRICE={price:.2f} | REASON={reason} | {fail_extra}"
         )
+
+    def _log_paper_order_event(self, script_name, action, side, price, reason, extra=""):
+        qty = self._get_order_quantity(script_name)
+        self._paper_logger.info(
+            f"{script_name} | ACTION={action} | SIDE={side} | PRICE={price:.2f} | REASON={reason} | qty={qty}"
+            + (f" | {extra}" if extra else "")
+        )
+
+    def _paper_exit_after_signal(
+        self,
+        script_name,
+        position,
+        exit_side,
+        current_price,
+        reason,
+        extra_log="",
+    ):
+        qty = float(position.get("quantity", self._get_order_quantity(script_name)))
+        realized = self._calculate_realized_pnl(
+            position["type"],
+            float(position["entry_price"]),
+            float(current_price),
+            qty,
+        )
+        self.paper_total_pnl += realized
+        self._log_paper_order_event(
+            script_name,
+            "PAPER_EXIT",
+            exit_side,
+            current_price,
+            reason,
+            extra=(
+                f"entry={position['entry_price']:.2f}; realized_pnl={realized:.2f}; qty={qty}; {extra_log}".strip()
+            ),
+        )
+        if telegram_notifications_enabled_for_user(self.username):
+            if not send_paper_trade_notification(
+                {
+                    "account": self.username,
+                    "symbol": script_name,
+                    "action": exit_side,
+                    "quantity": qty,
+                    "price": current_price,
+                    "reason": reason,
+                    "realized_pnl": realized,
+                    "stop_loss": position.get("stop_loss"),
+                    "target_price": position.get("target_price"),
+                    "entry_adx": float(position.get("signal_adx", 0.0) or 0.0),
+                    "entry_plus_di": float(position.get("signal_plus_di", 0.0) or 0.0),
+                    "entry_minus_di": float(position.get("signal_minus_di", 0.0) or 0.0),
+                    "timestamp": self._now_ist(),
+                },
+                is_entry=False,
+            ):
+                self._bot_logger.error(
+                    f"Failed Telegram PAPER EXIT: {script_name} {exit_side} qty={qty} @ Rs{current_price:.2f}"
+                )
+        del self.paper_positions[script_name]
+        self.save_state()
 
     def _place_order_with_result(
         self,
@@ -1932,6 +2108,31 @@ class TradingBot:
             any_closed = False
 
             for script_name in scripts:
+                if script_name in self.paper_positions:
+                    position = self.paper_positions[script_name]
+                    self._ensure_position_fields(position, script_name)
+                    exit_side = "SELL" if position.get("type") == "BUY" else "BUY"
+                    market_price = latest_prices.get(script_name)
+                    price_source = "ltp"
+                    if market_price is None:
+                        market_price = position.get("entry_price", 0.0)
+                        price_source = "entry_fallback"
+                    self._paper_exit_after_signal(
+                        script_name,
+                        position,
+                        exit_side,
+                        float(market_price),
+                        "EOD_SQUAREOFF",
+                        extra_log=(
+                            f"cutoff={cutoff_dt.strftime('%H:%M')}; price_source={price_source}; "
+                            f"entry_adx={float(position.get('signal_adx', 0.0) or 0.0):.2f}; "
+                            f"plus_di={float(position.get('signal_plus_di', 0.0) or 0.0):.2f}; "
+                            f"minus_di={float(position.get('signal_minus_di', 0.0) or 0.0):.2f}"
+                        ),
+                    )
+                    any_closed = True
+                    continue
+
                 if script_name not in self.positions:
                     continue
 
@@ -1982,7 +2183,10 @@ class TradingBot:
                 del self.positions[script_name]
                 any_closed = True
 
-            remaining = [s for s in scripts if s in self.positions]
+            remaining = [
+                s for s in scripts
+                if s in self.positions or s in self.paper_positions
+            ]
             if not remaining:
                 self.eod_squareoff_done[segment] = today_text
                 self._bot_logger.info(f"EOD: {segment} square-off completed for {today_text}")
@@ -2565,11 +2769,21 @@ class TradingBot:
         
         print("="*110)
         print(f"{Fore.YELLOW}Total P&L: Rs{self.total_pnl:.2f}{Style.RESET_ALL}")
-        print(f"{Fore.YELLOW}Active Positions: {len(self.positions)}{Style.RESET_ALL}")
+        print(
+            f"{Fore.YELLOW}Live positions: {len(self.positions)} · "
+            f"Paper: {len(self.paper_positions)} · "
+            f"Paper P&L: Rs{self.paper_total_pnl:.2f}{Style.RESET_ALL}"
+        )
         if self.positions:
             for script, pos in self.positions.items():
                 sl = pos.get('stop_loss', pos.get('entry_price', 0))
                 print(f"   - {script}: {pos['type']} @ Rs{pos['entry_price']:.2f} | SL: Rs{sl:.2f}")
+        if self.paper_positions:
+            for script, pos in self.paper_positions.items():
+                sl = pos.get('stop_loss', pos.get('entry_price', 0))
+                print(
+                    f"   - {script} [PAPER]: {pos['type']} @ Rs{pos['entry_price']:.2f} | SL: Rs{sl:.2f}"
+                )
         print("="*110 + "\n")
     
     def execute_trading_logic(self, script_data, allow_new_entries=True, now_ist=None):
@@ -2592,9 +2806,17 @@ class TradingBot:
             confirmed_crossover = data.get('entry_crossover', crossover)
             confirmed_candle_timestamp = data.get('entry_candle_timestamp')
             
-            # Check if we have an open position
+            # Check if we have an open position (live broker or paper)
+            position = None
+            is_paper = False
             if script_name in self.positions:
                 position = self.positions[script_name]
+                is_paper = False
+            elif script_name in self.paper_positions:
+                position = self.paper_positions[script_name]
+                is_paper = True
+
+            if position is not None:
                 self._ensure_position_fields(position, script_name)
                 if position.get('chart_percent') is None:
                     chart_backfill = self._backfill_chart_percent(
@@ -2649,8 +2871,25 @@ class TradingBot:
                         self._notify_manual_close_needed(
                             script_name, position, "SELL", current_price, sl_reason
                         )
-                        del self.positions[script_name]
+                        if is_paper:
+                            del self.paper_positions[script_name]
+                        else:
+                            del self.positions[script_name]
                         self.save_state()
+                        continue
+                    if is_paper:
+                        self._paper_exit_after_signal(
+                            script_name,
+                            position,
+                            "SELL",
+                            current_price,
+                            sl_reason,
+                            extra_log=(
+                                f"sl={stop_loss:.2f}; entry_adx={float(position.get('signal_adx', 0.0) or 0.0):.2f}; "
+                                f"plus_di={float(position.get('signal_plus_di', 0.0) or 0.0):.2f}; "
+                                f"minus_di={float(position.get('signal_minus_di', 0.0) or 0.0):.2f}"
+                            ),
+                        )
                         continue
                     success, order_result = self._place_order_with_result(
                         script_name,
@@ -2701,8 +2940,25 @@ class TradingBot:
                         self._notify_manual_close_needed(
                             script_name, position, "BUY", current_price, sl_reason
                         )
-                        del self.positions[script_name]
+                        if is_paper:
+                            del self.paper_positions[script_name]
+                        else:
+                            del self.positions[script_name]
                         self.save_state()
+                        continue
+                    if is_paper:
+                        self._paper_exit_after_signal(
+                            script_name,
+                            position,
+                            "BUY",
+                            current_price,
+                            sl_reason,
+                            extra_log=(
+                                f"sl={stop_loss:.2f}; entry_adx={float(position.get('signal_adx', 0.0) or 0.0):.2f}; "
+                                f"plus_di={float(position.get('signal_plus_di', 0.0) or 0.0):.2f}; "
+                                f"minus_di={float(position.get('signal_minus_di', 0.0) or 0.0):.2f}"
+                            ),
+                        )
                         continue
                     success, order_result = self._place_order_with_result(
                         script_name,
@@ -2769,8 +3025,26 @@ class TradingBot:
                         self._notify_manual_close_needed(
                             script_name, position, exit_side, current_price, "TARGET_HIT"
                         )
-                        del self.positions[script_name]
+                        if is_paper:
+                            del self.paper_positions[script_name]
+                        else:
+                            del self.positions[script_name]
                         self.save_state()
+                        continue
+                    if is_paper:
+                        self._paper_exit_after_signal(
+                            script_name,
+                            position,
+                            exit_side,
+                            current_price,
+                            "TARGET_HIT",
+                            extra_log=(
+                                f"target={position.get('target_price', 0):.2f}; "
+                                f"entry_adx={float(position.get('signal_adx', 0.0) or 0.0):.2f}; "
+                                f"plus_di={float(position.get('signal_plus_di', 0.0) or 0.0):.2f}; "
+                                f"minus_di={float(position.get('signal_minus_di', 0.0) or 0.0):.2f}"
+                            ),
+                        )
                         continue
                     success, order_result = self._place_order_with_result(
                         script_name,
@@ -2842,8 +3116,33 @@ class TradingBot:
                         self._notify_manual_close_needed(
                             script_name, position, exit_side, current_price, reason
                         )
-                        del self.positions[script_name]
+                        if is_paper:
+                            del self.paper_positions[script_name]
+                        else:
+                            del self.positions[script_name]
                         self.save_state()
+                        continue
+                    if is_paper:
+                        self._paper_exit_after_signal(
+                            script_name,
+                            position,
+                            exit_side,
+                            current_price,
+                            reason,
+                            extra_log=(
+                                f"signal_time={confirmed_time_text}; "
+                                f"entry_adx={float(position.get('signal_adx', 0.0) or 0.0):.2f}; "
+                                f"plus_di={float(position.get('signal_plus_di', 0.0) or 0.0):.2f}; "
+                                f"minus_di={float(position.get('signal_minus_di', 0.0) or 0.0):.2f}"
+                            ),
+                        )
+                        if crossover_exit:
+                            reversal_signal = -1 if position['type'] == 'BUY' else 1
+                            reversal_crossover = True
+                            data['entry_signal'] = reversal_signal
+                            data['entry_crossover'] = reversal_crossover
+                            data['entry_candle_timestamp'] = last_closed_candle['timestamp']
+                            self.process_script(script_name, data['instrument_key'])
                         continue
                     success, order_result = self._place_order_with_result(
                         script_name,
@@ -3085,6 +3384,93 @@ class TradingBot:
                         )
                         target_price = entry_price * (1 + self.config['target_percent'] / 100)
                         self._bot_logger.info(f"BUY signal for {script_name} at {entry_price:.2f}")
+                        if is_paper_script(script_name):
+                            signal_timestamp = entry_candle_timestamp
+                            signal_timestamp_str = (
+                                signal_timestamp.isoformat()
+                                if signal_timestamp is not None
+                                else datetime.now().isoformat()
+                            )
+                            self.paper_positions[script_name] = {
+                                "type": "BUY",
+                                "entry_price": entry_price,
+                                "entry_time": datetime.now().isoformat(),
+                                "quantity": self._get_order_quantity(script_name),
+                                "signal_time": signal_timestamp_str,
+                                "signal_ema_short": entry_ema_short,
+                                "signal_ema_long": entry_ema_long,
+                                "signal_adx": entry_adx,
+                                "signal_plus_di": entry_plus_di,
+                                "signal_minus_di": entry_minus_di,
+                                "chart_percent": chart_percent,
+                                "chart_volume": chart_volume,
+                                "win_percent": trade_prob,
+                                "win_percent_source": "model_v2",
+                                "ob_percent": ob_percent,
+                                "initial_sl": initial_sl,
+                                "stop_loss": initial_sl,
+                                "target_price": target_price,
+                                "trail_steps_locked": 0,
+                                "breakeven_done": False,
+                                "last_polled_price": float(entry_price),
+                            }
+                            self.paper_positions[script_name]["trade_id"] = self._build_trade_id(
+                                script_name, self.paper_positions[script_name]["entry_time"]
+                            )
+                            self._bot_logger.info(
+                                f" {script_name}: Initial SL set @ Rs{initial_sl:.2f} [PAPER]"
+                            )
+                            entry_extra = (
+                                f"sl={initial_sl:.2f}; target={target_price:.2f}; "
+                                f"ob_pct={ob_percent:.2f}; "
+                                f"chart_pct={chart_percent}; "
+                                f"chart_vol={chart_volume}; "
+                                f"ema_sep_pct={ema_sep_pct:.4f}; "
+                                f"adx={entry_adx:.2f}; plus_di={entry_plus_di:.2f}; minus_di={entry_minus_di:.2f}; "
+                                f"trade_prob={trade_prob:.1f}; trade_prob_bucket={trade_prob_bucket}; "
+                                f"{levels_ctx}; "
+                                f"ema18_slope=UP({entry_ema_long - entry_ema_long_prev:+.4f}); "
+                                f"signal_time={signal_timestamp_str}; "
+                                f"order_id=paper; "
+                                f"ema{self.config['ema_short']}={entry_ema_short:.2f}; "
+                                f"ema{self.config['ema_long']}={entry_ema_long:.2f}; "
+                                f"ema{self.config['ema_long']}_prev={entry_ema_long_prev:.2f}"
+                            )
+                            self._log_paper_order_event(
+                                script_name,
+                                "PAPER_ENTRY",
+                                "BUY",
+                                entry_price,
+                                "EMA_CROSSOVER",
+                                extra=entry_extra,
+                            )
+                            if telegram_notifications_enabled_for_user(self.username):
+                                if not send_paper_trade_notification(
+                                    {
+                                        "account": self.username,
+                                        "symbol": script_name,
+                                        "action": "BUY",
+                                        "quantity": self._get_order_quantity(script_name),
+                                        "price": entry_price,
+                                        "reason": "EMA_CROSSOVER",
+                                        "stop_loss": initial_sl,
+                                        "target_price": target_price,
+                                        "win_percent": trade_prob,
+                                        "chart_percent": chart_percent,
+                                        "chart_volume": chart_volume,
+                                        "entry_adx": entry_adx,
+                                        "entry_plus_di": entry_plus_di,
+                                        "entry_minus_di": entry_minus_di,
+                                        "timestamp": self._now_ist(),
+                                    },
+                                    is_entry=True,
+                                ):
+                                    self._bot_logger.error(
+                                        f"Failed Telegram PAPER ENTRY: {script_name} BUY @ Rs{entry_price:.2f}"
+                                    )
+                            self.last_entry_candle_processed[script_name] = entry_candle_timestamp
+                            self.save_state()
+                            continue
                         success, order_result = self._place_order_with_result(
                             script_name,
                             "BUY",
@@ -3227,6 +3613,93 @@ class TradingBot:
                         )
                         target_price = entry_price * (1 - self.config['target_percent'] / 100)
                         self._bot_logger.info(f"SELL signal for {script_name} at {entry_price:.2f}")
+                        if is_paper_script(script_name):
+                            signal_timestamp = entry_candle_timestamp
+                            signal_timestamp_str = (
+                                signal_timestamp.isoformat()
+                                if signal_timestamp is not None
+                                else datetime.now().isoformat()
+                            )
+                            self.paper_positions[script_name] = {
+                                "type": "SELL",
+                                "entry_price": entry_price,
+                                "entry_time": datetime.now().isoformat(),
+                                "quantity": self._get_order_quantity(script_name),
+                                "signal_time": signal_timestamp_str,
+                                "signal_ema_short": entry_ema_short,
+                                "signal_ema_long": entry_ema_long,
+                                "signal_adx": entry_adx,
+                                "signal_plus_di": entry_plus_di,
+                                "signal_minus_di": entry_minus_di,
+                                "chart_percent": chart_percent,
+                                "chart_volume": chart_volume,
+                                "win_percent": trade_prob,
+                                "win_percent_source": "model_v2",
+                                "ob_percent": ob_percent,
+                                "initial_sl": initial_sl,
+                                "stop_loss": initial_sl,
+                                "target_price": target_price,
+                                "trail_steps_locked": 0,
+                                "breakeven_done": False,
+                                "last_polled_price": float(entry_price),
+                            }
+                            self.paper_positions[script_name]["trade_id"] = self._build_trade_id(
+                                script_name, self.paper_positions[script_name]["entry_time"]
+                            )
+                            self._bot_logger.info(
+                                f" {script_name}: Initial SL set @ Rs{initial_sl:.2f} [PAPER]"
+                            )
+                            entry_extra = (
+                                f"sl={initial_sl:.2f}; target={target_price:.2f}; "
+                                f"ob_pct={ob_percent:.2f}; "
+                                f"chart_pct={chart_percent}; "
+                                f"chart_vol={chart_volume}; "
+                                f"ema_sep_pct={ema_sep_pct:.4f}; "
+                                f"adx={entry_adx:.2f}; plus_di={entry_plus_di:.2f}; minus_di={entry_minus_di:.2f}; "
+                                f"trade_prob={trade_prob:.1f}; trade_prob_bucket={trade_prob_bucket}; "
+                                f"{levels_ctx}; "
+                                f"ema18_slope=DOWN({entry_ema_long - entry_ema_long_prev:+.4f}); "
+                                f"signal_time={signal_timestamp_str}; "
+                                f"order_id=paper; "
+                                f"ema{self.config['ema_short']}={entry_ema_short:.2f}; "
+                                f"ema{self.config['ema_long']}={entry_ema_long:.2f}; "
+                                f"ema{self.config['ema_long']}_prev={entry_ema_long_prev:.2f}"
+                            )
+                            self._log_paper_order_event(
+                                script_name,
+                                "PAPER_ENTRY",
+                                "SELL",
+                                entry_price,
+                                "EMA_CROSSOVER",
+                                extra=entry_extra,
+                            )
+                            if telegram_notifications_enabled_for_user(self.username):
+                                if not send_paper_trade_notification(
+                                    {
+                                        "account": self.username,
+                                        "symbol": script_name,
+                                        "action": "SELL",
+                                        "quantity": self._get_order_quantity(script_name),
+                                        "price": entry_price,
+                                        "reason": "EMA_CROSSOVER",
+                                        "stop_loss": initial_sl,
+                                        "target_price": target_price,
+                                        "win_percent": trade_prob,
+                                        "chart_percent": chart_percent,
+                                        "chart_volume": chart_volume,
+                                        "entry_adx": entry_adx,
+                                        "entry_plus_di": entry_plus_di,
+                                        "entry_minus_di": entry_minus_di,
+                                        "timestamp": self._now_ist(),
+                                    },
+                                    is_entry=True,
+                                ):
+                                    self._bot_logger.error(
+                                        f"Failed Telegram PAPER ENTRY: {script_name} SELL @ Rs{entry_price:.2f}"
+                                    )
+                            self.last_entry_candle_processed[script_name] = entry_candle_timestamp
+                            self.save_state()
+                            continue
                         success, order_result = self._place_order_with_result(
                             script_name,
                             "SELL",
@@ -3384,6 +3857,8 @@ class TradingBot:
                 chosen = set(order_names)
         for sym in self.positions.keys():
             chosen.add(sym)
+        for sym in self.paper_positions.keys():
+            chosen.add(sym)
         out: list[tuple[str, str]] = []
         for name, key in all_items:
             if name in chosen:
@@ -3398,8 +3873,13 @@ class TradingBot:
         - "shutdown_all" — daily shutdown (runner stops every account)
         """
         self.client.refresh_credentials_if_changed()
+        cycle_items = list(self._scripts_for_cycle())
+        batch_sleep = float(os.environ.get("UPSTOX_MARKET_FETCH_BATCH_SLEEP_SEC", "0.12"))
+        batch_size = max(1, int(os.environ.get("UPSTOX_MARKET_FETCH_BATCH_SIZE", "10")))
         script_data = []
-        for script_name, instrument_key in self._scripts_for_cycle():
+        for i, (script_name, instrument_key) in enumerate(cycle_items):
+            if i > 0 and i % batch_size == 0 and batch_sleep > 0:
+                time.sleep(batch_sleep)
             data = self.process_script(script_name, instrument_key)
             script_data.append(data)
 

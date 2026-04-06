@@ -9,13 +9,19 @@ function formatTimestamp(value) {
   return normalized.length > 19 ? normalized.slice(0, 19) : normalized;
 }
 
-export function ClosedTradesTable({ trades, availableDates = [], selectedDate = "", onDateChange }) {
+export function ClosedTradesTable({
+  trades,
+  availableDates = [],
+  selectedDate = "",
+  onDateChange,
+  title = "Closed Trades",
+}) {
   const dateOptions = availableDates.length > 0 ? availableDates : selectedDate ? [selectedDate] : [];
 
   return (
     <div className="card">
       <div className="closed-header">
-        <h2>Closed Trades</h2>
+        <h2>{title}</h2>
         <div className="closed-filter">
           <label htmlFor="closed-date-select" className="subtle">
             Date

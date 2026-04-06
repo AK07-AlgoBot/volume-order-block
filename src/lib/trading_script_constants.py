@@ -5,6 +5,24 @@ Keep this tuple in sync when adding or removing instruments there.
 
 from __future__ import annotations
 
+# Real broker orders (Upstox); all other symbols in AVAILABLE_SCRIPT_NAMES are paper-only.
+LIVE_SCRIPT_NAMES: frozenset[str] = frozenset(
+    {
+        "NIFTY",
+        "BANKNIFTY",
+        "SENSEX",
+        "CRUDE",
+        "GOLDMINI",
+        "SILVERMINI",
+    }
+)
+
+
+def is_paper_script(script_name: str) -> bool:
+    name = (script_name or "").strip().upper()
+    return bool(name) and name not in LIVE_SCRIPT_NAMES
+
+
 AVAILABLE_SCRIPT_NAMES: tuple[str, ...] = (
     "NIFTY",
     "BANKNIFTY",
@@ -27,4 +45,9 @@ AVAILABLE_SCRIPT_NAMES: tuple[str, ...] = (
     "BHARTIARTL",
     "MARUTI",
     "SUNPHARMA",
+    "TITAN",
+    "ULTRACEMCO",
+    "NESTLEIND",
+    "POWERGRID",
+    "HCLTECH",
 )

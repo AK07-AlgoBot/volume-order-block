@@ -6,6 +6,7 @@ import { LiveTradesTable } from "../components/LiveTradesTable";
 import { SymbolPerformanceTable } from "../components/SymbolPerformanceTable";
 import { WeeklyPnlChart } from "../components/WeeklyPnlChart";
 import { OrdersLogPanel } from "../components/OrdersLogPanel";
+import { PaperTradingPanel } from "../components/PaperTradingPanel";
 import { TradingScriptsCard } from "../components/TradingScriptsCard";
 import { UpstoxSettingsCard } from "../components/UpstoxSettingsCard";
 
@@ -477,6 +478,13 @@ export default function DashboardPage() {
               >
                 Orders log
               </button>
+              <button
+                type="button"
+                className={`nav-tab ${mainView === "paperTrading" ? "nav-tab-active" : ""}`}
+                onClick={() => setMainView("paperTrading")}
+              >
+                Paper P&L
+              </button>
             </nav>
             <button type="button" className="btn-logout" onClick={onLogout}>
               Log out
@@ -487,7 +495,12 @@ export default function DashboardPage() {
 
       <main className="container">
         <OrdersLogPanel active={mainView === "ordersLog"} />
-        <div className={`dashboard-stack ${mainView === "dashboard" ? "" : "dashboard-stack-hidden"}`}>
+        <PaperTradingPanel active={mainView === "paperTrading"} />
+        <div
+          className={`dashboard-stack ${
+            mainView === "dashboard" ? "" : "dashboard-stack-hidden"
+          }`}
+        >
         <div className="layout">
           <LiveTradesTable trades={liveTrades} />
           <WeeklyPnlChart

@@ -715,6 +715,21 @@ tr:last-child td {
   word-break: break-word;
 }
 
+.paper-trading-stack {
+  margin-top: 1rem;
+  margin-bottom: 1.5rem;
+}
+
+.paper-log-section .paper-log-pre {
+  background: rgba(255, 248, 230, 0.08);
+  border-color: rgba(234, 179, 8, 0.35);
+  color: #fde68a;
+}
+
+.paper-pnl-banner {
+  margin: 0.75rem 0 0.25rem;
+}
+
 .login-wrap {
   min-height: 100vh;
   display: grid;

@@ -25,3 +25,18 @@ async def get_orders_log_tail(
         "line_count": len(lines),
         "path": f"users/{DASHBOARD_USERNAME}/logs/orders.log",
     }
+
+
+@router.get("/paper")
+async def get_paper_orders_log_tail(
+    _auth: UserClaims = Depends(require_user),
+    max_lines: int = Query(500, ge=1, le=10_000, description="Max lines from end of file"),
+):
+    path = user_data_dir(DASHBOARD_USERNAME) / "logs" / "paper_orders.log"
+    lines, truncated = tail_orders_log(path, max_lines)
+    return {
+        "lines": lines,
+        "truncated": truncated,
+        "line_count": len(lines),
+        "path": f"users/{DASHBOARD_USERNAME}/logs/paper_orders.log",
+    }
