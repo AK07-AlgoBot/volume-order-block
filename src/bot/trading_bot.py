@@ -259,6 +259,9 @@ API_CONFIG = {
     "base_url": DEFAULT_BASE_URL,
 }
 
+# Runtime override for daily shutdown (IST), format HH:MM.
+DAILY_SHUTDOWN_TIME = (os.environ.get("TRADING_DAILY_SHUTDOWN_TIME") or "23:21").strip() or "23:21"
+
 # Trading Configuration
 TRADING_CONFIG = {
     "scripts": {
@@ -464,7 +467,7 @@ TRADING_CONFIG = {
         "NSE": "15:20",
         "MCX": "23:20"
     },
-    "daily_shutdown_time": "23:21",
+    "daily_shutdown_time": DAILY_SHUTDOWN_TIME,
     "auto_archive_on_shutdown": True
 }
 
