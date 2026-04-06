@@ -638,15 +638,15 @@ class TradingBot:
 
     Per-user logs under src/server/data/users/<username>/logs/ (not shared across accounts):
 
-    - trading_bot.log — Operational log (API errors, signals, VERIFY lines, EOD). Same lines also go
-      to stdout with a [username] prefix so a multi-account process does not mix accounts in files,
-      only on the shared console stream.
+    - trading_bot.log — Combined operational log: bot messages (API errors, signals, EOD) and
+      optional market-status lines (same file, logger name in brackets). Also mirrored to stdout
+      with a [username] prefix.
 
     - orders.log — Structured ENTRY / EXIT / SKIP / ORDER_FAILED lines only; parsed by the dashboard
-      for P&L and history. Intentionally not duplicated into trading_bot.log.
+      for P&L and history. Kept separate and smaller on disk.
 
-    - market_status.log — One line per script per loop (EMA + signal snapshot). Overlaps somewhat
-      with the colored console table; set TRADING_BOT_WRITE_MARKET_STATUS_LOG=0 to skip this file.
+    - Set TRADING_BOT_WRITE_MARKET_STATUS_LOG=0 to skip writing market-status lines to the file
+      (console-only for that stream).
     """
 
     def __init__(self, config, client: UpstoxClient, username: str):
@@ -660,7 +660,6 @@ class TradingBot:
             "TRADING_BOT_WRITE_MARKET_STATUS_LOG", "1"
         ).strip().lower() not in ("0", "false", "no", "")
 
-        fmt_file = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
         fmt_console = logging.Formatter(
             f"%(asctime)s - %(levelname)s - [{self.username}] %(message)s"
         )
@@ -669,9 +668,12 @@ class TradingBot:
         self._bot_logger.setLevel(logging.INFO)
         self._bot_logger.propagate = False
         self._bot_logger.handlers.clear()
-        bf = logging.FileHandler(logs_dir / "trading_bot.log", encoding="utf-8")
-        bf.setFormatter(fmt_file)
-        self._bot_logger.addHandler(bf)
+        ops_fmt = logging.Formatter(
+            "%(asctime)s - %(levelname)s - [%(name)s] %(message)s"
+        )
+        ops_fh = logging.FileHandler(logs_dir / "trading_bot.log", encoding="utf-8")
+        ops_fh.setFormatter(ops_fmt)
+        self._bot_logger.addHandler(ops_fh)
         bc = logging.StreamHandler(sys.stdout)
         bc.setFormatter(fmt_console)
         self._bot_logger.addHandler(bc)
@@ -689,9 +691,7 @@ class TradingBot:
         self._market_status_logger.propagate = False
         self._market_status_logger.handlers.clear()
         if write_market_status_file:
-            mh = logging.FileHandler(logs_dir / "market_status.log", encoding="utf-8")
-            mh.setFormatter(logging.Formatter("%(asctime)s - %(message)s"))
-            self._market_status_logger.addHandler(mh)
+            self._market_status_logger.addHandler(ops_fh)
         else:
             self._market_status_logger.addHandler(logging.NullHandler())
 

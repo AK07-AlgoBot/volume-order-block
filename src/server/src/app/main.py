@@ -10,7 +10,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.config.settings import get_settings
-from app.routes import auth, dashboard, settings_trading, settings_upstox, trades, websocket
+from app.routes import auth, dashboard, log_files, settings_trading, settings_upstox, trades, websocket
 
 app = FastAPI(title="AK07 Dashboard API", version="2.0.0")
 
@@ -28,6 +28,7 @@ app.include_router(dashboard.router)
 app.include_router(trades.router)
 app.include_router(settings_upstox.router)
 app.include_router(settings_trading.router)
+app.include_router(log_files.router)
 app.include_router(websocket.router)
 
 

@@ -5,6 +5,7 @@ import { ClosedTradesTable } from "../components/ClosedTradesTable";
 import { LiveTradesTable } from "../components/LiveTradesTable";
 import { SymbolPerformanceTable } from "../components/SymbolPerformanceTable";
 import { WeeklyPnlChart } from "../components/WeeklyPnlChart";
+import { OrdersLogPanel } from "../components/OrdersLogPanel";
 import { TradingScriptsCard } from "../components/TradingScriptsCard";
 import { UpstoxSettingsCard } from "../components/UpstoxSettingsCard";
 
@@ -86,6 +87,7 @@ export default function DashboardPage() {
     cutoff_date: "",
     end_date: "",
   });
+  const [mainView, setMainView] = useState("dashboard");
   const selectedClosedDateRef = useRef(selectedClosedDate);
   const selectedWeekOffsetRef = useRef(selectedWeekOffset);
   const selectedMonthOffsetRef = useRef(selectedMonthOffset);
@@ -460,6 +462,22 @@ export default function DashboardPage() {
               <span className="dot" />
               {connected ? "Live Connected" : "Disconnected"}
             </span>
+            <nav className="header-nav-tabs" aria-label="Main views">
+              <button
+                type="button"
+                className={`nav-tab ${mainView === "dashboard" ? "nav-tab-active" : ""}`}
+                onClick={() => setMainView("dashboard")}
+              >
+                Dashboard
+              </button>
+              <button
+                type="button"
+                className={`nav-tab ${mainView === "ordersLog" ? "nav-tab-active" : ""}`}
+                onClick={() => setMainView("ordersLog")}
+              >
+                Orders log
+              </button>
+            </nav>
             <button type="button" className="btn-logout" onClick={onLogout}>
               Log out
             </button>
@@ -468,6 +486,8 @@ export default function DashboardPage() {
       </header>
 
       <main className="container">
+        <OrdersLogPanel active={mainView === "ordersLog"} />
+        <div className={`dashboard-stack ${mainView === "dashboard" ? "" : "dashboard-stack-hidden"}`}>
         <div className="layout">
           <LiveTradesTable trades={liveTrades} />
           <WeeklyPnlChart
@@ -513,6 +533,7 @@ export default function DashboardPage() {
 
         <div className="subtle" style={{ marginTop: "0.75rem", marginBottom: "1.5rem" }}>
           Today realized P&L: {todayRealized.toFixed(2)}
+        </div>
         </div>
       </main>
     </>
