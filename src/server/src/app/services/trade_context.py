@@ -552,14 +552,16 @@ class TradeUserContext:
     def dashboard_initial_dict(self) -> dict:
         today_text = self._today_ist().isoformat()
         effective_closed = self._effective_closed_trades(limit=2000)
-        date_filtered_closed = self._filter_closed_trades_by_date(effective_closed, today_text)
+        available_dates = self._closed_trade_dates(effective_closed)
+        selected_date = today_text if today_text in available_dates else (available_dates[0] if available_dates else today_text)
+        date_filtered_closed = self._filter_closed_trades_by_date(effective_closed, selected_date)
         weekly_points = self._compute_weekly_pnl_from_orders(week_offset=0)
         monthly_points = self._compute_monthly_pnl_from_orders(month_offset=0)
         return {
             "live_trades": self._dedupe_live_trades(list(self.live_trades.values())),
             "closed_trades": date_filtered_closed,
-            "closed_trade_dates": self._closed_trade_dates(effective_closed),
-            "closed_trade_selected_date": today_text,
+            "closed_trade_dates": available_dates,
+            "closed_trade_selected_date": selected_date,
             "weekly_pnl": weekly_points,
             "weekly_total": self._weekly_total(weekly_points),
             "weekly_selected_offset": 0,
