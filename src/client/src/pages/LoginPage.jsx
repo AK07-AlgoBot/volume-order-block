@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { getApiBase, setStoredAuth } from "../api/client";
 
@@ -6,6 +6,10 @@ const ALLOWED_USER = "AK07";
 
 export default function LoginPage() {
   const navigate = useNavigate();
+
+  useEffect(() => {
+    window.dispatchEvent(new Event("ak07-app-ready"));
+  }, []);
   const [username, setUsername] = useState(ALLOWED_USER);
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
