@@ -282,6 +282,11 @@ TRADING_CONFIG = {
         "KOTAKBANK": "",
         "LT": "",
         "ITC": "",
+        "HINDUNILVR": "",
+        "BAJFINANCE": "",
+        "BHARTIARTL": "",
+        "MARUTI": "",
+        "SUNPHARMA": "",
     },
     # Separate tokens for order placement (FUTURES/COMMODITIES)
     "order_tokens": {
@@ -301,6 +306,11 @@ TRADING_CONFIG = {
         "KOTAKBANK": "",
         "LT": "",
         "ITC": "",
+        "HINDUNILVR": "",
+        "BAJFINANCE": "",
+        "BHARTIARTL": "",
+        "MARUTI": "",
+        "SUNPHARMA": "",
     },
     "lot_sizes": {
         "NIFTY": 65,
@@ -320,6 +330,11 @@ TRADING_CONFIG = {
         "KOTAKBANK": 0,
         "LT": 0,
         "ITC": 0,
+        "HINDUNILVR": 0,
+        "BAJFINANCE": 0,
+        "BHARTIARTL": 0,
+        "MARUTI": 0,
+        "SUNPHARMA": 0,
     },
     "interval": "1minute",  # API fetch interval (Upstox accepts 1minute reliably)
     "signal_interval": "5minute",  # Strategy timeframe (EMA runs on 5-minute candles)
@@ -456,6 +471,7 @@ TRADING_CONFIG = {
             "NIFTY", "BANKNIFTY", "SENSEX",
             "RELIANCE", "HDFCBANK", "ICICIBANK", "SBIN", "TCS",
             "INFY", "AXISBANK", "KOTAKBANK", "LT", "ITC",
+            "HINDUNILVR", "BAJFINANCE", "BHARTIARTL", "MARUTI", "SUNPHARMA",
         ],
         "MCX": ["CRUDE", "GOLDMINI", "SILVERMINI"]
     },

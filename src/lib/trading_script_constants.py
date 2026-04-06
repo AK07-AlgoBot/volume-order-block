@@ -22,4 +22,9 @@ AVAILABLE_SCRIPT_NAMES: tuple[str, ...] = (
     "KOTAKBANK",
     "LT",
     "ITC",
+    "HINDUNILVR",
+    "BAJFINANCE",
+    "BHARTIARTL",
+    "MARUTI",
+    "SUNPHARMA",
 )
