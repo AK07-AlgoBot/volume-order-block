@@ -17,6 +17,7 @@ ARCHIVE_ROOT = USER_ROOT / "archive"
 FILES_TO_ARCHIVE = [
     LOGS_DIR / "trading_bot.log",
     LOGS_DIR / "orders.log",
+    LOGS_DIR / "paper_orders.log",
     LOGS_DIR / "market_status.log",
     ROOT / "bot_output.txt",
     USER_ROOT / "trading_state.json",

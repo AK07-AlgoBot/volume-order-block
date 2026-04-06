@@ -6,6 +6,7 @@ import calendar
 from collections import defaultdict, deque
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
+import json
 from pathlib import Path
 import re
 from typing import List
@@ -673,6 +674,65 @@ class TradeUserContext:
             "data_user": self.username,
             **self._trading_scripts_payload(),
         }
+
+    def paper_live_trades_from_state(self) -> list[dict]:
+        """Open paper positions from bot `trading_state.json` (same shape as live trades for the UI)."""
+        path = self.paths.user_root / "trading_state.json"
+        if not path.is_file():
+            return []
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError, TypeError):
+            return []
+        paper = raw.get("paper_positions") or {}
+        if not isinstance(paper, dict):
+            return []
+        out: list[dict] = []
+        for symbol, pos in paper.items():
+            if not isinstance(pos, dict):
+                continue
+            sym = str(symbol).strip()
+            if not sym:
+                continue
+            side = str(pos.get("type") or "BUY").upper()
+            entry = float(pos.get("entry_price") or 0.0)
+            qty = float(pos.get("quantity") or 0.0)
+            if qty <= 0:
+                qty = 1.0
+            last_raw = pos.get("last_polled_price")
+            try:
+                last = float(last_raw) if last_raw is not None else entry
+            except (TypeError, ValueError):
+                last = entry
+            if side == "BUY":
+                unrealized = (last - entry) * qty
+            elif side == "SELL":
+                unrealized = (entry - last) * qty
+            else:
+                unrealized = 0.0
+            trade_id = str(pos.get("trade_id") or f"{sym}-{pos.get('entry_time', '')}")
+            cp = pos.get("chart_percent")
+            wp = pos.get("win_percent")
+            out.append(
+                {
+                    "id": trade_id,
+                    "symbol": sym,
+                    "side": side,
+                    "quantity": qty,
+                    "entry_price": entry,
+                    "stop_loss": float(pos.get("stop_loss") or entry),
+                    "target_price": float(pos.get("target_price") or entry),
+                    "chart_percent": float(cp) if cp is not None else None,
+                    "chart_volume": pos.get("chart_volume"),
+                    "win_percent": float(wp) if wp is not None else None,
+                    "last_price": last,
+                    "unrealized_pnl": round(unrealized, 2),
+                    "opened_at": str(pos.get("entry_time") or ""),
+                    "closed_at": None,
+                }
+            )
+        out.sort(key=lambda t: str(t.get("opened_at") or ""), reverse=True)
+        return out
 
     def paper_closed_trades_response(self, date: str | None) -> dict:
         if date and not re.match(r"^\d{4}-\d{2}-\d{2}$", date):

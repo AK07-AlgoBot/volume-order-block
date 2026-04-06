@@ -730,6 +730,10 @@ tr:last-child td {
   margin: 0.75rem 0 0.25rem;
 }
 
+.paper-log-at-bottom {
+  margin-top: 1.25rem;
+}
+
 .login-wrap {
   min-height: 100vh;
   display: grid;

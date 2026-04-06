@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { apiFetch } from "../api/client";
 import { ClosedTradesTable } from "./ClosedTradesTable";
+import { LiveTradesTable } from "./LiveTradesTable";
 
 function getLocalDateIso() {
   const now = new Date();
@@ -13,6 +14,9 @@ export function PaperTradingPanel({ active }) {
   const [logMeta, setLogMeta] = useState({ truncated: false, line_count: 0, path: "" });
   const [logErr, setLogErr] = useState("");
   const [logLoading, setLogLoading] = useState(false);
+
+  const [paperLiveTrades, setPaperLiveTrades] = useState([]);
+  const [liveErr, setLiveErr] = useState("");
 
   const [closedTrades, setClosedTrades] = useState([]);
   const [closedDates, setClosedDates] = useState([]);
@@ -50,6 +54,26 @@ export function PaperTradingPanel({ active }) {
       });
   }, []);
 
+  const loadPaperLive = useCallback(() => {
+    setLiveErr("");
+    apiFetch("/api/dashboard/paper-live-trades")
+      .then((r) => {
+        if (r.status === 401) {
+          throw new Error("Session expired — sign in again.");
+        }
+        if (!r.ok) {
+          throw new Error("Failed to load paper live trades");
+        }
+        return r.json();
+      })
+      .then((payload) => {
+        setPaperLiveTrades(Array.isArray(payload.trades) ? payload.trades : []);
+      })
+      .catch((e) => {
+        setLiveErr(e.message || "Error");
+      });
+  }, []);
+
   const loadTrades = useCallback((date) => {
     setTradesErr("");
     const q = date ? `?date=${encodeURIComponent(date)}` : "";
@@ -67,14 +91,20 @@ export function PaperTradingPanel({ active }) {
         setClosedTrades(payload.closed_trades || []);
         setClosedDates(payload.closed_trade_dates || []);
         setPaperTotal(Number(payload.paper_total_realized || 0));
-        if (payload.selected_date) {
-          setSelectedDate(String(payload.selected_date));
-        }
       })
       .catch((e) => {
         setTradesErr(e.message || "Error");
       });
   }, []);
+
+  useEffect(() => {
+    if (!active) {
+      return undefined;
+    }
+    loadPaperLive();
+    const interval = window.setInterval(loadPaperLive, 10000);
+    return () => window.clearInterval(interval);
+  }, [active, loadPaperLive]);
 
   useEffect(() => {
     if (!active) {
@@ -99,7 +129,22 @@ export function PaperTradingPanel({ active }) {
 
   return (
     <div className="paper-trading-stack">
-      <section className="orders-log-section paper-log-section">
+      {liveErr ? <div className="login-error orders-log-error">{liveErr}</div> : null}
+      <LiveTradesTable title="Paper Live Trades (virtual)" trades={paperLiveTrades} />
+
+      <div className="paper-pnl-banner subtle">
+        All-time realized (paper, from log): <strong>{paperTotal.toFixed(2)}</strong>
+      </div>
+      {tradesErr ? <div className="login-error orders-log-error">{tradesErr}</div> : null}
+      <ClosedTradesTable
+        title="Paper closed trades (virtual)"
+        trades={closedTrades}
+        availableDates={closedDates}
+        selectedDate={selectedDate}
+        onDateChange={setSelectedDate}
+      />
+
+      <section className="orders-log-section paper-log-section paper-log-at-bottom">
         <div className="orders-log-toolbar">
           <div>
             <h2 className="orders-log-title">paper_orders.log</h2>
@@ -119,18 +164,6 @@ export function PaperTradingPanel({ active }) {
           {logText || (logLoading ? "…" : "— empty or missing —")}
         </pre>
       </section>
-
-      <div className="paper-pnl-banner subtle">
-        All-time realized (paper, from log): <strong>{paperTotal.toFixed(2)}</strong>
-      </div>
-      {tradesErr ? <div className="login-error orders-log-error">{tradesErr}</div> : null}
-      <ClosedTradesTable
-        title="Paper closed trades (virtual)"
-        trades={closedTrades}
-        availableDates={closedDates}
-        selectedDate={selectedDate}
-        onDateChange={setSelectedDate}
-      />
     </div>
   );
 }

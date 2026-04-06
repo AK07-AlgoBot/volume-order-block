@@ -44,6 +44,12 @@ async def dashboard_paper_closed_trades(
     return ctx.paper_closed_trades_response(date)
 
 
+@router.get("/paper-live-trades")
+async def dashboard_paper_live_trades(user: UserClaims = Depends(require_user)):
+    ctx = trade_context_for(user)
+    return {"trades": ctx.paper_live_trades_from_state()}
+
+
 @router.get("/weekly-pnl")
 async def dashboard_weekly_pnl(
     week_offset: int = 0,

@@ -19,10 +19,10 @@ function isProfitLocked(trade) {
   return false;
 }
 
-export function LiveTradesTable({ trades }) {
+export function LiveTradesTable({ trades, title = "Live Trades" }) {
   return (
     <div className="card">
-      <h2>Live Trades</h2>
+      <h2>{title}</h2>
       <div className="subtle">{trades.length} open positions</div>
       <div className="table-wrap">
         <table className="trade-table live-trades-table">
