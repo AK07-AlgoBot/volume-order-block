@@ -101,6 +101,9 @@ def send_trade_notification(trade: dict, chat_id: int | str = None) -> bool:
     entry_adx = trade.get("entry_adx")
     entry_plus_di = trade.get("entry_plus_di")
     entry_minus_di = trade.get("entry_minus_di")
+    error_text = trade.get("error_text")
+    endpoint = trade.get("endpoint")
+    note = trade.get("note")
     timestamp = trade.get("timestamp")
 
     if isinstance(timestamp, datetime):
@@ -122,6 +125,8 @@ def send_trade_notification(trade: dict, chat_id: int | str = None) -> bool:
 
     if reason in exit_reasons:
         title = "🔴 *Trade Closed*"
+    elif reason == "ORDER_FAILED":
+        title = "🟠 *Manual Action Required*"
     elif reason in entry_reasons:
         title = "🟢 *New Trade Executed*"
     else:
@@ -147,6 +152,9 @@ def send_trade_notification(trade: dict, chat_id: int | str = None) -> bool:
         + (f"\n*ADX*: `{float(entry_adx):.2f}`" if entry_adx is not None else "")
         + (f"\n*+DI*: `{float(entry_plus_di):.2f}`" if entry_plus_di is not None else "")
         + (f"\n*-DI*: `{float(entry_minus_di):.2f}`" if entry_minus_di is not None else "")
+        + (f"\n*Note*: `{note}`" if note else "")
+        + (f"\n*Error*: `{error_text}`" if error_text else "")
+        + (f"\n*Endpoint*: `{endpoint}`" if endpoint else "")
         + "\n"
         f"*Time*: `{ts_str}`"
     )
@@ -1098,6 +1106,28 @@ class TradingBot:
             f"ORDER FAILED: {script_name} {side} qty={order_qty} @ Rs{price:.2f} | reason={reason} | error={error_text}"
         )
         self._log_order_failure(script_name, side, price, reason, error_text, endpoint)
+        if telegram_notifications_enabled_for_user(self.username):
+            alert = {
+                "account": self.username,
+                "symbol": script_name,
+                "action": side,
+                "quantity": order_qty,
+                "price": price,
+                "reason": "ORDER_FAILED",
+                "stop_loss": stop_loss,
+                "target_price": target_price,
+                "entry_adx": entry_adx,
+                "entry_plus_di": entry_plus_di,
+                "entry_minus_di": entry_minus_di,
+                "error_text": error_text,
+                "endpoint": endpoint,
+                "note": "Place manually in Upstox app/web",
+                "timestamp": self._now_ist(),
+            }
+            if not send_trade_notification(alert):
+                self._bot_logger.error(
+                    f"Failed Telegram ORDER_FAILED alert: {script_name} {side} qty={order_qty} @ Rs{price:.2f}"
+                )
         return False, result
 
     def _get_order_token(self, script_name):
