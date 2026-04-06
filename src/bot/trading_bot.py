@@ -1130,6 +1130,48 @@ class TradingBot:
                 )
         return False, result
 
+    @staticmethod
+    def _mcx_api_disabled_error(error_text: str) -> bool:
+        t = str(error_text or "").strip().lower()
+        return "mcx orders via api are temporarily disabled" in t
+
+    def _is_mcx_manual_track_candidate(self, script_name: str, order_result: dict | None) -> bool:
+        token = str(self._get_order_token(script_name) or "").strip()
+        if not token.startswith("MCX_FO|"):
+            return False
+        error_text = str((order_result or {}).get("error", "")).strip()
+        return self._mcx_api_disabled_error(error_text)
+
+    def _notify_manual_close_needed(self, script_name, position, exit_side, current_price, reason):
+        qty = float(position.get("quantity", self._get_order_quantity(script_name)))
+        trade = {
+            "account": self.username,
+            "symbol": script_name,
+            "action": exit_side,
+            "quantity": qty,
+            "price": current_price,
+            "reason": "ORDER_FAILED",
+            "stop_loss": position.get("stop_loss"),
+            "target_price": position.get("target_price"),
+            "entry_adx": float(position.get("signal_adx", 0.0) or 0.0),
+            "entry_plus_di": float(position.get("signal_plus_di", 0.0) or 0.0),
+            "entry_minus_di": float(position.get("signal_minus_di", 0.0) or 0.0),
+            "error_text": f"Manual close signal: {reason}",
+            "note": "Close manually in Upstox app/web",
+            "timestamp": self._now_ist(),
+        }
+        if telegram_notifications_enabled_for_user(self.username):
+            ok = send_trade_notification(trade)
+            if not ok:
+                self._bot_logger.error(
+                    f"Failed Telegram manual-close alert: {script_name} {exit_side} @ Rs{current_price:.2f}"
+                )
+        self._order_logger.info(
+            f"{script_name} | ACTION=MANUAL_CLOSE_NEEDED | SIDE={exit_side} | PRICE={current_price:.2f} "
+            f"| REASON={reason} | entry={float(position.get('entry_price', 0.0)):.2f}; "
+            f"sl={float(position.get('stop_loss', 0.0)):.2f}; target={float(position.get('target_price', 0.0)):.2f}"
+        )
+
     def _get_order_token(self, script_name):
         """Get the order token for placing orders (FUTURES/COMMODITIES)"""
         order_tokens = self.config.get('order_tokens', {})
@@ -2584,6 +2626,13 @@ class TradingBot:
                         f"ALERT: SL hit for {script_name}. Closing BUY @ Rs{current_price:.2f} "
                         f"(SL: Rs{stop_loss:.2f}, prev_poll: Rs{prev_polled_price:.2f}, current: Rs{current_price:.2f})"
                     )
+                    if bool(position.get("manual_execution")):
+                        self._notify_manual_close_needed(
+                            script_name, position, "SELL", current_price, sl_reason
+                        )
+                        del self.positions[script_name]
+                        self.save_state()
+                        continue
                     success, order_result = self._place_order_with_result(
                         script_name,
                         "SELL",
@@ -2629,6 +2678,13 @@ class TradingBot:
                         f"ALERT: SL hit for {script_name}. Closing SELL @ Rs{current_price:.2f} "
                         f"(SL: Rs{stop_loss:.2f}, prev_poll: Rs{prev_polled_price:.2f}, current: Rs{current_price:.2f})"
                     )
+                    if bool(position.get("manual_execution")):
+                        self._notify_manual_close_needed(
+                            script_name, position, "BUY", current_price, sl_reason
+                        )
+                        del self.positions[script_name]
+                        self.save_state()
+                        continue
                     success, order_result = self._place_order_with_result(
                         script_name,
                         "BUY",
@@ -2690,6 +2746,13 @@ class TradingBot:
                         f"(target: Rs{target_price:.2f}, prev_poll: Rs{prev_polled_price:.2f}, current: Rs{current_price:.2f}, move: {favorable_move:.2f}%)"
                     )
                     exit_side = "SELL" if position['type'] == 'BUY' else "BUY"
+                    if bool(position.get("manual_execution")):
+                        self._notify_manual_close_needed(
+                            script_name, position, exit_side, current_price, "TARGET_HIT"
+                        )
+                        del self.positions[script_name]
+                        self.save_state()
+                        continue
                     success, order_result = self._place_order_with_result(
                         script_name,
                         exit_side,
@@ -2756,6 +2819,13 @@ class TradingBot:
                         f"(candle_close={candle_close:.2f} vs ob_boundary={ob_zone_boundary:.2f}, candle={candle_ts_str})"
                     )
                     exit_side = "SELL" if position['type'] == 'BUY' else "BUY"
+                    if bool(position.get("manual_execution")):
+                        self._notify_manual_close_needed(
+                            script_name, position, exit_side, current_price, reason
+                        )
+                        del self.positions[script_name]
+                        self.save_state()
+                        continue
                     success, order_result = self._place_order_with_result(
                         script_name,
                         exit_side,
@@ -3011,6 +3081,45 @@ class TradingBot:
                             entry_minus_di=entry_minus_di,
                         )
                         if not success:
+                            if self._is_mcx_manual_track_candidate(script_name, order_result):
+                                signal_timestamp = entry_candle_timestamp
+                                signal_timestamp_str = signal_timestamp.isoformat() if signal_timestamp is not None else datetime.now().isoformat()
+                                self.positions[script_name] = {
+                                    'type': 'BUY',
+                                    'entry_price': entry_price,
+                                    'entry_time': datetime.now().isoformat(),
+                                    'quantity': self._get_order_quantity(script_name),
+                                    'signal_time': signal_timestamp_str,
+                                    'signal_ema_short': entry_ema_short,
+                                    'signal_ema_long': entry_ema_long,
+                                    'signal_adx': entry_adx,
+                                    'signal_plus_di': entry_plus_di,
+                                    'signal_minus_di': entry_minus_di,
+                                    'chart_percent': chart_percent,
+                                    'chart_volume': chart_volume,
+                                    'win_percent': trade_prob,
+                                    'win_percent_source': 'model_v2',
+                                    'ob_percent': ob_percent,
+                                    'initial_sl': initial_sl,
+                                    'stop_loss': initial_sl,
+                                    'target_price': target_price,
+                                    'trail_steps_locked': 0,
+                                    'breakeven_done': False,
+                                    'last_polled_price': float(entry_price),
+                                    'manual_execution': True,
+                                }
+                                self.positions[script_name]['trade_id'] = self._build_trade_id(
+                                    script_name, self.positions[script_name]['entry_time']
+                                )
+                                self._bot_logger.warning(
+                                    f"MANUAL TRACK: {script_name} BUY virtual position started after API failure; "
+                                    f"waiting to notify manual close on exit conditions."
+                                )
+                                self._order_logger.info(
+                                    f"{script_name} | ACTION=MANUAL_TRACK_START | SIDE=BUY | PRICE={entry_price:.2f} "
+                                    f"| REASON=MCX_API_DISABLED | sl={initial_sl:.2f}; target={target_price:.2f}"
+                                )
+                                self.save_state()
                             self.last_entry_candle_processed[script_name] = entry_candle_timestamp
                             continue
                         signal_timestamp = entry_candle_timestamp
@@ -3114,6 +3223,45 @@ class TradingBot:
                             entry_minus_di=entry_minus_di,
                         )
                         if not success:
+                            if self._is_mcx_manual_track_candidate(script_name, order_result):
+                                signal_timestamp = entry_candle_timestamp
+                                signal_timestamp_str = signal_timestamp.isoformat() if signal_timestamp is not None else datetime.now().isoformat()
+                                self.positions[script_name] = {
+                                    'type': 'SELL',
+                                    'entry_price': entry_price,
+                                    'entry_time': datetime.now().isoformat(),
+                                    'quantity': self._get_order_quantity(script_name),
+                                    'signal_time': signal_timestamp_str,
+                                    'signal_ema_short': entry_ema_short,
+                                    'signal_ema_long': entry_ema_long,
+                                    'signal_adx': entry_adx,
+                                    'signal_plus_di': entry_plus_di,
+                                    'signal_minus_di': entry_minus_di,
+                                    'chart_percent': chart_percent,
+                                    'chart_volume': chart_volume,
+                                    'win_percent': trade_prob,
+                                    'win_percent_source': 'model_v2',
+                                    'ob_percent': ob_percent,
+                                    'initial_sl': initial_sl,
+                                    'stop_loss': initial_sl,
+                                    'target_price': target_price,
+                                    'trail_steps_locked': 0,
+                                    'breakeven_done': False,
+                                    'last_polled_price': float(entry_price),
+                                    'manual_execution': True,
+                                }
+                                self.positions[script_name]['trade_id'] = self._build_trade_id(
+                                    script_name, self.positions[script_name]['entry_time']
+                                )
+                                self._bot_logger.warning(
+                                    f"MANUAL TRACK: {script_name} SELL virtual position started after API failure; "
+                                    f"waiting to notify manual close on exit conditions."
+                                )
+                                self._order_logger.info(
+                                    f"{script_name} | ACTION=MANUAL_TRACK_START | SIDE=SELL | PRICE={entry_price:.2f} "
+                                    f"| REASON=MCX_API_DISABLED | sl={initial_sl:.2f}; target={target_price:.2f}"
+                                )
+                                self.save_state()
                             self.last_entry_candle_processed[script_name] = entry_candle_timestamp
                             continue
                         signal_timestamp = entry_candle_timestamp
@@ -3263,6 +3411,8 @@ class TradingBot:
         self.execute_trading_logic(script_data, allow_new_entries=allow_new_entries, now_ist=now_ist)
 
         for script_name, position in self.positions.items():
+            if bool(position.get("manual_execution")):
+                continue
             current_price = latest_prices.get(script_name)
             if current_price is None:
                 continue
