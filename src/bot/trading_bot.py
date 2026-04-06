@@ -259,7 +259,18 @@ TRADING_CONFIG = {
         "SENSEX": "BSE_FO|825565",         # SENSEX Futures for data fetching
         "CRUDE": "MCX_FO|472789",
         "GOLDMINI": "MCX_FO|487665",
-        "SILVERMINI": "MCX_FO|457533"
+        "SILVERMINI": "MCX_FO|457533",
+        # Liquid Nifty-50 stock futures (auto-resolved to current FO contract at runtime).
+        "RELIANCE": "",
+        "HDFCBANK": "",
+        "ICICIBANK": "",
+        "SBIN": "",
+        "TCS": "",
+        "INFY": "",
+        "AXISBANK": "",
+        "KOTAKBANK": "",
+        "LT": "",
+        "ITC": "",
     },
     # Separate tokens for order placement (FUTURES/COMMODITIES)
     "order_tokens": {
@@ -268,7 +279,17 @@ TRADING_CONFIG = {
         "SENSEX": "BSE_FO|825565",
         "CRUDE": "MCX_FO|472789",
         "GOLDMINI": "MCX_FO|487665",
-        "SILVERMINI": "MCX_FO|457533"
+        "SILVERMINI": "MCX_FO|457533",
+        "RELIANCE": "",
+        "HDFCBANK": "",
+        "ICICIBANK": "",
+        "SBIN": "",
+        "TCS": "",
+        "INFY": "",
+        "AXISBANK": "",
+        "KOTAKBANK": "",
+        "LT": "",
+        "ITC": "",
     },
     "lot_sizes": {
         "NIFTY": 65,
@@ -276,7 +297,18 @@ TRADING_CONFIG = {
         "SENSEX": 20,
         "CRUDE": 100,
         "GOLDMINI": 1,
-        "SILVERMINI": 5
+        "SILVERMINI": 5,
+        # 0 means "auto-discover from instrument master" during startup.
+        "RELIANCE": 0,
+        "HDFCBANK": 0,
+        "ICICIBANK": 0,
+        "SBIN": 0,
+        "TCS": 0,
+        "INFY": 0,
+        "AXISBANK": 0,
+        "KOTAKBANK": 0,
+        "LT": 0,
+        "ITC": 0,
     },
     "interval": "1minute",  # API fetch interval (Upstox accepts 1minute reliably)
     "signal_interval": "5minute",  # Strategy timeframe (EMA runs on 5-minute candles)
@@ -409,7 +441,11 @@ TRADING_CONFIG = {
         "CRUDE": 1
     },
     "segment_scripts": {
-        "NSE": ["NIFTY", "BANKNIFTY", "SENSEX"],
+        "NSE": [
+            "NIFTY", "BANKNIFTY", "SENSEX",
+            "RELIANCE", "HDFCBANK", "ICICIBANK", "SBIN", "TCS",
+            "INFY", "AXISBANK", "KOTAKBANK", "LT", "ITC",
+        ],
         "MCX": ["CRUDE", "GOLDMINI", "SILVERMINI"]
     },
     "entry_start_times": {
@@ -721,6 +757,8 @@ class TradingBot:
         self._bse_instruments_cache = []
         self._bse_instruments_cache_at = 0.0
         self.client._log = self._bot_logger
+        # Fill blank NSE/BSE FO tokens (e.g., stock futures) on startup.
+        self._seed_missing_fo_contract_tokens()
 
     def load_state(self):
         """Load saved trading state"""
@@ -1067,6 +1105,49 @@ class TradingBot:
         order_tokens = self.config.get('order_tokens', {})
         return order_tokens.get(script_name, self.config['scripts'].get(script_name, ''))
 
+    def _lot_size_for_instrument_key(self, instrument_key: str) -> int:
+        if not isinstance(instrument_key, str) or not instrument_key:
+            return 0
+        rows = []
+        try:
+            if instrument_key.startswith("NSE_FO|"):
+                rows = self._fetch_exchange_instruments(NSE_INSTRUMENTS_URL, "nse")
+            elif instrument_key.startswith("BSE_FO|"):
+                rows = self._fetch_exchange_instruments(BSE_INSTRUMENTS_URL, "bse")
+            elif instrument_key.startswith("MCX_FO|"):
+                rows = self._fetch_mcx_instruments()
+        except Exception:
+            return 0
+        for row in rows:
+            if str(row.get("instrument_key", "")) != instrument_key:
+                continue
+            try:
+                return int(float(row.get("lot_size", 0) or 0))
+            except Exception:
+                return 0
+        return 0
+
+    def _seed_missing_fo_contract_tokens(self):
+        scripts = self.config.get("scripts", {}) or {}
+        if not isinstance(scripts, dict):
+            return
+        for script_name, token in list(scripts.items()):
+            tok = str(token or "").strip()
+            if tok.startswith(("NSE_FO|", "BSE_FO|", "MCX_FO|")):
+                continue
+            candidates = self._get_fo_contract_candidates(script_name)
+            if not candidates:
+                continue
+            selected = candidates[0]
+            self.config.setdefault("scripts", {})[script_name] = selected
+            self.config.setdefault("order_tokens", {})[script_name] = selected
+            cfg_lot = int(self.config.get("lot_sizes", {}).get(script_name, 0) or 0)
+            if cfg_lot <= 0:
+                lot = self._lot_size_for_instrument_key(selected)
+                if lot > 0:
+                    self.config.setdefault("lot_sizes", {})[script_name] = lot
+            self._bot_logger.info(f"INIT CONTRACT: {script_name} -> {selected}")
+
     def _get_order_quantity(self, script_name):
         """Get exchange quantity as lots multiplied by contract lot size."""
         overrides = self.config.get("order_quantity_override_by_script", {}) or {}
@@ -1076,7 +1157,11 @@ class TradingBot:
             except Exception:
                 pass
         lots = int(self.config.get('quantity', 1))
-        lot_size = int(self.config.get('lot_sizes', {}).get(script_name, 1))
+        lot_size = int(self.config.get('lot_sizes', {}).get(script_name, 0) or 0)
+        if lot_size <= 0:
+            lot_size = self._lot_size_for_instrument_key(self._get_order_token(script_name))
+            if lot_size <= 0:
+                lot_size = 1
         return max(1, lots * lot_size)
 
     @staticmethod
@@ -1153,24 +1238,10 @@ class TradingBot:
         Candidate keys for NSE_FO/BSE_FO rollovers.
         Filters by FUT + correct segment + trading_symbol root + active expiry + lot_size.
         """
-        script_roots = {
-            "NIFTY": ["NIFTY"],
-            "BANKNIFTY": ["BANKNIFTY"],
-            "SENSEX": ["SENSEX"],
-        }
-        seg = None
-        exchange = None
-        if script_name == "SENSEX":
-            seg = "BSE_FO"
-            exchange = "bse"
-        elif script_name in ("NIFTY", "BANKNIFTY"):
-            seg = "NSE_FO"
-            exchange = "nse"
-        else:
-            return []
-
-        roots = script_roots.get(script_name, [])
-        if not roots:
+        seg = "BSE_FO" if script_name == "SENSEX" else "NSE_FO"
+        exchange = "bse" if script_name == "SENSEX" else "nse"
+        roots = [str(script_name or "").strip().upper()]
+        if not roots[0]:
             return []
 
         try:
