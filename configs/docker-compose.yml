@@ -26,7 +26,8 @@ services:
     build:
       context: ..
       dockerfile: configs/docker/Dockerfile.api
-    restart: unless-stopped
+    # Bot exits cleanly at configured daily shutdown; avoid auto-restart loops.
+    restart: "no"
     command: ["python", "-u", "src/bot/trading_bot.py"]
     env_file:
       - ../.env
