@@ -126,7 +126,7 @@ export default function DashboardPage() {
   }, [perfDays]);
 
   useEffect(() => {
-    if (!token || !selectedClosedDate) {
+    if (!token) {
       return undefined;
     }
     let active = true;
