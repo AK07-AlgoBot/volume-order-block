@@ -328,7 +328,7 @@ export default function DashboardPage() {
   }, [todayDateText, token, navigate]);
 
   useEffect(() => {
-    if (!token) {
+    if (!token || !selectedClosedDate) {
       return undefined;
     }
     let active = true;
