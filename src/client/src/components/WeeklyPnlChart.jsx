@@ -46,15 +46,35 @@ export function WeeklyPnlChart({
   const isWeek = chartMode === "week";
   const points = isWeek ? weekPoints : monthPoints;
   const total = Number((isWeek ? weekTotal : monthTotal) || 0);
+  const safeWeekOptions = (weekOptions && weekOptions.length
+    ? weekOptions
+    : [
+        {
+          week_offset: Number(weekOffset ?? 0),
+          label: "Current Week",
+          range_start: "",
+          range_end: "",
+        },
+      ]);
+  const safeMonthOptions = (monthOptions && monthOptions.length
+    ? monthOptions
+    : [
+        {
+          month_offset: Number(monthOffset ?? 0),
+          label: "This Month",
+          range_start: "",
+          range_end: "",
+        },
+      ]);
   const chartData = buildCumulativeChartData(points);
   const dailyValues = chartData.map((row) => row.daily);
   const maxGain = dailyValues.length ? Math.max(...dailyValues) : 0;
   const maxLoss = dailyValues.length ? Math.min(...dailyValues) : 0;
 
-  const weekMeta = (weekOptions || []).find(
+  const weekMeta = safeWeekOptions.find(
     (o) => Number(o.week_offset) === Number(weekOffset)
   );
-  const monthMeta = (monthOptions || []).find(
+  const monthMeta = safeMonthOptions.find(
     (o) => Number(o.month_offset) === Number(monthOffset)
   );
   const rangeText = isWeek
@@ -143,14 +163,18 @@ export function WeeklyPnlChart({
           }}
         >
           {isWeek
-            ? (weekOptions || []).map((option) => (
+            ? safeWeekOptions.map((option) => (
                 <option key={option.week_offset} value={String(option.week_offset)}>
-                  {option.label} ({option.range_start} to {option.range_end})
+                  {option.range_start && option.range_end
+                    ? `${option.label} (${option.range_start} to ${option.range_end})`
+                    : option.label}
                 </option>
               ))
-            : (monthOptions || []).map((option) => (
+            : safeMonthOptions.map((option) => (
                 <option key={option.month_offset} value={String(option.month_offset)}>
-                  {option.label} ({option.range_start} to {option.range_end})
+                  {option.range_start && option.range_end
+                    ? `${option.label} (${option.range_start} to ${option.range_end})`
+                    : option.label}
                 </option>
               ))}
         </select>
