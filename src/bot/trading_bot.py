@@ -538,12 +538,12 @@ TRADING_CONFIG = {
     "trade_probability_reference_level_percent": 33.66,
     "order_block_lookback_candles": 12,  # Search depth for latest opposite candle (5m) as order block
     "chart_ob_max_active_per_side": 15,  # Match TradingView array cap per side (15)
-    # NSE-only rupee money-lock overlay:
+    # NSE-segment rupee money-lock overlay (indices + NSE-listed FO names in segment_scripts["NSE"]):
     # - At trigger_pnl, lock first lock_increment_pnl above cost.
     # - For every step_pnl extra MFE, lock one more lock_increment_pnl.
+    # Omit "scripts" to use all names under segment_scripts["NSE"] (same ₹5k trail as NIFTY/BANKNIFTY/SENSEX).
     "nse_money_lock": {
         "enabled": True,
-        "scripts": ["NIFTY", "BANKNIFTY", "SENSEX"],
         "trigger_pnl": 5000.0,
         "step_pnl": 500.0,
         "lock_increment_pnl": 500.0
