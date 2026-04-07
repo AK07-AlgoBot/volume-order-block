@@ -344,7 +344,7 @@ TRADING_CONFIG = {
         "NIFTY": "NSE_FO|51714",           # NIFTY Futures for data fetching
         "BANKNIFTY": "NSE_FO|51701",       # BANKNIFTY Futures for data fetching
         "SENSEX": "BSE_FO|825565",         # SENSEX Futures for data fetching
-        "CRUDE": "MCX_FO|472789",
+        "CRUDE": "MCX_FO|486502",
         "GOLDMINI": "MCX_FO|487665",
         "SILVERMINI": "MCX_FO|457533",
         # Liquid Nifty-50 stock futures (auto-resolved to current FO contract at runtime).
@@ -374,7 +374,7 @@ TRADING_CONFIG = {
         "NIFTY": "NSE_FO|51714",
         "BANKNIFTY": "NSE_FO|51701",
         "SENSEX": "BSE_FO|825565",
-        "CRUDE": "MCX_FO|472789",
+        "CRUDE": "MCX_FO|486502",
         "GOLDMINI": "MCX_FO|487665",
         "SILVERMINI": "MCX_FO|457533",
         "RELIANCE": "",
@@ -887,6 +887,7 @@ class TradingBot:
         self._nse_instruments_cache_at = 0.0
         self._bse_instruments_cache = []
         self._bse_instruments_cache_at = 0.0
+        self._cycle_scope_logged_once = False
         self.client._log = self._bot_logger
         # Fill blank NSE/BSE FO tokens (e.g., stock futures) on startup.
         self._seed_missing_fo_contract_tokens()
@@ -3874,6 +3875,13 @@ class TradingBot:
         """
         self.client.refresh_credentials_if_changed()
         cycle_items = list(self._scripts_for_cycle())
+        if not self._cycle_scope_logged_once:
+            self._cycle_scope_logged_once = True
+            self._bot_logger.info(
+                "CYCLE_SCOPE first loop: count=%d symbols=%s",
+                len(cycle_items),
+                ",".join(n for n, _ in cycle_items),
+            )
         batch_sleep = float(os.environ.get("UPSTOX_MARKET_FETCH_BATCH_SLEEP_SEC", "0.12"))
         batch_size = max(1, int(os.environ.get("UPSTOX_MARKET_FETCH_BATCH_SIZE", "10")))
         script_data = []
@@ -3908,6 +3916,15 @@ class TradingBot:
         self._run_eod_squareoff(now_ist, latest_prices=latest_prices)
 
         self.execute_trading_logic(script_data, allow_new_entries=allow_new_entries, now_ist=now_ist)
+
+        # Paper live P&L on the dashboard reads trading_state.json; last_polled_price updates in RAM
+        # each loop but was not persisted unless save_state ran elsewhere — sync LTP and flush.
+        if self.paper_positions:
+            for _sym, _pos in self.paper_positions.items():
+                _lp = latest_prices.get(_sym)
+                if _lp is not None:
+                    _pos["last_polled_price"] = float(_lp)
+            self.save_state()
 
         for script_name, position in self.positions.items():
             if bool(position.get("manual_execution")):
