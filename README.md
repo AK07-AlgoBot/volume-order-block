@@ -82,6 +82,40 @@ Push branch **`AK07`** runs `.github/workflows/deploy-ec2.yml`. Secrets: `EC2_HO
 
 Adjust **`-Ec2User`** and **`-RemotePath`** if your server layout differs.
 
+## Runtime data persistence (EC2 + Docker)
+
+- Runtime trading data (`orders.log`, `paper_orders.log`, archives, state) is stored in the Docker volume mounted at `/app/src/server/data` inside containers.
+- On this server, that volume maps to host path: `/var/lib/docker/volumes/configs_ak07_server_data/_data`.
+- Data written there is persistent across container restarts/rebuilds (it is not lost unless the volume is deleted).
+
+### Sync old archive data into the live Docker volume
+
+If you have old archive folders in `/root/AK07-archive`, sync them into the active API data volume:
+
+```bash
+mkdir -p /var/lib/docker/volumes/configs_ak07_server_data/_data/users/AK07/archive
+rsync -a /root/AK07-archive/ /var/lib/docker/volumes/configs_ak07_server_data/_data/users/AK07/archive/
+chmod -R a+rX /var/lib/docker/volumes/configs_ak07_server_data/_data/users/AK07/archive
+```
+
+### Restart commands
+
+Quick restart (pick up new runtime data/log files):
+
+```bash
+cd /root/volume-order-block
+docker compose -f configs/docker-compose.yml restart api bot
+```
+
+Rebuild and restart after code changes:
+
+```bash
+cd /root/volume-order-block
+git checkout AK07
+git pull origin AK07
+docker compose -f configs/docker-compose.yml up -d --build web api bot
+```
+
 ## More docs
 
 - `docs/QUICKSTART.md` — short checklist  

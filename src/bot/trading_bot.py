@@ -4017,15 +4017,18 @@ def _pid_is_running(pid: int) -> bool:
 
 def _acquire_single_instance_lock() -> bool:
     current_pid = os.getpid()
+    
+    def _write_lock_file() -> None:
+        fd = os.open(str(LOCK_FILE), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        with os.fdopen(fd, "w", encoding="utf-8") as lock_file:
+            json.dump(
+                {"pid": current_pid, "started_at": datetime.now().isoformat()},
+                lock_file
+            )
 
     for _ in range(2):
         try:
-            fd = os.open(str(LOCK_FILE), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-            with os.fdopen(fd, "w", encoding="utf-8") as lock_file:
-                json.dump(
-                    {"pid": current_pid, "started_at": datetime.now().isoformat()},
-                    lock_file
-                )
+            _write_lock_file()
 
             def _release_lock():
                 try:
@@ -4044,6 +4047,27 @@ def _acquire_single_instance_lock() -> bool:
                 existing_pid = int(payload.get("pid", -1))
             except Exception:
                 existing_pid = -1
+
+            # Docker commonly runs the app as PID 1. If a previous run left a
+            # lock with the same PID, treat it as stale-self and recover.
+            if existing_pid == current_pid:
+                LOCK_FILE.unlink(missing_ok=True)
+                try:
+                    _write_lock_file()
+                except FileExistsError:
+                    continue
+
+                def _release_lock():
+                    try:
+                        if LOCK_FILE.exists():
+                            payload = json.loads(LOCK_FILE.read_text(encoding="utf-8"))
+                            if int(payload.get("pid", -1)) == current_pid:
+                                LOCK_FILE.unlink(missing_ok=True)
+                    except Exception:
+                        pass
+
+                atexit.register(_release_lock)
+                return True
 
             # Remove stale or malformed lock and retry once.
             if existing_pid <= 0 or not _pid_is_running(existing_pid):
