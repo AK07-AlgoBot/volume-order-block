@@ -24,7 +24,9 @@ if [[ ! -f "$COMPOSE_FILE" ]]; then
   exit 1
 fi
 
-START_CMD="cd ${REPO_ROOT} && docker compose -f configs/docker-compose.yml start bot >> ${REPO_ROOT}/bot-scheduler.log 2>&1"
+# Use `up -d`, not `start`: `start` only wakes an existing stopped container; after down/deploy
+# there is no bot container, so cron would silently fail until someone runs `up` manually.
+START_CMD="cd ${REPO_ROOT} && docker compose -f configs/docker-compose.yml up -d bot >> ${REPO_ROOT}/bot-scheduler.log 2>&1"
 STOP_CMD="cd ${REPO_ROOT} && docker compose -f configs/docker-compose.yml stop bot >> ${REPO_ROOT}/bot-scheduler.log 2>&1"
 
 START_LINE="${START_MIN} ${START_HOUR} * * * ${START_CMD} # AK07_BOT_START"
