@@ -33,7 +33,8 @@ START_LINE="${START_MIN} ${START_HOUR} * * * ${START_CMD} # AK07_BOT_START"
 STOP_LINE="${STOP_MIN} ${STOP_HOUR} * * * ${STOP_CMD} # AK07_BOT_STOP"
 
 TMP_CRON="$(mktemp)"
-crontab -l 2>/dev/null | rg -v "AK07_BOT_START|AK07_BOT_STOP" > "$TMP_CRON" || true
+# Strip old bot lines and any existing CRON_TZ so we do not duplicate CRON_TZ on reinstall.
+crontab -l 2>/dev/null | rg -v "AK07_BOT_START|AK07_BOT_STOP|^CRON_TZ=" > "$TMP_CRON" || true
 
 {
   echo "CRON_TZ=Asia/Kolkata"
