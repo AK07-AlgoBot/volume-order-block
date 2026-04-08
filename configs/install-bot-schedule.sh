@@ -33,9 +33,11 @@ START_LINE="${START_MIN} ${START_HOUR} * * * ${START_CMD} # AK07_BOT_START"
 STOP_LINE="${STOP_MIN} ${STOP_HOUR} * * * ${STOP_CMD} # AK07_BOT_STOP"
 
 TMP_CRON="$(mktemp)"
-# Strip all prior AK07 bot schedule lines (including duplicates). Match bot-scheduler.log so we
-# remove start/stop even if the # AK07_BOT_* comment was edited; allow leading whitespace on CRON_TZ.
-crontab -l 2>/dev/null | rg -v '(AK07_BOT_(START|STOP)|^[[:space:]]*CRON_TZ=|bot-scheduler\.log)' > "$TMP_CRON" || true
+# Strip all prior AK07 bot schedule lines (including duplicates). Use grep -E (not rg) so minimal
+# Ubuntu images behave the same. Match compose+bot commands and CRON_TZ so nothing is left behind.
+crontab -l 2>/dev/null | grep -Ev \
+  '(AK07_BOT_(START|STOP)|^[[:space:]]*CRON_TZ=|configs/docker-compose\.yml.*(up -d bot|stop bot)|bot-scheduler)' \
+  > "$TMP_CRON" || true
 
 {
   echo "CRON_TZ=Asia/Kolkata"
@@ -51,4 +53,4 @@ echo "  START: ${START_HOUR}:${START_MIN}"
 echo "  STOP : ${STOP_HOUR}:${STOP_MIN}"
 echo
 echo "Current crontab entries:"
-crontab -l | rg "AK07_BOT_(START|STOP)|CRON_TZ=Asia/Kolkata" || true
+crontab -l | grep -E "AK07_BOT_(START|STOP)|^CRON_TZ=Asia/Kolkata" || true
