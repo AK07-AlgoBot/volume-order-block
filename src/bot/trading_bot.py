@@ -541,12 +541,19 @@ TRADING_CONFIG = {
     # NSE-segment rupee money-lock overlay (indices + NSE-listed FO names in segment_scripts["NSE"]):
     # - At trigger_pnl, lock first lock_increment_pnl above cost.
     # - For every step_pnl extra MFE, lock one more lock_increment_pnl.
-    # Omit "scripts" to use all names under segment_scripts["NSE"] (same ₹5k trail as NIFTY/BANKNIFTY/SENSEX).
+    # Omit "scripts" to use all names under segment_scripts["NSE"].
     "nse_money_lock": {
         "enabled": True,
-        "trigger_pnl": 5000.0,
+        "trigger_pnl": 3000.0,
         "step_pnl": 500.0,
         "lock_increment_pnl": 500.0
+    },
+    # NSE per-trade rupee exits (applies to scripts in segment_scripts["NSE"] unless overridden).
+    # Trailing SL behavior remains unchanged; this only sets initial SL/target placement.
+    "nse_trade_pnl_levels": {
+        "enabled": True,
+        "target_pnl": 5000.0,
+        "stop_loss_pnl": 3000.0
     },
     "loop_interval": 10,  # seconds between each check
     "contract_roll_retry_seconds": 300,  # seconds between roll attempts per script
@@ -933,6 +940,13 @@ class TradingBot:
         entry_price = position.get('entry_price', 0)
         position_type = position.get('type')
         risk_percent = self.config['trailing_stop_loss_percent'] / 100
+        quantity = float(position.get('quantity', self._get_order_quantity(script_name) if script_name else 1))
+        _, nse_target = self._nse_rupee_sl_target_prices(
+            script_name=script_name,
+            position_type=position_type,
+            entry_price=entry_price,
+            quantity=quantity,
+        )
 
         if 'initial_sl' not in position:
             if position_type == 'BUY':
@@ -965,11 +979,14 @@ class TradingBot:
             position['money_lock_pnl_locked'] = 0.0
 
         if 'target_price' not in position and entry_price > 0:
-            target_percent = self.config['target_percent'] / 100
-            if position_type == 'BUY':
-                position['target_price'] = entry_price * (1 + target_percent)
-            elif position_type == 'SELL':
-                position['target_price'] = entry_price * (1 - target_percent)
+            if nse_target is not None:
+                position['target_price'] = nse_target
+            else:
+                target_percent = self.config['target_percent'] / 100
+                if position_type == 'BUY':
+                    position['target_price'] = entry_price * (1 + target_percent)
+                elif position_type == 'SELL':
+                    position['target_price'] = entry_price * (1 - target_percent)
 
         if 'win_percent' not in position:
             position['win_percent'] = None
@@ -2015,6 +2032,31 @@ class TradingBot:
             if script_name in scripts:
                 return segment
         return None
+
+    def _nse_rupee_sl_target_prices(self, script_name, position_type, entry_price, quantity):
+        cfg = self.config.get("nse_trade_pnl_levels", {}) or {}
+        if not bool(cfg.get("enabled", True)):
+            return None, None
+        scripts = cfg.get("scripts") or self.config.get("segment_scripts", {}).get("NSE", [])
+        if not script_name or script_name not in scripts:
+            return None, None
+        if entry_price is None or float(entry_price) <= 0:
+            return None, None
+        qty = float(quantity or 0.0)
+        if qty <= 0:
+            return None, None
+
+        target_pnl = float(cfg.get("target_pnl", 5000.0))
+        stop_loss_pnl = float(cfg.get("stop_loss_pnl", 3000.0))
+        if target_pnl <= 0 or stop_loss_pnl <= 0:
+            return None, None
+
+        entry = float(entry_price)
+        if position_type == "BUY":
+            return entry - (stop_loss_pnl / qty), entry + (target_pnl / qty)
+        if position_type == "SELL":
+            return entry + (stop_loss_pnl / qty), entry - (target_pnl / qty)
+        return None, None
 
     def _segment_cutoff_dt(self, segment, now_ist):
         squareoff_times = self.config.get('eod_squareoff_times', {})
@@ -3383,7 +3425,16 @@ class TradingBot:
                         trade_prob, trade_prob_bucket = self._estimate_trade_probability(
                             script_name, True, ema_sep_pct, min_sep_pct, ob_percent, level_metrics
                         )
-                        target_price = entry_price * (1 + self.config['target_percent'] / 100)
+                        qty = self._get_order_quantity(script_name)
+                        _, nse_target = self._nse_rupee_sl_target_prices(
+                            script_name=script_name,
+                            position_type='BUY',
+                            entry_price=entry_price,
+                            quantity=qty,
+                        )
+                        target_price = nse_target if nse_target is not None else (
+                            entry_price * (1 + self.config['target_percent'] / 100)
+                        )
                         self._bot_logger.info(f"BUY signal for {script_name} at {entry_price:.2f}")
                         if is_paper_script(script_name):
                             signal_timestamp = entry_candle_timestamp
@@ -3612,7 +3663,16 @@ class TradingBot:
                         trade_prob, trade_prob_bucket = self._estimate_trade_probability(
                             script_name, True, ema_sep_pct, min_sep_pct, ob_percent, level_metrics
                         )
-                        target_price = entry_price * (1 - self.config['target_percent'] / 100)
+                        qty = self._get_order_quantity(script_name)
+                        _, nse_target = self._nse_rupee_sl_target_prices(
+                            script_name=script_name,
+                            position_type='SELL',
+                            entry_price=entry_price,
+                            quantity=qty,
+                        )
+                        target_price = nse_target if nse_target is not None else (
+                            entry_price * (1 - self.config['target_percent'] / 100)
+                        )
                         self._bot_logger.info(f"SELL signal for {script_name} at {entry_price:.2f}")
                         if is_paper_script(script_name):
                             signal_timestamp = entry_candle_timestamp
