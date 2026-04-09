@@ -1549,8 +1549,10 @@ class TradingBot:
             if instrument_type != "FUT":
                 continue
 
-            trading_symbol = str(row.get("trading_symbol", "")).upper()
-            if not any(root in trading_symbol for root in roots):
+            # Match root as the first token (e.g. "LT FUT ..."), not substring ("LT" must not match "BOSCHLTD").
+            trading_symbol = str(row.get("trading_symbol", "")).upper().strip()
+            first_tok = trading_symbol.split()[0] if trading_symbol else ""
+            if first_tok not in roots:
                 continue
 
             row_seg = str(row.get("segment", "")).upper()
