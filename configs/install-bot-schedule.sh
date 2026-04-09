@@ -26,8 +26,10 @@ fi
 
 # Use `up -d`, not `start`: `start` only wakes an existing stopped container; after down/deploy
 # there is no bot container, so cron would silently fail until someone runs `up` manually.
-START_CMD="cd ${REPO_ROOT} && docker compose -f configs/docker-compose.yml up -d bot >> ${REPO_ROOT}/bot-scheduler.log 2>&1"
-STOP_CMD="cd ${REPO_ROOT} && docker compose -f configs/docker-compose.yml stop bot >> ${REPO_ROOT}/bot-scheduler.log 2>&1"
+# Cron jobs get a minimal PATH; docker is often missing — set PATH explicitly and log each run.
+_CRON_PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+START_CMD="cd ${REPO_ROOT} && { echo \"==== \$(date -Is) AK07_BOT_START ====\"; PATH=${_CRON_PATH} docker compose -f configs/docker-compose.yml up -d bot; echo \"exit=\$?\"; } >> ${REPO_ROOT}/bot-scheduler.log 2>&1"
+STOP_CMD="cd ${REPO_ROOT} && { echo \"==== \$(date -Is) AK07_BOT_STOP ====\"; PATH=${_CRON_PATH} docker compose -f configs/docker-compose.yml stop bot; echo \"exit=\$?\"; } >> ${REPO_ROOT}/bot-scheduler.log 2>&1"
 
 START_LINE="${START_MIN} ${START_HOUR} * * * ${START_CMD} # AK07_BOT_START"
 STOP_LINE="${STOP_MIN} ${STOP_HOUR} * * * ${STOP_CMD} # AK07_BOT_STOP"
