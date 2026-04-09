@@ -50,4 +50,13 @@ AVAILABLE_SCRIPT_NAMES: tuple[str, ...] = (
     "NESTLEIND",
     "POWERGRID",
     "HCLTECH",
+    "SIEMENS",
+    "UPL",
+    "POLYCAB",
+    "APOLLOHOSP",
+    "BIOCON",
+    "MPHASIS",
+    "CUMMINSIND",
+    "ETERNAL",
+    "ADANIPORTS",
 )
