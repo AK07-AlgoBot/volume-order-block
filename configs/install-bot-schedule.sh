@@ -46,7 +46,8 @@ crontab -l 2>/dev/null | grep -Ev \
   cat "$TMP_CRON"
   echo "$START_LINE"
   echo "$STOP_LINE"
-} | awk 'NF' | crontab -
+  # Collapse exact duplicate lines (e.g. double-install or partial strip); cron order preserved for unique lines.
+} | awk 'NF' | awk '!seen[$0]++' | crontab -
 
 rm -f "$TMP_CRON"
 
