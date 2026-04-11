@@ -29,7 +29,11 @@ from app.config.paths import ensure_repo_and_lib_on_path  # noqa: E402
 from app.services.kite_historical import fetch_historical, resolve_instrument  # noqa: E402
 from order_block_backtest import (  # noqa: E402
     DirectionStats,
+    OutcomeStats,
+    daily_close_series,
+    merge_outcomes,
     merge_stats,
+    next_session_closes,
     session_end_ist,
     snapshot_analyze,
     trading_days_between,
@@ -95,7 +99,7 @@ def backtest_one_symbol(
     base: str,
     days: int,
     now: datetime | None = None,
-) -> tuple[dict[str, Any] | None, DirectionStats, DirectionStats]:
+) -> tuple[dict[str, Any] | None, DirectionStats, DirectionStats, OutcomeStats, OutcomeStats]:
     from zoneinfo import ZoneInfo
 
     IST = ZoneInfo("Asia/Kolkata")
@@ -111,6 +115,8 @@ def backtest_one_symbol(
             {"symbol": symbol, "error": "could not resolve instrument"},
             DirectionStats(),
             DirectionStats(),
+            OutcomeStats(),
+            OutcomeStats(),
         )
 
     _, token_id = resolved
@@ -126,8 +132,11 @@ def backtest_one_symbol(
     start_calendar = end_calendar - timedelta(days=days)
 
     tdays = trading_days_between(daily, start_calendar, end_calendar)
+    closes_series = daily_close_series(daily)
     intra = DirectionStats()
     pos = DirectionStats()
+    intra_o = OutcomeStats()
+    pos_o = OutcomeStats()
 
     for d in tdays:
         as_of = session_end_ist(d)
@@ -136,16 +145,23 @@ def backtest_one_symbol(
             continue
         i = snap.get("intraday") or {}
         p = snap.get("positional") or {}
-        intra.record(str(i.get("direction") or "none"), i.get("entry_probability"))
-        pos.record(str(p.get("direction") or "none"), p.get("entry_probability"))
+        idir = str(i.get("direction") or "none")
+        pdir = str(p.get("direction") or "none")
+        intra.record(idir, i.get("entry_probability"))
+        pos.record(pdir, p.get("entry_probability"))
+        pair = next_session_closes(closes_series, d)
+        intra_o.record(idir, pair)
+        pos_o.record(pdir, pair)
 
     info = {
         "symbol": symbol,
         "trading_days_in_window": len(tdays),
         "intraday": intra.to_dict(),
         "positional": pos.to_dict(),
+        "intraday_outcomes": intra_o.to_dict(),
+        "positional_outcomes": pos_o.to_dict(),
     }
-    return info, intra, pos
+    return info, intra, pos, intra_o, pos_o
 
 
 def main() -> None:
@@ -169,29 +185,40 @@ def main() -> None:
     print(f"Backtest: session-close snapshots over ~{args.days} calendar days")
     print(f"Symbols ({len(symbols)}): {', '.join(symbols)}")
     print(
-        "Note: 'probability' is the dashboard score (rule-based), not empirical win rate.\n",
+        "Dashboard 'probability' = rule-based score. Winning ratio = next session: "
+        "buy wins if next day close > signal day close; sell wins if next day close < signal day close.\n",
     )
 
     agg_intra = DirectionStats()
     agg_pos = DirectionStats()
+    agg_intra_o = OutcomeStats()
+    agg_pos_o = OutcomeStats()
     rows_out: list[dict[str, Any]] = []
 
     for sym in symbols:
-        info, intra_st, pos_st = backtest_one_symbol(sym, api_key, access_token, base, args.days)
+        info, intra_st, pos_st, intra_o, pos_o = backtest_one_symbol(
+            sym, api_key, access_token, base, args.days
+        )
         rows_out.append(info)
         if info.get("error"):
-            print(f"{sym}: ERROR — {info['error']}")
+            print(f"{sym}: ERROR - {info['error']}")
             continue
         print(f"=== {sym} - {info['trading_days_in_window']} sessions ===")
         print("  Intraday:   ", info["intraday"])
         print("  Positional:", info["positional"])
+        print("  Next-session win rate (intraday signals):  ", info["intraday_outcomes"])
+        print("  Next-session win rate (positional signals):", info["positional_outcomes"])
         print()
         agg_intra = merge_stats(agg_intra, intra_st)
         agg_pos = merge_stats(agg_pos, pos_st)
+        agg_intra_o = merge_outcomes(agg_intra_o, intra_o)
+        agg_pos_o = merge_outcomes(agg_pos_o, pos_o)
 
     print("--- All symbols combined ---")
     print("  Intraday:   ", agg_intra.to_dict())
     print("  Positional:", agg_pos.to_dict())
+    print("  Next-session outcomes (intraday):  ", agg_intra_o.to_dict())
+    print("  Next-session outcomes (positional):", agg_pos_o.to_dict())
 
     out_path = REPO / "src" / "server" / "data" / "logs" / "order_block_backtest_last.json"
     try:
@@ -203,6 +230,8 @@ def main() -> None:
             "combined": {
                 "intraday": agg_intra.to_dict(),
                 "positional": agg_pos.to_dict(),
+                "intraday_outcomes": agg_intra_o.to_dict(),
+                "positional_outcomes": agg_pos_o.to_dict(),
             },
         }
         out_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")

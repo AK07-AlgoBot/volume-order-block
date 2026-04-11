@@ -2,11 +2,15 @@
 Walk-forward backtest for order_block_logic: replay snapshots at each session end.
 
 Uses the same analyze_pack() as the dashboard; no separate "backtest engine" rules.
-Output is signal frequency and average score — not P&L (would need forward returns).
+
+Outcome stats (optional): compare signal-day daily close to the *next trading session*
+daily close — buy wins if next close > signal close; sell wins if next close < signal close.
+Ties (unchanged close) are counted as scratch and excluded from win_rate denominator.
 """
 
 from __future__ import annotations
 
+import bisect
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta
 from typing import Any
@@ -130,4 +134,101 @@ def merge_stats(a: DirectionStats, b: DirectionStats) -> DirectionStats:
         none_=a.none_ + b.none_,
         probs_buy=a.probs_buy + b.probs_buy,
         probs_sell=a.probs_sell + b.probs_sell,
+    )
+
+
+def daily_close_series(daily: list[Candle]) -> list[tuple[date, float]]:
+    """One row per calendar day (last close wins if duplicates). Chronologically sorted."""
+    by_d: dict[date, float] = {}
+    for c in daily:
+        try:
+            d = date.fromisoformat(c.ts[:10])
+        except ValueError:
+            continue
+        by_d[d] = c.close
+    return sorted(by_d.items(), key=lambda x: x[0])
+
+
+def next_session_closes(
+    series: list[tuple[date, float]], signal_day: date
+) -> tuple[float, float] | None:
+    """(close on signal_day, close on next trading day), or None if unavailable."""
+    dates = [x[0] for x in series]
+    i = bisect.bisect_left(dates, signal_day)
+    if i >= len(dates) or dates[i] != signal_day:
+        return None
+    if i + 1 >= len(series):
+        return None
+    return series[i][1], series[i + 1][1]
+
+
+def classify_next_session(direction: str, entry_close: float, next_close: float) -> str:
+    """win | loss | scratch (flat). Expects direction in buy/sell."""
+    if direction == "buy":
+        if next_close > entry_close:
+            return "win"
+        if next_close < entry_close:
+            return "loss"
+        return "scratch"
+    if direction == "sell":
+        if next_close < entry_close:
+            return "win"
+        if next_close > entry_close:
+            return "loss"
+        return "scratch"
+    raise ValueError("direction must be buy or sell")
+
+
+@dataclass
+class OutcomeStats:
+    """Empirical next-session stats for buy/sell signals only."""
+
+    wins: int = 0
+    losses: int = 0
+    scratches: int = 0
+    skipped_no_next_bar: int = 0
+
+    def record(
+        self,
+        direction: str,
+        closes: tuple[float, float] | None,
+    ) -> None:
+        if direction not in ("buy", "sell"):
+            return
+        if closes is None:
+            self.skipped_no_next_bar += 1
+            return
+        entry, nxt = closes
+        o = classify_next_session(direction, entry, nxt)
+        if o == "win":
+            self.wins += 1
+        elif o == "loss":
+            self.losses += 1
+        else:
+            self.scratches += 1
+
+    def win_rate(self) -> float | None:
+        d = self.wins + self.losses
+        return self.wins / d if d else None
+
+    def to_dict(self) -> dict[str, Any]:
+        wr = self.win_rate()
+        decided = self.wins + self.losses
+        return {
+            "wins": self.wins,
+            "losses": self.losses,
+            "scratches": self.scratches,
+            "skipped_no_next_bar": self.skipped_no_next_bar,
+            "signals_with_next_session": self.wins + self.losses + self.scratches,
+            "win_rate_next_session": round(wr, 4) if wr is not None else None,
+            "note": "win_rate = wins / (wins + losses); scratches excluded",
+        }
+
+
+def merge_outcomes(a: OutcomeStats, b: OutcomeStats) -> OutcomeStats:
+    return OutcomeStats(
+        wins=a.wins + b.wins,
+        losses=a.losses + b.losses,
+        scratches=a.scratches + b.scratches,
+        skipped_no_next_bar=a.skipped_no_next_bar + b.skipped_no_next_bar,
     )
