@@ -7,7 +7,7 @@
 #
 # Default schedule:
 # - START at 07:38 IST
-# - STOP  at 23:20 IST
+# - STOP  at 23:21 IST (aligned with bot daily_shutdown_time / TRADING_DAILY_SHUTDOWN_TIME)
 #
 # Usage:
 #   chmod +x configs/install-bot-schedule.sh
@@ -21,7 +21,7 @@ COMPOSE_FILE="${REPO_ROOT}/configs/docker-compose.yml"
 START_HOUR="${START_HOUR:-7}"
 START_MIN="${START_MIN:-38}"
 STOP_HOUR="${STOP_HOUR:-23}"
-STOP_MIN="${STOP_MIN:-20}"
+STOP_MIN="${STOP_MIN:-21}"
 
 if [[ ! -f "$COMPOSE_FILE" ]]; then
   echo "error: missing compose file at $COMPOSE_FILE" >&2
