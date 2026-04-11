@@ -60,3 +60,15 @@ AVAILABLE_SCRIPT_NAMES: tuple[str, ...] = (
     "ETERNAL",
     "ADANIPORTS",
 )
+
+# Subset for order-block backtests / reports (equity cash names).
+ORDER_BLOCK_BACKTEST_SYMBOLS: tuple[str, ...] = (
+    "UPL",
+    "POLYCAB",
+    "APOLLOHOSP",
+    "BIOCON",
+    "MPHASIS",
+    "CUMMINSIND",
+    "ETERNAL",
+    "ADANIPORTS",
+)
