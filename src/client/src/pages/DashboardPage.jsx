@@ -8,6 +8,7 @@ import { WeeklyPnlChart } from "../components/WeeklyPnlChart";
 import { OrdersLogPanel } from "../components/OrdersLogPanel";
 import { PaperTradingPanel } from "../components/PaperTradingPanel";
 import { TradingScriptsCard } from "../components/TradingScriptsCard";
+import { OrderBlockCard } from "../components/OrderBlockCard";
 import { UpstoxSettingsCard } from "../components/UpstoxSettingsCard";
 
 function getLocalDateIso() {
@@ -543,6 +544,8 @@ export default function DashboardPage() {
         <TradingScriptsCard />
 
         <UpstoxSettingsCard />
+
+        <OrderBlockCard />
 
         <div className="subtle" style={{ marginTop: "0.75rem", marginBottom: "1.5rem" }}>
           Today realized P&L: {todayRealized.toFixed(2)}

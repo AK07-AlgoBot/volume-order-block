@@ -32,8 +32,10 @@ If you still have an old **`server/data/`** tree from before this layout, move i
 pip install -r requirements.txt
 pip install -r src/server/requirements.txt
 set PYTHONPATH=src\server\src
-python -m uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
+python -m uvicorn app.main:app --reload --host 127.0.0.1 --port 8080
 ```
+
+Use port **8080** so it matches a typical Kite Connect redirect (`http://127.0.0.1:8080/kite/callback`). Use another port only if your `.env` and Kite app redirect match it.
 
 **UI**
 

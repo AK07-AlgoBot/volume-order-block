@@ -18,6 +18,11 @@ class Settings(BaseModel):
     cors_origins: list[str]
     audit_log_max_bytes: int = 5_000_000
     audit_log_backup_count: int = 5
+    # Kite Connect OAuth (https://kite.trade/docs/connect/v3/) — optional; used by /api/auth/kite/oauth/start
+    kite_api_key: str = ""
+    kite_api_secret: str = ""
+    kite_redirect_url: str = ""
+    kite_post_login_redirect: str = ""
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -39,6 +44,10 @@ class Settings(BaseModel):
             cors_origins=origins,
             audit_log_max_bytes=int(os.environ.get("AUDIT_LOG_MAX_BYTES", "5000000")),
             audit_log_backup_count=int(os.environ.get("AUDIT_LOG_BACKUP_COUNT", "5")),
+            kite_api_key=(os.environ.get("KITE_API_KEY") or "").strip(),
+            kite_api_secret=(os.environ.get("KITE_API_SECRET") or "").strip(),
+            kite_redirect_url=(os.environ.get("KITE_REDIRECT_URL") or "").strip(),
+            kite_post_login_redirect=(os.environ.get("KITE_POST_LOGIN_REDIRECT") or "").strip(),
         )
 
     def user_data_dir(self, username: str) -> Path:

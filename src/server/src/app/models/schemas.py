@@ -33,6 +33,14 @@ class UpstoxSettingsBody(BaseModel):
     base_url: str = ""
 
 
+class BrokerCredentialsBody(BaseModel):
+    broker: Literal["upstox", "zerodha"] = "upstox"
+    access_token: str = ""
+    api_key: str = ""
+    api_secret: str = ""
+    base_url: str = ""
+
+
 class TradingScriptsBody(BaseModel):
     """enabled_scripts=null means trade all configured symbols; otherwise a non-empty subset."""
 
@@ -54,3 +62,9 @@ class TokenResponse(BaseModel):
 class UserPublic(BaseModel):
     username: str
     role: str
+
+
+class OrderBlockBody(BaseModel):
+    """Equity / symbol for Kite order-block style analysis (e.g. RELIANCE or NSE:RELIANCE-EQ)."""
+
+    symbol: str = Field(..., min_length=1, max_length=64)

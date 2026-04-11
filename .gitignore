@@ -23,6 +23,8 @@ market_status.log
 
 # Server runtime data (under src/server/)
 src/server/data/users/
+src/server/data/kite_oauth_pending/
+src/server/data/cache/
 src/server/data/logs/
 src/server/data/users_auth.json
 src/server/.env

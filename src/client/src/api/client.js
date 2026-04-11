@@ -3,15 +3,15 @@ function runtimeApiBase() {
   if (env) {
     return env.replace(/\/$/, "");
   }
-  // Vite dev serves the UI on :5173; the API runs on :8000. Same-origin only applies when
-  // nginx (or similar) proxies /api to the backend (e.g. Docker production build).
+  // Vite dev serves the UI on :5173. Default API :8080 so it matches Kite's redirect
+  // (e.g. http://127.0.0.1:8080/kite/callback). Override with VITE_DASHBOARD_API_BASE.
   if (import.meta.env.DEV) {
-    return "http://127.0.0.1:8000";
+    return "http://127.0.0.1:8080";
   }
   if (typeof window !== "undefined" && window.location?.origin) {
     return window.location.origin;
   }
-  return "http://127.0.0.1:8000";
+  return "http://127.0.0.1:8080";
 }
 
 const TOKEN_KEY = "ak07_access_token";

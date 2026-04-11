@@ -35,3 +35,16 @@ def ensure_repo_and_lib_on_path() -> None:
         s = str(p)
         if s not in sys.path:
             sys.path.insert(0, s)
+
+
+def _load_repo_dotenv() -> None:
+    try:
+        from dotenv import load_dotenv
+    except ImportError:
+        return
+    env_file = repo_root() / ".env"
+    if env_file.is_file():
+        load_dotenv(env_file, override=False)
+
+
+_load_repo_dotenv()

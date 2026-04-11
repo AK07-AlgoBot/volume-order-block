@@ -129,18 +129,18 @@ if (-not (Test-Path (Join-Path $uiPath "node_modules"))) {
     }
 }
 
-$apiUp = Test-HttpEndpoint -Url "http://127.0.0.1:8000/api/health"
+$apiUp = Test-HttpEndpoint -Url "http://127.0.0.1:8080/api/health"
 $uiUp = Test-HttpEndpoint -Url "http://127.0.0.1:5173"
 $serverSrc = Join-Path $repoRoot "src\server\src"
 
 if ($apiUp -and -not $Force) {
-    Write-Host "API already running on http://localhost:8000 (use -Force to start another)."
+    Write-Host "API already running on http://localhost:8080 (use -Force to start another)."
 }
 else {
     Start-ManagedProcess -Name "Dashboard API" -WorkingDirectory $repoRoot -Command @"
 Set-Location '$repoRoot'
 `$env:PYTHONPATH = '$serverSrc'
-python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+python -m uvicorn app.main:app --host 0.0.0.0 --port 8080 --reload
 "@
 }
 
@@ -200,7 +200,7 @@ python src\bot\trading_bot.py
 Write-Host ""
 Write-Host "All launch commands sent."
 Write-Host "Dashboard UI: http://localhost:5173"
-Write-Host "Dashboard API: http://localhost:8000"
+Write-Host "Dashboard API: http://localhost:8080"
 Write-Host ""
 Write-Host "Tip: Use .\start.ps1 -Force to start new API/UI instances even if ports are already active."
 Write-Host "Tip: Use .\start.ps1 -UsePreviewUI:`$false for Vite dev server."
