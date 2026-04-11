@@ -1,4 +1,8 @@
-pandas>=2.0.0
-numpy>=1.24.0
-requests>=2.31.0
-colorama>=0.4.6
+# Install: pip install -r requirements.txt
+# Or: pip install -e .
+
+fastapi>=0.115.0
+uvicorn[standard]>=0.32.0
+kiteconnect>=5.0.0
+pydantic-settings>=2.6.0
+itsdangerous>=2.2.0

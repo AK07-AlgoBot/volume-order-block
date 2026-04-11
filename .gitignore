@@ -2,8 +2,7 @@
 __pycache__/
 *.py[cod]
 *$py.class
-*.so
-.Python
+.venv/
 venv/
 env/
 ENV/
@@ -11,49 +10,13 @@ ENV/
 dist/
 build/
 
-# Trading Bot Files (per-user under server/data/users/)
-trading_state.json
-trading_bot.lock
-trading_bot.log
-trading_log.txt
-live_status.log
-orders.log
-market_status.log
-*.log
+# Environment & secrets (never commit)
+.env
+.env.*
+!.env.example
 
-# Server runtime data (auth, per-user logs, audit)
-server/data/users/
-server/data/logs/
-server/data/users_auth.json
-server/.env
-client/.env
-
-# Old files
-old/
-backup/
-archive/*
-!archive/unused/
-!archive/unused/**
-
-# IDE
+# IDE / OS
 .vscode/
 .idea/
-*.swp
-*.swo
-*~
-
-# OS
 .DS_Store
 Thumbs.db
-
-# Local tooling/build
-.tools/
-client/node_modules/
-client/dist/
-
-# Sensitive
-config.json
-.env
-*.key
-*.token
-upstox_credentials.json
