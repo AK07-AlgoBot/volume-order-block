@@ -30,7 +30,7 @@ LOT_SIZES = {
 
 LINE_PATTERN = re.compile(
     r"^(?P<ts>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3}) - "
-    r"(?P<script>[^|]+) \| ACTION=(?P<action>ENTRY|EXIT) \| SIDE=(?P<side>BUY|SELL) "
+    r"(?P<script>[^|]+) \| ACTION=(?P<action>ENTRY|EXIT|MANUAL_TRACK_START|MANUAL_CLOSE_NEEDED) \| SIDE=(?P<side>BUY|SELL) "
     r"\| PRICE=(?P<price>\d+(?:\.\d+)?)"
 )
 PAPER_LINE_PATTERN = re.compile(
@@ -82,13 +82,22 @@ class TradeUserContext:
     def _load_manual_controls(self) -> dict:
         path = self._manual_controls_path
         if not path.is_file():
-            return {"ignored_trade_ids": [], "entry_price_overrides": {}}
+            return {
+                "ignored_trade_ids": [],
+                "entry_price_overrides": {},
+                "closed_trade_overrides": {},
+            }
         try:
             raw = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError, TypeError):
-            return {"ignored_trade_ids": [], "entry_price_overrides": {}}
+            return {
+                "ignored_trade_ids": [],
+                "entry_price_overrides": {},
+                "closed_trade_overrides": {},
+            }
         ignored = raw.get("ignored_trade_ids") or []
         overrides = raw.get("entry_price_overrides") or {}
+        closed_overrides = raw.get("closed_trade_overrides") or {}
         return {
             "ignored_trade_ids": [str(x) for x in ignored if str(x).strip()],
             "entry_price_overrides": {
@@ -96,12 +105,18 @@ class TradeUserContext:
                 for k, v in dict(overrides).items()
                 if str(k).strip()
             },
+            "closed_trade_overrides": {
+                str(k): v
+                for k, v in dict(closed_overrides).items()
+                if str(k).strip() and isinstance(v, dict)
+            },
         }
 
     def _save_manual_controls(self, controls: dict) -> None:
         payload = {
             "ignored_trade_ids": list(dict.fromkeys(controls.get("ignored_trade_ids") or [])),
             "entry_price_overrides": controls.get("entry_price_overrides") or {},
+            "closed_trade_overrides": controls.get("closed_trade_overrides") or {},
             "updated_at": datetime.utcnow().isoformat(),
         }
         self._manual_controls_path.write_text(
@@ -241,13 +256,19 @@ class TradeUserContext:
                 match = LINE_PATTERN.search(stripped)
                 if not match:
                     continue
+                raw_action = match.group("action")
+                action = (
+                    "ENTRY"
+                    if raw_action == "MANUAL_TRACK_START"
+                    else "EXIT" if raw_action == "MANUAL_CLOSE_NEEDED" else raw_action
+                )
                 order_id_match = ORDER_ID_PATTERN.search(stripped)
                 order_id = order_id_match.group("order_id") if order_id_match else ""
                 parsed_events.append(
                     (
                         self._parse_ts(match.group("ts")),
                         match.group("script").strip(),
-                        match.group("action"),
+                        action,
                         match.group("side"),
                         float(match.group("price")),
                         order_id,
@@ -379,38 +400,15 @@ class TradeUserContext:
         return None
 
     def _daily_realized_pnl_for_days(self, calendar_days: list[date]) -> list[dict]:
-        """Realized P&L attributed to EXIT timestamp's calendar date (naive log time = IST wall clock)."""
+        """Realized P&L attributed to closed_at calendar date."""
         day_set = set(calendar_days)
         pnl_by_date = {day: 0.0 for day in calendar_days}
-
-        parsed_events = self._parse_order_events()
-        if not parsed_events:
-            return [{"date": day.strftime("%Y-%m-%d"), "pnl": 0.0} for day in calendar_days]
-        entries = defaultdict(deque)
-
-        for ts, script, action, side, price, _order_id in parsed_events:
-            if action == "ENTRY":
-                entries[script].append({"side": side, "price": price, "ts": ts})
+        effective = self._effective_closed_trades(limit=5000)
+        for trade in effective:
+            d = self._closed_at_calendar_date(trade)
+            if d is None or d not in day_set:
                 continue
-
-            if not entries[script]:
-                continue
-
-            entry = self._pop_matching_entry(entries[script], side)
-            if entry is None:
-                continue
-            lot = LOT_SIZES.get(script, 1)
-
-            if entry["side"] == "BUY" and side == "SELL":
-                points = price - entry["price"]
-            elif entry["side"] == "SELL" and side == "BUY":
-                points = entry["price"] - price
-            else:
-                points = 0.0
-
-            trade_day = ts.date()
-            if trade_day in day_set:
-                pnl_by_date[trade_day] += points * lot
+            pnl_by_date[d] += float(trade.get("realized_pnl") or 0.0)
 
         return [
             {"date": day.strftime("%Y-%m-%d"), "pnl": round(pnl_by_date[day], 2)}
@@ -802,8 +800,74 @@ class TradeUserContext:
                 by_open_identity[key] = trade
 
         merged = self._dedupe_closed_trades(list(by_open_identity.values()))
+        merged = self._apply_closed_trade_overrides(merged)
         merged.sort(key=lambda t: t.get("closed_at") or "", reverse=True)
         return merged[:limit]
+
+    def _apply_closed_trade_overrides(self, trades: list[dict]) -> list[dict]:
+        controls = self._load_manual_controls()
+        overrides = controls.get("closed_trade_overrides") or {}
+        if not overrides:
+            return trades
+        out: list[dict] = []
+        for t in trades:
+            tid = str(t.get("id") or "")
+            ov = overrides.get(tid)
+            if not ov:
+                out.append(t)
+                continue
+            row = dict(t)
+            if ov.get("entry_price") is not None:
+                row["entry_price"] = float(ov["entry_price"])
+            if ov.get("exit_price") is not None:
+                row["exit_price"] = float(ov["exit_price"])
+            qty = float(row.get("quantity") or 0.0)
+            side = str(row.get("side") or "").upper()
+            entry = float(row.get("entry_price") or 0.0)
+            exit_p = float(row.get("exit_price") or 0.0)
+            if side == "BUY":
+                realized = (exit_p - entry) * qty
+            elif side == "SELL":
+                realized = (entry - exit_p) * qty
+            else:
+                realized = 0.0
+            row["realized_pnl"] = round(realized, 2)
+            out.append(row)
+        return out
+
+    def update_closed_trade_prices(
+        self,
+        trade_id: str,
+        entry_price: float | None = None,
+        exit_price: float | None = None,
+    ) -> dict:
+        if entry_price is None and exit_price is None:
+            raise ValueError("provide entry_price or exit_price")
+        current = None
+        for t in self._effective_closed_trades(limit=5000):
+            if str(t.get("id") or "") == str(trade_id):
+                current = t
+                break
+        if not current:
+            raise ValueError("closed trade not found")
+        controls = self._load_manual_controls()
+        mapping = dict(controls.get("closed_trade_overrides") or {})
+        prev = dict(mapping.get(trade_id) or {})
+        if entry_price is not None:
+            prev["entry_price"] = float(entry_price)
+        if exit_price is not None:
+            prev["exit_price"] = float(exit_price)
+        mapping[trade_id] = prev
+        controls["closed_trade_overrides"] = mapping
+        self._save_manual_controls(controls)
+        updated = None
+        for t in self._effective_closed_trades(limit=5000):
+            if str(t.get("id") or "") == str(trade_id):
+                updated = t
+                break
+        if not updated:
+            raise ValueError("closed trade not found after update")
+        return updated
 
     def _closed_trade_dates(self, trades: list[dict]) -> list[str]:
         dates = {d for d in (self._trade_date_text(trade) for trade in trades) if d}

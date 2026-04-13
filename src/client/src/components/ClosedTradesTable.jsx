@@ -15,6 +15,7 @@ export function ClosedTradesTable({
   selectedDate = "",
   onDateChange,
   title = "Closed Trades",
+  onEditClosedTrade,
 }) {
   const dateOptions = availableDates.length > 0 ? availableDates : selectedDate ? [selectedDate] : [];
 
@@ -52,6 +53,7 @@ export function ClosedTradesTable({
             <col className="col-pnl" />
             <col className="col-datetime" />
             <col className="col-datetime" />
+            <col className="col-actions" />
           </colgroup>
           <thead>
             <tr>
@@ -63,12 +65,13 @@ export function ClosedTradesTable({
               <th className="col-center-num">Realized P&L</th>
               <th className="col-left">Opened At</th>
               <th className="col-left">Closed At</th>
+              <th className="col-left">Actions</th>
             </tr>
           </thead>
           <tbody>
             {trades.length === 0 ? (
               <tr>
-                <td className="empty" colSpan={8}>
+                <td className="empty" colSpan={9}>
                   No closed trades yet
                 </td>
               </tr>
@@ -85,6 +88,15 @@ export function ClosedTradesTable({
                     <td className={`col-center-num ${pnl >= 0 ? "pnl-pos" : "pnl-neg"}`}>{pnl.toFixed(2)}</td>
                     <td className="col-left date-cell">{formatTimestamp(trade.opened_at)}</td>
                     <td className="col-left date-cell">{formatTimestamp(trade.closed_at)}</td>
+                    <td className="col-left">
+                      <button
+                        type="button"
+                        className="manual-btn"
+                        onClick={() => onEditClosedTrade?.(trade)}
+                      >
+                        Edit prices
+                      </button>
+                    </td>
                   </tr>
                 );
               })

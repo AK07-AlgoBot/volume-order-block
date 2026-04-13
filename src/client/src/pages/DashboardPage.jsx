@@ -494,6 +494,59 @@ export default function DashboardPage() {
     }
   };
 
+  const onEditClosedTrade = async (trade) => {
+    const nextEntry = window.prompt(
+      `Entry price for ${trade?.symbol || ""}:`,
+      Number(trade?.entry_price || 0).toFixed(2)
+    );
+    if (nextEntry === null) return;
+    const nextExit = window.prompt(
+      `Exit price for ${trade?.symbol || ""}:`,
+      Number(trade?.exit_price || 0).toFixed(2)
+    );
+    if (nextExit === null) return;
+    const e = Number(nextEntry);
+    const x = Number(nextExit);
+    if (!Number.isFinite(e) || e <= 0 || !Number.isFinite(x) || x <= 0) {
+      window.alert("Enter valid positive entry and exit prices.");
+      return;
+    }
+    try {
+      const res = await apiFetch("/api/dashboard/manual-trade/update-closed", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ trade_id: trade.id, entry_price: e, exit_price: x }),
+      });
+      const payload = await res.json();
+      if (!res.ok) {
+        throw new Error(payload?.detail || "Failed to update closed trade prices");
+      }
+      apiFetch(`/api/dashboard/closed-trades?date=${encodeURIComponent(selectedClosedDateRef.current)}`)
+        .then((r) => r.json())
+        .then((p) => {
+          setClosedTrades(p.closed_trades || []);
+          setClosedTradeDates(p.closed_trade_dates || []);
+        });
+      apiFetch(`/api/dashboard/weekly-pnl?week_offset=${encodeURIComponent(selectedWeekOffsetRef.current)}`)
+        .then((r) => r.json())
+        .then((p) => {
+          setWeeklyPnl(p.weekly_pnl || []);
+          setWeeklyTotal(Number(p.weekly_total || 0));
+          setWeeklyFilterOptions(p.weekly_filter_options || []);
+          if (p.ist_month) setIstMonth(p.ist_month);
+        });
+      apiFetch(`/api/dashboard/monthly-pnl?month_offset=${encodeURIComponent(selectedMonthOffsetRef.current)}`)
+        .then((r) => r.json())
+        .then((p) => {
+          setMonthlyPnl(p.monthly_pnl || []);
+          setMonthlyTotal(Number(p.monthly_total || 0));
+          setMonthlyFilterOptions(p.monthly_filter_options || []);
+        });
+    } catch (err) {
+      window.alert(err?.message || "Failed to update closed trade prices");
+    }
+  };
+
   if (!token) {
     return null;
   }
@@ -588,6 +641,7 @@ export default function DashboardPage() {
             availableDates={closedTradeDates}
             selectedDate={selectedClosedDate}
             onDateChange={setSelectedClosedDate}
+            onEditClosedTrade={onEditClosedTrade}
           />
         </div>
 

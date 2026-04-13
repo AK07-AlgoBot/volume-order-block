@@ -32,6 +32,12 @@ class ManualTradeRemoveBody(BaseModel):
     trade_id: str = Field(..., min_length=1, max_length=256)
 
 
+class ManualClosedTradeUpdateBody(BaseModel):
+    trade_id: str = Field(..., min_length=1, max_length=256)
+    entry_price: float | None = Field(default=None, gt=0)
+    exit_price: float | None = Field(default=None, gt=0)
+
+
 class WeeklyPnlPoint(BaseModel):
     date: str
     pnl: float
