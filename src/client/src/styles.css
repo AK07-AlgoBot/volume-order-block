@@ -231,6 +231,10 @@ table {
   width: 168px;
 }
 
+.trade-table .col-actions {
+  width: 150px;
+}
+
 th,
 td {
   padding: 0.62rem 0.45rem;
@@ -259,6 +263,30 @@ td:first-child {
 
 tr:last-child td {
   border-bottom: 0;
+}
+
+.manual-actions {
+  display: inline-flex;
+  gap: 0.35rem;
+}
+
+.manual-btn {
+  border: 1px solid #334155;
+  background: rgba(15, 23, 42, 0.95);
+  color: #cbd5e1;
+  border-radius: 6px;
+  padding: 0.2rem 0.45rem;
+  font-size: 0.72rem;
+  cursor: pointer;
+}
+
+.manual-btn:hover {
+  border-color: #64748b;
+}
+
+.manual-btn.danger {
+  border-color: #7f1d1d;
+  color: #fca5a5;
 }
 
 .buy {

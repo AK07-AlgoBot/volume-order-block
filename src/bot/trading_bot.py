@@ -125,10 +125,17 @@ def send_trade_notification(trade: dict, chat_id: int | str = None) -> bool:
         "PORTFOLIO_STOP",
     }
 
-    if reason in exit_reasons:
+    note_upper = str(note or "").upper()
+
+    if reason == "TRAILING_SL_UPDATED":
+        title = "🟣 *Trailing SL Updated*"
+    elif reason in exit_reasons:
         title = "🔴 *Trade Closed*"
     elif reason == "ORDER_FAILED":
-        title = "🟠 *Manual Action Required*"
+        if "CLOSE MANUALLY" in note_upper:
+            title = "🟠 *Manual EXIT Required*"
+        else:
+            title = "🟠 *Manual ENTRY Required*"
     elif reason in entry_reasons:
         title = "🟢 *New Trade Executed*"
     else:
@@ -1160,6 +1167,7 @@ class TradingBot:
             "realized_pnl": None,
             "opened_at": opened_at,
             "closed_at": None,
+            "manual_execution": bool(position.get("manual_execution")),
         }
 
         if exit_price is not None:
@@ -2915,6 +2923,22 @@ class TradingBot:
                 # Update stepped trailing SL as per strategy
                 sl_updated = self._update_position_sl(script_name, position, current_price)
                 if sl_updated:
+                    if bool(position.get("manual_execution")) and telegram_notifications_enabled_for_user(self.username):
+                        exit_side = "SELL" if position["type"] == "BUY" else "BUY"
+                        _ = send_trade_notification(
+                            {
+                                "account": self.username,
+                                "symbol": script_name,
+                                "action": exit_side,
+                                "quantity": float(position.get("quantity", self._get_order_quantity(script_name))),
+                                "price": float(current_price),
+                                "reason": "TRAILING_SL_UPDATED",
+                                "stop_loss": float(position.get("stop_loss", current_price)),
+                                "target_price": float(position.get("target_price", current_price)),
+                                "note": "Manual trade - keep broker SL in sync",
+                                "timestamp": self._now_ist(),
+                            }
+                        )
                     self.save_state()
 
                 # Stop loss check
@@ -3607,6 +3631,9 @@ class TradingBot:
                                     f"{script_name} | ACTION=MANUAL_TRACK_START | SIDE=BUY | PRICE={entry_price:.2f} "
                                     f"| REASON=MCX_API_DISABLED | sl={initial_sl:.2f}; target={target_price:.2f}"
                                 )
+                                self._notify_dashboard_trade_open(
+                                    script_name, self.positions[script_name], entry_price
+                                )
                                 self.save_state()
                             self.last_entry_candle_processed[script_name] = entry_candle_timestamp
                             continue
@@ -3845,6 +3872,9 @@ class TradingBot:
                                     f"{script_name} | ACTION=MANUAL_TRACK_START | SIDE=SELL | PRICE={entry_price:.2f} "
                                     f"| REASON=MCX_API_DISABLED | sl={initial_sl:.2f}; target={target_price:.2f}"
                                 )
+                                self._notify_dashboard_trade_open(
+                                    script_name, self.positions[script_name], entry_price
+                                )
                                 self.save_state()
                             self.last_entry_candle_processed[script_name] = entry_candle_timestamp
                             continue
@@ -3930,6 +3960,51 @@ class TradingBot:
                     return
                 time.sleep(1)
 
+    def _apply_manual_controls_from_disk(self) -> None:
+        path = user_data_dir(self.username) / "manual_trade_controls.json"
+        if not path.is_file():
+            return
+        try:
+            controls = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            return
+        ignored_ids = {str(x) for x in (controls.get("ignored_trade_ids") or []) if str(x).strip()}
+        overrides = controls.get("entry_price_overrides") or {}
+        changed = False
+        for script_name in list(self.positions.keys()):
+            pos = self.positions.get(script_name)
+            if not isinstance(pos, dict) or not bool(pos.get("manual_execution")):
+                continue
+            trade_id = str(pos.get("trade_id") or "")
+            if trade_id and trade_id in ignored_ids:
+                self._bot_logger.info(
+                    f"MANUAL TRACK DISMISSED from dashboard: {script_name} trade_id={trade_id}"
+                )
+                self.positions.pop(script_name, None)
+                changed = True
+                continue
+            ov = overrides.get(trade_id)
+            if ov is None:
+                continue
+            try:
+                new_entry = float(ov)
+            except (TypeError, ValueError):
+                continue
+            if new_entry <= 0:
+                continue
+            old_entry = float(pos.get("entry_price") or 0.0)
+            if abs(new_entry - old_entry) < 1e-9:
+                continue
+            pos["entry_price"] = new_entry
+            pos["manual_entry_price"] = new_entry
+            pos["manual_entry_updated_at"] = datetime.now().isoformat()
+            self._bot_logger.info(
+                f"MANUAL ENTRY OVERRIDE applied: {script_name} {old_entry:.2f} -> {new_entry:.2f}"
+            )
+            changed = True
+        if changed:
+            self.save_state()
+
     def _scripts_for_cycle(self) -> list[tuple[str, str]]:
         """Symbols to fetch this loop: user scope ∪ open positions (order preserved from TRADING_CONFIG)."""
         prefs = read_trading_preferences(self.username)
@@ -3965,6 +4040,7 @@ class TradingBot:
         - "shutdown_all" — daily shutdown (runner stops every account)
         """
         self.client.refresh_credentials_if_changed()
+        self._apply_manual_controls_from_disk()
         cycle_items = list(self._scripts_for_cycle())
         if not self._cycle_scope_logged_once:
             self._cycle_scope_logged_once = True

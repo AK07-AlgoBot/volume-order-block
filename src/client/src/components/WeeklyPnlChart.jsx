@@ -88,6 +88,12 @@ export function WeeklyPnlChart({
   const mtd = istMonth || {};
   const mtdTotal = Number(mtd.total ?? 0);
   const currentWeekTotal = Number(weekTotal || 0);
+  const usingSelectedMonth = !isWeek;
+  const monthHeadlineValue = usingSelectedMonth ? total : mtdTotal;
+  const monthHeadlineLabel =
+    usingSelectedMonth && Number(monthOffset || 0) > 0
+      ? "Selected month (IST)"
+      : "Month to date (IST)";
 
   return (
     <div className="card">
@@ -109,9 +115,9 @@ export function WeeklyPnlChart({
             </span>
           </div>
           <div className="ist-month-line">
-            Month to date (IST):{" "}
-            <span className={mtdTotal >= 0 ? "pnl-pos" : "pnl-neg"} style={{ fontWeight: 700 }}>
-              {mtdTotal.toFixed(2)}
+            {monthHeadlineLabel}:{" "}
+            <span className={monthHeadlineValue >= 0 ? "pnl-pos" : "pnl-neg"} style={{ fontWeight: 700 }}>
+              {monthHeadlineValue.toFixed(2)}
             </span>
           </div>
         </div>

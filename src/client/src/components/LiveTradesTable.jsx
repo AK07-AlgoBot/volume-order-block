@@ -19,7 +19,13 @@ function isProfitLocked(trade) {
   return false;
 }
 
-export function LiveTradesTable({ trades, title = "Live Trades" }) {
+export function LiveTradesTable({
+  trades,
+  title = "Live Trades",
+  onEditManualEntry,
+  onRemoveManualTrade,
+  busyTradeId = "",
+}) {
   return (
     <div className="card">
       <h2>{title}</h2>
@@ -37,6 +43,7 @@ export function LiveTradesTable({ trades, title = "Live Trades" }) {
             <col className="col-win" />
             <col className="col-pnl" />
             <col className="col-datetime" />
+            <col className="col-actions" />
           </colgroup>
           <thead>
             <tr>
@@ -50,12 +57,13 @@ export function LiveTradesTable({ trades, title = "Live Trades" }) {
               <th className="col-center-num">Win %</th>
               <th className="col-center-num">Unrealized P&L</th>
               <th className="col-left">Opened At</th>
+              <th className="col-left">Actions</th>
             </tr>
           </thead>
           <tbody>
             {trades.length === 0 ? (
               <tr>
-                <td className="empty" colSpan={10}>
+                <td className="empty" colSpan={11}>
                   No live trades
                 </td>
               </tr>
@@ -77,6 +85,8 @@ export function LiveTradesTable({ trades, title = "Live Trades" }) {
                   rawWin !== undefined &&
                   String(rawWin).trim() !== "" &&
                   Number.isFinite(win);
+                const isManual = !!trade.manual_execution;
+                const isBusy = busyTradeId && busyTradeId === trade.id;
                 return (
                   <tr key={trade.id}>
                     <td className="col-left">{trade.symbol}</td>
@@ -94,6 +104,30 @@ export function LiveTradesTable({ trades, title = "Live Trades" }) {
                     <td className="col-center-num">{hasWin ? `${win.toFixed(1)}%` : "-"}</td>
                     <td className={`col-center-num ${pnl >= 0 ? "pnl-pos" : "pnl-neg"}`}>{pnl.toFixed(2)}</td>
                     <td className="col-left date-cell">{formatTimestamp(trade.opened_at)}</td>
+                    <td className="col-left">
+                      {isManual ? (
+                        <div className="manual-actions">
+                          <button
+                            type="button"
+                            className="manual-btn"
+                            disabled={isBusy}
+                            onClick={() => onEditManualEntry?.(trade)}
+                          >
+                            Edit entry
+                          </button>
+                          <button
+                            type="button"
+                            className="manual-btn danger"
+                            disabled={isBusy}
+                            onClick={() => onRemoveManualTrade?.(trade)}
+                          >
+                            Remove
+                          </button>
+                        </div>
+                      ) : (
+                        "-"
+                      )}
+                    </td>
                   </tr>
                 );
               })

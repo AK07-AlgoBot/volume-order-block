@@ -19,6 +19,17 @@ class Trade(BaseModel):
     realized_pnl: float | None = None
     opened_at: str
     closed_at: str | None = None
+    manual_execution: bool | None = None
+    entry_price_overridden: bool | None = None
+
+
+class ManualEntryUpdateBody(BaseModel):
+    trade_id: str = Field(..., min_length=1, max_length=256)
+    entry_price: float = Field(..., gt=0)
+
+
+class ManualTradeRemoveBody(BaseModel):
+    trade_id: str = Field(..., min_length=1, max_length=256)
 
 
 class WeeklyPnlPoint(BaseModel):

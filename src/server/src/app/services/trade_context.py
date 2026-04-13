@@ -71,6 +71,70 @@ class TradeUserContext:
         (self.paths.user_root / "logs").mkdir(parents=True, exist_ok=True)
         self.paths.archive_root.mkdir(parents=True, exist_ok=True)
 
+    @property
+    def _manual_controls_path(self) -> Path:
+        return self.paths.user_root / "manual_trade_controls.json"
+
+    @property
+    def _state_path(self) -> Path:
+        return self.paths.user_root / "trading_state.json"
+
+    def _load_manual_controls(self) -> dict:
+        path = self._manual_controls_path
+        if not path.is_file():
+            return {"ignored_trade_ids": [], "entry_price_overrides": {}}
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError, TypeError):
+            return {"ignored_trade_ids": [], "entry_price_overrides": {}}
+        ignored = raw.get("ignored_trade_ids") or []
+        overrides = raw.get("entry_price_overrides") or {}
+        return {
+            "ignored_trade_ids": [str(x) for x in ignored if str(x).strip()],
+            "entry_price_overrides": {
+                str(k): float(v)
+                for k, v in dict(overrides).items()
+                if str(k).strip()
+            },
+        }
+
+    def _save_manual_controls(self, controls: dict) -> None:
+        payload = {
+            "ignored_trade_ids": list(dict.fromkeys(controls.get("ignored_trade_ids") or [])),
+            "entry_price_overrides": controls.get("entry_price_overrides") or {},
+            "updated_at": datetime.utcnow().isoformat(),
+        }
+        self._manual_controls_path.write_text(
+            json.dumps(payload, indent=2),
+            encoding="utf-8",
+        )
+
+    def _read_state(self) -> dict:
+        if not self._state_path.is_file():
+            return {}
+        try:
+            return json.loads(self._state_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError, TypeError):
+            return {}
+
+    def _write_state(self, state: dict) -> None:
+        self._state_path.parent.mkdir(parents=True, exist_ok=True)
+        self._state_path.write_text(json.dumps(state, indent=2), encoding="utf-8")
+
+    @staticmethod
+    def _calc_unrealized(side: str, entry: float, last_price: float, quantity: float) -> float:
+        if side == "BUY":
+            return (last_price - entry) * quantity
+        if side == "SELL":
+            return (entry - last_price) * quantity
+        return 0.0
+
+    def _append_manual_log_line(self, message: str) -> None:
+        line = f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S,%f')[:-3]} - {message}\n"
+        self.paths.orders_log.parent.mkdir(parents=True, exist_ok=True)
+        with self.paths.orders_log.open("a", encoding="utf-8") as f:
+            f.write(line)
+
     def _sort_closed_trades(self) -> None:
         self.closed_trades.sort(
             key=lambda t: t.get("closed_at") or "",
@@ -594,6 +658,22 @@ class TradeUserContext:
         return list(deduped_by_key.values())
 
     def upsert_live_trade(self, payload: dict) -> None:
+        controls = self._load_manual_controls()
+        ignored_ids = set(controls.get("ignored_trade_ids") or [])
+        trade_id = str(payload.get("id") or "").strip()
+        if trade_id in ignored_ids:
+            return
+        override_price = (controls.get("entry_price_overrides") or {}).get(trade_id)
+        if override_price is not None:
+            payload["entry_price"] = float(override_price)
+            side = str(payload.get("side") or "").upper()
+            qty = float(payload.get("quantity") or 0.0)
+            last_price = float(payload.get("last_price") or payload.get("entry_price") or 0.0)
+            payload["unrealized_pnl"] = round(
+                self._calc_unrealized(side, float(override_price), last_price, qty),
+                2,
+            )
+            payload["entry_price_overridden"] = True
         target_key = self._live_trade_identity_key(payload)
         stale_ids = []
         for trade_id, existing in self.live_trades.items():
@@ -604,6 +684,87 @@ class TradeUserContext:
         for trade_id in stale_ids:
             self.live_trades.pop(trade_id, None)
         self.live_trades[payload["id"]] = payload
+
+    async def update_manual_entry_price(self, trade_id: str, entry_price: float) -> dict:
+        current = self.live_trades.get(trade_id)
+        if not current:
+            raise ValueError("trade not found")
+        if not bool(current.get("manual_execution")):
+            raise ValueError("only manual trades can be edited")
+
+        controls = self._load_manual_controls()
+        overrides = dict(controls.get("entry_price_overrides") or {})
+        overrides[trade_id] = float(entry_price)
+        controls["entry_price_overrides"] = overrides
+        self._save_manual_controls(controls)
+
+        side = str(current.get("side") or "").upper()
+        qty = float(current.get("quantity") or 0.0)
+        last_price = float(current.get("last_price") or entry_price)
+        current["entry_price"] = float(entry_price)
+        current["unrealized_pnl"] = round(
+            self._calc_unrealized(side, float(entry_price), last_price, qty),
+            2,
+        )
+        current["entry_price_overridden"] = True
+        self.live_trades[trade_id] = current
+
+        state = self._read_state()
+        positions = state.get("positions") or {}
+        for _symbol, pos in positions.items():
+            if not isinstance(pos, dict):
+                continue
+            if str(pos.get("trade_id") or "") != trade_id:
+                continue
+            pos["entry_price"] = float(entry_price)
+            pos["manual_entry_price"] = float(entry_price)
+            pos["manual_entry_updated_at"] = datetime.utcnow().isoformat()
+            state["positions"] = positions
+            state["timestamp"] = datetime.utcnow().isoformat()
+            self._write_state(state)
+            break
+
+        self._append_manual_log_line(
+            f"{current.get('symbol', '')} | ACTION=MANUAL_ENTRY_EDIT | SIDE={side} | "
+            f"PRICE={float(entry_price):.2f} | REASON=USER_OVERRIDE | trade_id={trade_id}"
+        )
+        await self.broadcast({"type": "trade_updated", "trade": current})
+        return current
+
+    async def dismiss_manual_trade(self, trade_id: str) -> dict:
+        current = self.live_trades.get(trade_id)
+        if not current:
+            raise ValueError("trade not found")
+        if not bool(current.get("manual_execution")):
+            raise ValueError("only manual trades can be removed")
+
+        controls = self._load_manual_controls()
+        ignored = list(dict.fromkeys((controls.get("ignored_trade_ids") or []) + [trade_id]))
+        controls["ignored_trade_ids"] = ignored
+        self._save_manual_controls(controls)
+
+        self.live_trades.pop(trade_id, None)
+        state = self._read_state()
+        positions = state.get("positions") or {}
+        removed = False
+        for symbol in list(positions.keys()):
+            pos = positions.get(symbol) or {}
+            if str(pos.get("trade_id") or "") == trade_id:
+                positions.pop(symbol, None)
+                removed = True
+        if removed:
+            state["positions"] = positions
+            state["timestamp"] = datetime.utcnow().isoformat()
+            self._write_state(state)
+
+        side = str(current.get("side") or "").upper()
+        self._append_manual_log_line(
+            f"{current.get('symbol', '')} | ACTION=MANUAL_TRACK_DISMISSED | SIDE={side} | "
+            f"PRICE={float(current.get('last_price') or current.get('entry_price') or 0.0):.2f} | "
+            f"REASON=USER_NOT_TRADED | trade_id={trade_id}"
+        )
+        await self.broadcast({"type": "trade_closed", "trade": current})
+        return {"removed": True, "trade_id": trade_id}
 
     def _effective_closed_trades(self, limit: int = 1000) -> list[dict]:
         reconstructed = self._build_closed_trades_from_orders(limit=limit)

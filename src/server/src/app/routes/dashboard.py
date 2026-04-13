@@ -1,6 +1,7 @@
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 
 from app.dependencies import UserClaims, require_user, trade_context_for
+from app.models.schemas import ManualEntryUpdateBody, ManualTradeRemoveBody
 from app.services.audit_log import read_recent_audit_lines
 from app.services.trade_context import TradeUserContext
 
@@ -48,6 +49,32 @@ async def dashboard_paper_closed_trades(
 async def dashboard_paper_live_trades(user: UserClaims = Depends(require_user)):
     ctx = trade_context_for(user)
     return {"trades": ctx.paper_live_trades_from_state()}
+
+
+@router.post("/manual-trade/update-entry")
+async def dashboard_manual_trade_update_entry(
+    body: ManualEntryUpdateBody,
+    user: UserClaims = Depends(require_user),
+):
+    ctx = trade_context_for(user)
+    try:
+        updated = await ctx.update_manual_entry_price(body.trade_id, body.entry_price)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    return {"ok": True, "trade": updated}
+
+
+@router.post("/manual-trade/remove")
+async def dashboard_manual_trade_remove(
+    body: ManualTradeRemoveBody,
+    user: UserClaims = Depends(require_user),
+):
+    ctx = trade_context_for(user)
+    try:
+        result = await ctx.dismiss_manual_trade(body.trade_id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    return {"ok": True, **result}
 
 
 @router.get("/weekly-pnl")

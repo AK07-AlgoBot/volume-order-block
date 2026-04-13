@@ -90,6 +90,7 @@ export default function DashboardPage() {
     end_date: "",
   });
   const [mainView, setMainView] = useState("dashboard");
+  const [manualActionTradeId, setManualActionTradeId] = useState("");
   const selectedClosedDateRef = useRef(selectedClosedDate);
   const selectedWeekOffsetRef = useRef(selectedWeekOffset);
   const selectedMonthOffsetRef = useRef(selectedMonthOffset);
@@ -438,6 +439,61 @@ export default function DashboardPage() {
     navigate("/login", { replace: true });
   };
 
+  const onEditManualEntry = async (trade) => {
+    const currentEntry = Number(trade?.entry_price || 0);
+    const next = window.prompt(
+      `Manual entry price for ${trade?.symbol || ""}:`,
+      Number.isFinite(currentEntry) ? currentEntry.toFixed(2) : ""
+    );
+    if (next === null) return;
+    const parsed = Number(next);
+    if (!Number.isFinite(parsed) || parsed <= 0) {
+      window.alert("Enter a valid positive price.");
+      return;
+    }
+    setManualActionTradeId(trade.id);
+    try {
+      const res = await apiFetch("/api/dashboard/manual-trade/update-entry", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ trade_id: trade.id, entry_price: parsed }),
+      });
+      const payload = await res.json();
+      if (!res.ok) {
+        throw new Error(payload?.detail || "Failed to update manual entry");
+      }
+      setLiveTrades((prev) => dedupeLiveTrades(upsertTrade(prev, payload.trade || {})));
+    } catch (e) {
+      window.alert(e?.message || "Failed to update manual entry");
+    } finally {
+      setManualActionTradeId("");
+    }
+  };
+
+  const onRemoveManualTrade = async (trade) => {
+    const ok = window.confirm(
+      `Remove manual trade ${trade?.symbol || ""}? This hides it from dashboard and P&L.`
+    );
+    if (!ok) return;
+    setManualActionTradeId(trade.id);
+    try {
+      const res = await apiFetch("/api/dashboard/manual-trade/remove", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ trade_id: trade.id }),
+      });
+      const payload = await res.json();
+      if (!res.ok) {
+        throw new Error(payload?.detail || "Failed to remove manual trade");
+      }
+      setLiveTrades((prev) => dedupeLiveTrades(removeTrade(prev, trade.id)));
+    } catch (e) {
+      window.alert(e?.message || "Failed to remove manual trade");
+    } finally {
+      setManualActionTradeId("");
+    }
+  };
+
   if (!token) {
     return null;
   }
@@ -503,7 +559,12 @@ export default function DashboardPage() {
           }`}
         >
         <div className="layout">
-          <LiveTradesTable trades={liveTrades} />
+          <LiveTradesTable
+            trades={liveTrades}
+            onEditManualEntry={onEditManualEntry}
+            onRemoveManualTrade={onRemoveManualTrade}
+            busyTradeId={manualActionTradeId}
+          />
           <WeeklyPnlChart
             chartMode={pnlChartMode}
             onChartModeChange={setPnlChartMode}
