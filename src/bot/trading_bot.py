@@ -4094,8 +4094,6 @@ class TradingBot:
             self.save_state()
 
         for script_name, position in self.positions.items():
-            if bool(position.get("manual_execution")):
-                continue
             current_price = latest_prices.get(script_name)
             if current_price is None:
                 continue
