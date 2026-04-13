@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import os
+import re
+from pathlib import Path
 from typing import Literal
 
 import requests
@@ -28,6 +31,62 @@ def _normalize_broker(b: str) -> BrokerName:
     if x not in ("upstox", "zerodha"):
         raise HTTPException(status_code=400, detail="broker must be upstox or zerodha")
     return x  # type: ignore[return-value]
+
+
+def _upsert_env_var(path: Path, key: str, value: str) -> bool:
+    line = f"{key}={value}"
+    if path.is_file():
+        txt = path.read_text(encoding="utf-8")
+        lines = txt.splitlines()
+    else:
+        lines = []
+    pat = re.compile(rf"^\s*#?\s*{re.escape(key)}\s*=")
+    replaced = False
+    out: list[str] = []
+    for ln in lines:
+        if pat.match(ln):
+            if not replaced:
+                out.append(line)
+                replaced = True
+            continue
+        out.append(ln)
+    if not replaced:
+        if out and out[-1].strip() != "":
+            out.append("")
+        out.append(line)
+    new_txt = "\n".join(out) + "\n"
+    old_txt = "\n".join(lines) + ("\n" if lines else "")
+    if new_txt == old_txt:
+        return False
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(new_txt, encoding="utf-8")
+    return True
+
+
+def _persist_kite_env(api_key: str | None, api_secret: str | None) -> dict:
+    from app.config.paths import repo_root, server_root
+
+    changed_paths: list[str] = []
+    candidates: list[Path] = [repo_root() / ".env", server_root() / ".env"]
+    for env_path in candidates:
+        changed = False
+        if api_key:
+            changed = _upsert_env_var(env_path, "KITE_API_KEY", api_key) or changed
+            os.environ["KITE_API_KEY"] = api_key
+        if api_secret:
+            changed = _upsert_env_var(env_path, "KITE_API_SECRET", api_secret) or changed
+            os.environ["KITE_API_SECRET"] = api_secret
+        if changed:
+            changed_paths.append(str(env_path.resolve()))
+
+    try:
+        from app.config.settings import get_settings
+
+        get_settings.cache_clear()
+    except Exception:
+        pass
+
+    return {"updated": bool(changed_paths), "paths": changed_paths}
 
 
 def _credential_helpers(broker: BrokerName):
@@ -247,6 +306,12 @@ async def post_broker_credentials(
         current["base_url"] = body.base_url.strip()
         updated = True
     persist_credentials_for_user(safe, current)
+    env_update = {"updated": False, "paths": []}
+    if b == "zerodha":
+        env_update = _persist_kite_env(
+            body.api_key.strip() or None,
+            body.api_secret.strip() or None,
+        )
 
     restart_result = None
     if updated and b == "upstox":
@@ -272,5 +337,6 @@ async def post_broker_credentials(
         "broker": b,
         "saved": cred_path.name,
         "credential_subject": safe,
+        "env_update": env_update,
         "bot_restart": bot_restart,
     }

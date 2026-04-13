@@ -151,7 +151,12 @@ export function UpstoxSettingsCard() {
             ? " Bot process recycled."
             : ` Bot recycle incomplete: ${JSON.stringify(br.spawn || br.terminate || br)}`;
         }
-        setStatus(`Saved ${savedBody.broker || broker} credentials for ${who}.${extra || ""}`);
+        const envInfo = savedBody?.env_update;
+        const envText =
+          broker === "zerodha" && envInfo?.updated
+            ? ` Updated .env: ${(envInfo.paths || []).join(", ")}.`
+            : "";
+        setStatus(`Saved ${savedBody.broker || broker} credentials for ${who}.${envText}${extra || ""}`);
         loadSettings();
       })
       .catch((e) => {
