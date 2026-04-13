@@ -817,8 +817,10 @@ class TradeUserContext:
         date_filtered_closed = self._filter_closed_trades_by_date(effective_closed, selected_date)
         weekly_points = self._compute_weekly_pnl_from_orders(week_offset=0)
         monthly_points = self._compute_monthly_pnl_from_orders(month_offset=0)
+        live_from_ws = list(self.live_trades.values())
+        live_from_state = self.manual_live_trades_from_state()
         return {
-            "live_trades": self._dedupe_live_trades(list(self.live_trades.values())),
+            "live_trades": self._dedupe_live_trades(live_from_ws + live_from_state),
             "closed_trades": date_filtered_closed,
             "closed_trade_dates": available_dates,
             "closed_trade_selected_date": selected_date,
@@ -890,6 +892,61 @@ class TradeUserContext:
                     "unrealized_pnl": round(unrealized, 2),
                     "opened_at": str(pos.get("entry_time") or ""),
                     "closed_at": None,
+                }
+            )
+        out.sort(key=lambda t: str(t.get("opened_at") or ""), reverse=True)
+        return out
+
+    def manual_live_trades_from_state(self) -> list[dict]:
+        """Open manual live positions from bot `trading_state.json` as dashboard fallback."""
+        path = self.paths.user_root / "trading_state.json"
+        if not path.is_file():
+            return []
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError, TypeError):
+            return []
+        live = raw.get("positions") or {}
+        if not isinstance(live, dict):
+            return []
+        out: list[dict] = []
+        for symbol, pos in live.items():
+            if not isinstance(pos, dict) or not bool(pos.get("manual_execution")):
+                continue
+            sym = str(symbol).strip()
+            if not sym:
+                continue
+            side = str(pos.get("type") or "BUY").upper()
+            entry = float(pos.get("entry_price") or 0.0)
+            qty = float(pos.get("quantity") or 0.0)
+            if qty <= 0:
+                qty = 1.0
+            last_raw = pos.get("last_polled_price")
+            try:
+                last = float(last_raw) if last_raw is not None else entry
+            except (TypeError, ValueError):
+                last = entry
+            unrealized = self._calc_unrealized(side, entry, last, qty)
+            trade_id = str(pos.get("trade_id") or f"{sym}-{pos.get('entry_time', '')}")
+            cp = pos.get("chart_percent")
+            wp = pos.get("win_percent")
+            out.append(
+                {
+                    "id": trade_id,
+                    "symbol": sym,
+                    "side": side,
+                    "quantity": qty,
+                    "entry_price": entry,
+                    "stop_loss": float(pos.get("stop_loss") or entry),
+                    "target_price": float(pos.get("target_price") or entry),
+                    "chart_percent": float(cp) if cp is not None else None,
+                    "chart_volume": pos.get("chart_volume"),
+                    "win_percent": float(wp) if wp is not None else None,
+                    "last_price": last,
+                    "unrealized_pnl": round(unrealized, 2),
+                    "opened_at": str(pos.get("entry_time") or ""),
+                    "closed_at": None,
+                    "manual_execution": True,
                 }
             )
         out.sort(key=lambda t: str(t.get("opened_at") or ""), reverse=True)
