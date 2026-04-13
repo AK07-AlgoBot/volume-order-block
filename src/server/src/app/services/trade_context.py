@@ -129,6 +129,20 @@ class TradeUserContext:
             return (entry - last_price) * quantity
         return 0.0
 
+    @staticmethod
+    def _effective_pnl_quantity(symbol: str, quantity: float, manual_execution: bool) -> float:
+        """For manual tracked positions, quantity is often in lots; convert to units for P&L."""
+        q = float(quantity or 0.0)
+        if q <= 0:
+            return q
+        if not manual_execution:
+            return q
+        lot = float(LOT_SIZES.get(str(symbol or "").upper(), 1) or 1)
+        # Manual MCX/NSE futures are typically tracked as lot-count (1,2,...) in state.
+        if q <= 10 and lot > 1:
+            return q * lot
+        return q
+
     def _append_manual_log_line(self, message: str) -> None:
         line = f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S,%f')[:-3]} - {message}\n"
         self.paths.orders_log.parent.mkdir(parents=True, exist_ok=True)
@@ -667,7 +681,11 @@ class TradeUserContext:
         if override_price is not None:
             payload["entry_price"] = float(override_price)
             side = str(payload.get("side") or "").upper()
-            qty = float(payload.get("quantity") or 0.0)
+            qty = self._effective_pnl_quantity(
+                str(payload.get("symbol") or ""),
+                float(payload.get("quantity") or 0.0),
+                bool(payload.get("manual_execution")),
+            )
             last_price = float(payload.get("last_price") or payload.get("entry_price") or 0.0)
             payload["unrealized_pnl"] = round(
                 self._calc_unrealized(side, float(override_price), last_price, qty),
@@ -699,7 +717,11 @@ class TradeUserContext:
         self._save_manual_controls(controls)
 
         side = str(current.get("side") or "").upper()
-        qty = float(current.get("quantity") or 0.0)
+        qty = self._effective_pnl_quantity(
+            str(current.get("symbol") or ""),
+            float(current.get("quantity") or 0.0),
+            bool(current.get("manual_execution")),
+        )
         last_price = float(current.get("last_price") or entry_price)
         current["entry_price"] = float(entry_price)
         current["unrealized_pnl"] = round(
@@ -926,7 +948,8 @@ class TradeUserContext:
                 last = float(last_raw) if last_raw is not None else entry
             except (TypeError, ValueError):
                 last = entry
-            unrealized = self._calc_unrealized(side, entry, last, qty)
+            pnl_qty = self._effective_pnl_quantity(sym, qty, True)
+            unrealized = self._calc_unrealized(side, entry, last, pnl_qty)
             trade_id = str(pos.get("trade_id") or f"{sym}-{pos.get('entry_time', '')}")
             cp = pos.get("chart_percent")
             wp = pos.get("win_percent")
