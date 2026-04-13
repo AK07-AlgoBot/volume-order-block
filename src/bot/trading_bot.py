@@ -2282,6 +2282,48 @@ class TradingBot:
             return ((current_price - entry_price) / entry_price) * 100
         return ((entry_price - current_price) / entry_price) * 100
 
+    def _post_entry_trailing_reference_price(self, position, data, current_price):
+        """
+        Trailing reference from post-entry range only.
+        - BUY: highest high seen after entry timestamp
+        - SELL: lowest low seen after entry timestamp
+        Falls back to current_price when unavailable.
+        """
+        try:
+            side = str(position.get("type") or "").upper()
+            if side not in ("BUY", "SELL"):
+                return float(current_price)
+
+            anchor_raw = (
+                position.get("signal_time")
+                or position.get("entry_time")
+                or ""
+            )
+            anchor_ts = pd.to_datetime(anchor_raw, errors="coerce")
+            df = data.get("df")
+            if (
+                df is None
+                or getattr(df, "empty", True)
+                or "timestamp" not in df.columns
+                or "high" not in df.columns
+                or "low" not in df.columns
+                or pd.isna(anchor_ts)
+            ):
+                return float(current_price)
+
+            ts = pd.to_datetime(df["timestamp"], errors="coerce")
+            post = df[ts >= anchor_ts]
+            if post.empty:
+                return float(current_price)
+
+            if side == "BUY":
+                recent_high = float(pd.to_numeric(post["high"], errors="coerce").max())
+                return max(float(current_price), recent_high)
+            recent_low = float(pd.to_numeric(post["low"], errors="coerce").min())
+            return min(float(current_price), recent_low)
+        except Exception:
+            return float(current_price)
+
     def _calculate_stepped_sl(self, position_type, entry_price, steps):
         step_percent = self.config['trail_step_percent'] / 100
         if position_type == 'BUY':
@@ -2920,8 +2962,21 @@ class TradingBot:
                     )
                     self.last_position_eval_logged[script_name] = confirmed_time_text
 
-                # Update stepped trailing SL as per strategy
-                sl_updated = self._update_position_sl(script_name, position, current_price)
+                # Update stepped trailing SL as per strategy using post-entry range only.
+                # This ensures trailing updates are based on highs/lows formed after entry.
+                trail_ref_price = self._post_entry_trailing_reference_price(
+                    position,
+                    data,
+                    current_price,
+                )
+                if bool(position.get("manual_execution")):
+                    # Keep intraloop sampled range for manual trades too (10s loop),
+                    # while still respecting post-entry anchor from helper.
+                    if position.get("type") == "BUY":
+                        trail_ref_price = max(float(trail_ref_price), float(current_high))
+                    else:
+                        trail_ref_price = min(float(trail_ref_price), float(current_low))
+                sl_updated = self._update_position_sl(script_name, position, trail_ref_price)
                 if sl_updated:
                     if bool(position.get("manual_execution")) and telegram_notifications_enabled_for_user(self.username):
                         exit_side = "SELL" if position["type"] == "BUY" else "BUY"
