@@ -4,16 +4,19 @@ Version: 2.0
 Created: March 4, 2026
 """
 
+import copy
+import threading
 import time
 import math
 import logging
+from typing import Any
 import json
 import sys
 import os
 import html
 import atexit
 import gzip
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 from pathlib import Path
 
@@ -38,6 +41,22 @@ from upstox_credentials_store import (
 )
 from trading_preferences_store import read_trading_preferences
 from trading_script_constants import is_paper_script
+from zerodha_credentials_store import load_zerodha_credentials_for_user
+
+from kite_fut_instrument import resolve_futures_instrument_token
+from kite_rest_candles import (
+    default_swing_window,
+    fetch_historical_raw,
+    kite_candles_to_dataframe,
+    map_bot_interval_to_kite,
+)
+from kite_tick_stream import KiteTickStream
+
+from option_greeks import (
+    bs_call_delta,
+    bs_put_delta,
+    years_to_expiry_from_ms,
+)
 
 # Initialize colorama
 init(autoreset=True)
@@ -423,6 +442,9 @@ TRADING_CONFIG = {
         "ETERNAL": "",
         "ADANIPORTS": "",
     },
+    # Exchange contract size (shares per lot) — Upstox NFO/BSE FO index standards:
+    # NIFTY 1 lot = 65 qty, BANKNIFTY 1 lot = 30, SENSEX 1 lot = 20.
+    # Order quantity sent to API = quantity (lots below) × lot_sizes[script].
     "lot_sizes": {
         "NIFTY": 65,
         "BANKNIFTY": 30,
@@ -461,7 +483,12 @@ TRADING_CONFIG = {
         "ETERNAL": 0,
         "ADANIPORTS": 0,
     },
-    "interval": "1minute",  # API fetch interval (Upstox accepts 1minute reliably)
+    # Market data: "kite" (Kite REST candles + WebSocket LTP) | "upstox" (poll Upstox REST). Orders: always Upstox.
+    # Override at runtime: MARKET_DATA_PROVIDER=upstox | kite
+    "market_data_provider": "kite",
+    # Optional { "NIFTY": 12345678 } if auto token resolve fails (Kite instruments CSV token).
+    "kite_instrument_token_overrides": {},
+    "interval": "1minute",  # Base candle interval (Kite: minute/5minute/…; Upstox: 1minute)
     "signal_interval": "5minute",  # Strategy timeframe (EMA runs on 5-minute candles)
     "ema_short": 5,
     "ema_long": 18,
@@ -589,15 +616,45 @@ TRADING_CONFIG = {
         "target_pnl": 5000.0,
         "stop_loss_pnl": 3000.0
     },
+    # How often the bot loop runs (LTP from Kite ticks is read each loop). Lower = snappier exits; more REST/API load.
+    # Override: BOT_LOOP_INTERVAL_SEC=5
     "loop_interval": 10,  # seconds between each check
     "contract_roll_retry_seconds": 300,  # seconds between roll attempts per script
     "contract_roll_mcx_cache_seconds": 21600,  # 6h MCX instrument cache window
-    "quantity": 1,  # Number of lots per order
+    "quantity": 1,  # Futures lots per order (e.g. 1 lot NIFTY → 1×65 = 65 quantity on Upstox)
     # Optional per-script exchange quantity override for order placement.
     # Example: CRUDE quantity=1 (instead of lots*lot_size) to match broker setup.
     "order_quantity_override_by_script": {
         "CRUDE": 1
     },
+    # Options companion strategy (for NSE index futures entries).
+    "options_enabled": True,
+    "options_scripts": ["NIFTY", "BANKNIFTY", "SENSEX"],
+    "options_total_lots": 4,
+    "options_target3_r": 3.0,
+    "options_gtt_enabled": True,
+    "options_breakeven_buffer_points": 0.0,
+    # IST time after which no new option entries on that contract's expiry day.
+    "options_expiry_day_cutoff_ist": "12:00",
+    # Hybrid option SL: map futures-defined risk to premium using assumed ATM delta,
+    # with a floor as % of entry premium (no broker Greeks required).
+    "options_sl_delta_assumption": 0.5,
+    "options_sl_min_premium_floor_ratio": 0.35,
+    # Scale NSE rupee target (nse_trade_pnl_levels.target_pnl) to option leg by lots vs futures lots.
+    "options_rupee_profit_booking": {
+        "enabled": True,
+        "lot_fraction": 0.25,
+        "futures_lots_reference": None,
+    },
+    # ladder_gtt: after fill, place SL + TP GTTs on OPTION premium (1:1 / 1:2 / 1:3 lot splits).
+    # legacy_underlying: prior behaviour (underlying R-level partials + single SL GTT).
+    "options_exit_mode": "ladder_gtt",
+    "options_tp_lot_splits": [2, 1, 1],
+    "options_use_bs_delta_for_r": True,
+    "options_iv_annual": 0.18,
+    "options_risk_free_rate": 0.0,
+    "options_chart_crossover_exit": True,
+    "options_crossover_interval": "5minute",
     "segment_scripts": {
         "NSE": [
             "NIFTY", "BANKNIFTY", "SENSEX",
@@ -622,6 +679,33 @@ TRADING_CONFIG = {
     "auto_archive_on_shutdown": True
 }
 
+
+def runtime_trading_config() -> dict:
+    """Deep copy of TRADING_CONFIG with optional env overrides (used by main(); does not mutate TRADING_CONFIG)."""
+    cfg = copy.deepcopy(TRADING_CONFIG)
+    md = os.environ.get("MARKET_DATA_PROVIDER", "").strip().lower()
+    if md in ("kite", "upstox"):
+        cfg["market_data_provider"] = md
+    li = os.environ.get("BOT_LOOP_INTERVAL_SEC", "").strip()
+    if li:
+        try:
+            v = int(li)
+            if v >= 1:
+                cfg["loop_interval"] = v
+        except ValueError:
+            pass
+    # Kite: slower REST/candle refresh while SL/target can fire on WebSocket LTP (see KITE_STREAM_DRIVE_EXITS).
+    ks = os.environ.get("KITE_STRATEGY_LOOP_SEC", "").strip()
+    if ks and str(cfg.get("market_data_provider", "")).strip().lower() == "kite":
+        try:
+            v = int(ks)
+            if v >= 1:
+                cfg["loop_interval"] = v
+        except ValueError:
+            pass
+    return cfg
+
+
 REPO_ROOT = _REPO_ROOT
 LOCK_FILE = REPO_ROOT / "src" / "bot" / "trading_bot.lock"
 
@@ -632,6 +716,23 @@ logging.basicConfig(
     handlers=[logging.StreamHandler(sys.stdout)],
 )
 logger = logging.getLogger(__name__)
+
+# Index futures where contract roll / expiry-day next-serial rules apply.
+_INDEX_FO_SCRIPT_NAMES = frozenset({"NIFTY", "BANKNIFTY", "SENSEX"})
+
+
+def _ist_date_from_expiry_ms(expiry_ms: int) -> date:
+    return datetime.fromtimestamp(expiry_ms / 1000.0, tz=ZoneInfo("Asia/Kolkata")).date()
+
+
+def _is_last_thursday_of_month_ist(expiry_ms: int) -> bool:
+    """NSE/BSE monthly index derivatives typically expire on the last Thursday."""
+    d = _ist_date_from_expiry_ms(expiry_ms)
+    if d.weekday() != 3:
+        return False
+    nxt = d + timedelta(days=7)
+    return nxt.month != d.month
+
 
 # ============================================================================
 # UPSTOX API CLIENT
@@ -794,6 +895,146 @@ class UpstoxClient:
             "endpoint": last_endpoint
         }
 
+    def get_ltp(self, instrument_key):
+        """Fetch latest traded price for any instrument key."""
+        try:
+            url = f"{self.base_url}/market-quote/ltp"
+            response = self.session.get(url, params={"instrument_key": instrument_key}, timeout=20)
+            response.raise_for_status()
+            payload = response.json()
+            if payload.get("status") != "success":
+                return None
+            data = payload.get("data", {}) or {}
+            row = data.get(instrument_key, {}) or {}
+            ltp = row.get("last_price")
+            return float(ltp) if ltp is not None else None
+        except Exception as e:
+            self._log.warning(f"LTP fetch failed for {instrument_key}: {e}")
+            return None
+
+    def place_gtt_order(
+        self,
+        instrument_key: str,
+        quantity: int,
+        transaction_type: str,
+        trigger_price: float,
+        limit_price: float | None = None,
+        tag: str = "trading_bot_opt",
+    ) -> dict[str, Any]:
+        """
+        Best-effort GTT placement.
+        Upstox API variants differ by account; this method returns error details on failure.
+        """
+        payload = {
+            "type": "single",
+            "condition": {
+                "instrument_token": instrument_key,
+                "trigger_price": float(trigger_price),
+            },
+            "orders": [
+                {
+                    "transaction_type": transaction_type,
+                    "quantity": int(quantity),
+                    "order_type": "LIMIT" if limit_price is not None else "MARKET",
+                    "price": float(limit_price) if limit_price is not None else 0,
+                    "product": "I",
+                    "validity": "DAY",
+                    "disclosed_quantity": 0,
+                    "trigger_price": 0,
+                    "tag": tag,
+                }
+            ],
+        }
+        endpoints = [
+            f"{self.base_url}/order/gtt/place",
+            f"{self.base_url}/gtt/order/place",
+        ]
+        last_error = "Unknown GTT placement error"
+        last_endpoint = ""
+        for url in endpoints:
+            last_endpoint = url
+            try:
+                response = self.session.post(url, json=payload, timeout=20)
+                body = response.json() if response.text else {}
+                if response.status_code == 200 and body.get("status") == "success":
+                    return {"status": "success", "data": body.get("data", {}), "endpoint": url}
+                msg = body.get("message", "") if isinstance(body, dict) else ""
+                last_error = f"HTTP {response.status_code} - {msg or response.text[:250]}"
+            except Exception as e:
+                last_error = str(e)
+        return {"status": "error", "error": last_error, "endpoint": last_endpoint}
+
+    def cancel_gtt_order(self, gtt_id: str) -> dict[str, Any]:
+        endpoints = [
+            f"{self.base_url}/order/gtt/cancel/{gtt_id}",
+            f"{self.base_url}/gtt/order/cancel/{gtt_id}",
+        ]
+        last_error = "Unknown GTT cancel error"
+        last_endpoint = ""
+        for url in endpoints:
+            last_endpoint = url
+            try:
+                response = self.session.delete(url, timeout=20)
+                body = response.json() if response.text else {}
+                if response.status_code == 200 and body.get("status") == "success":
+                    return {"status": "success", "data": body.get("data", {}), "endpoint": url}
+                msg = body.get("message", "") if isinstance(body, dict) else ""
+                last_error = f"HTTP {response.status_code} - {msg or response.text[:250]}"
+            except Exception as e:
+                last_error = str(e)
+        return {"status": "error", "error": last_error, "endpoint": last_endpoint}
+
+    def get_short_term_positions(self) -> list[dict]:
+        """Net quantities per instrument (best-effort for GTT ladder reconciliation)."""
+        url = f"{self.base_url}/portfolio/short-term-positions"
+        try:
+            response = self.session.get(url, timeout=25)
+            if response.status_code != 200:
+                return []
+            body = response.json() if response.text else {}
+            if body.get("status") != "success":
+                return []
+            data = body.get("data") or []
+            return data if isinstance(data, list) else []
+        except Exception as e:
+            self._log.warning(f"short-term-positions failed: {e}")
+            return []
+
+    def get_order_average_price(self, order_id: str) -> float | None:
+        """Average fill price for a completed order (best-effort)."""
+        oid = str(order_id or "").strip()
+        if not oid:
+            return None
+        try:
+            response = self.session.get(
+                f"{self.base_url}/order/trades", params={"order_id": oid}, timeout=20
+            )
+            if response.status_code != 200:
+                return None
+            body = response.json() if response.text else {}
+            if body.get("status") != "success":
+                return None
+            rows = body.get("data") or []
+            if not isinstance(rows, list):
+                return None
+            pv = 0.0
+            qv = 0.0
+            for row in rows:
+                pr = row.get("average_price") or row.get("price")
+                q = row.get("quantity") or row.get("fill_quantity") or row.get("filled_quantity")
+                if pr is None or q is None:
+                    continue
+                try:
+                    pv += float(pr) * abs(float(q))
+                    qv += abs(float(q))
+                except (TypeError, ValueError):
+                    continue
+            if qv > 0:
+                return pv / qv
+        except Exception as e:
+            self._log.debug(f"order/trades failed for {oid}: {e}")
+        return None
+
 # ============================================================================
 # TECHNICAL ANALYSIS
 # ============================================================================
@@ -905,6 +1146,7 @@ class TradingBot:
 
         self.positions = {}
         self.paper_positions = {}
+        self.option_positions = {}
         self.paper_total_pnl = 0.0
         self.total_pnl = 0
         self.running = True
@@ -924,6 +1166,9 @@ class TradingBot:
         self.pending_live_updates = {}
         self.archive_requested = False
         self._last_contract_roll_attempt = {}
+        self._last_index_fo_token_refresh_ts = 0.0
+        self._kite_tick_stream: KiteTickStream | None = None
+        self._kite_script_tokens: dict[str, int] = {}
         self._mcx_instruments_cache = []
         self._mcx_instruments_cache_at = 0.0
         self._nse_instruments_cache = []
@@ -931,6 +1176,13 @@ class TradingBot:
         self._bse_instruments_cache = []
         self._bse_instruments_cache_at = 0.0
         self._cycle_scope_logged_once = False
+        self._strategy_lock = threading.Lock()
+        self._script_data_cache: dict[str, dict] = {}
+        self._last_stream_exit_mono = 0.0
+        self._stream_exit_min_interval = max(
+            0.0,
+            float(os.environ.get("KITE_STREAM_EXIT_MIN_INTERVAL_SEC", "0.025") or 0.0),
+        )
         self.client._log = self._bot_logger
         # Fill blank NSE/BSE FO tokens (e.g., stock futures) on startup.
         self._seed_missing_fo_contract_tokens()
@@ -943,6 +1195,7 @@ class TradingBot:
                     state = json.load(f)
                     self.positions = state.get("positions", {})
                     self.paper_positions = state.get("paper_positions", {})
+                    self.option_positions = state.get("option_positions", {})
                     self.paper_total_pnl = float(state.get("paper_total_pnl", 0.0))
                     self.total_pnl = state.get("total_pnl", 0)
                     self.eod_squareoff_done = state.get("eod_squareoff_done", {})
@@ -961,6 +1214,7 @@ class TradingBot:
             state = {
                 "positions": self.positions,
                 "paper_positions": self.paper_positions,
+                "option_positions": self.option_positions,
                 "paper_total_pnl": self.paper_total_pnl,
                 "total_pnl": self.total_pnl,
                 "eod_squareoff_done": self.eod_squareoff_done,
@@ -1460,7 +1714,11 @@ class TradingBot:
             candidates = self._get_fo_contract_candidates(script_name)
             if not candidates:
                 continue
-            selected = candidates[0]
+            selected = (
+                self._select_index_fo_contract_avoiding_expiring_front(script_name)
+                if script_name in _INDEX_FO_SCRIPT_NAMES
+                else candidates[0]
+            )
             self.config.setdefault("scripts", {})[script_name] = selected
             self.config.setdefault("order_tokens", {})[script_name] = selected
             cfg_lot = int(self.config.get("lot_sizes", {}).get(script_name, 0) or 0)
@@ -1485,6 +1743,888 @@ class TradingBot:
             if lot_size <= 0:
                 lot_size = 1
         return max(1, lots * lot_size)
+
+    @staticmethod
+    def _option_type_for_futures_side(futures_side: str) -> str:
+        return "CE" if str(futures_side).upper() == "BUY" else "PE"
+
+    @staticmethod
+    def _option_side_for_futures_side(futures_side: str) -> str:
+        # Long CE for BUY futures signal, long PE for SELL futures signal.
+        return "BUY"
+
+    @staticmethod
+    def _safe_float(v, default=0.0) -> float:
+        try:
+            return float(v)
+        except Exception:
+            return float(default)
+
+    def _options_expiry_cutoff_dt(self, now_ist: datetime) -> datetime | None:
+        txt = str(self.config.get("options_expiry_day_cutoff_ist") or "12:00").strip()
+        if ":" not in txt:
+            return None
+        hour_text, minute_text = txt.split(":", 1)
+        return now_ist.replace(
+            hour=int(hour_text),
+            minute=int(minute_text),
+            second=0,
+            microsecond=0,
+        )
+
+    def _filter_option_chain_to_policy_expiry(
+        self, script: str, cands: list[dict]
+    ) -> tuple[list[dict], int]:
+        """
+        NIFTY/SENSEX: nearest calendar expiry (front weekly in practice).
+        BANKNIFTY: nearest monthly expiry (last Thursday of month in IST).
+        Returns (filtered rows, chosen expiry_ms).
+        """
+        if not cands:
+            return [], 0
+        positive = [c for c in cands if int(c.get("expiry_ms") or 0) > 0]
+        if not positive:
+            return [], 0
+        if script == "BANKNIFTY":
+            monthly = [c for c in positive if _is_last_thursday_of_month_ist(int(c["expiry_ms"]))]
+            if monthly:
+                target_ms = min(int(c["expiry_ms"]) for c in monthly)
+                filt = [c for c in monthly if int(c["expiry_ms"]) == target_ms]
+                return filt, target_ms
+            self._bot_logger.warning(
+                "OPTIONS: BANKNIFTY — no last-Thursday monthly expiry in chain; using nearest expiry"
+            )
+            target_ms = min(int(c["expiry_ms"]) for c in positive)
+            return [c for c in positive if int(c["expiry_ms"]) == target_ms], target_ms
+        target_ms = min(int(c["expiry_ms"]) for c in positive)
+        return [c for c in positive if int(c["expiry_ms"]) == target_ms], target_ms
+
+    def _resolve_atm_option_for_script(self, script_name: str, underlying_price: float, option_type: str):
+        """
+        Pick ATM option from FO instrument master using expiry policy:
+        NIFTY/SENSEX → nearest expiry (front weeklies); BANKNIFTY → nearest monthly (last Thursday).
+        """
+        script = str(script_name or "").upper().strip()
+        if script not in {"NIFTY", "BANKNIFTY", "SENSEX"}:
+            return None
+        exchange = "bse" if script == "SENSEX" else "nse"
+        seg = "BSE_FO" if script == "SENSEX" else "NSE_FO"
+        url = BSE_INSTRUMENTS_URL if exchange == "bse" else NSE_INSTRUMENTS_URL
+        try:
+            instruments = self._fetch_exchange_instruments(url, exchange)
+        except Exception as e:
+            self._bot_logger.warning(f"Unable to fetch option chain for {script}: {e}")
+            return None
+        now_ms = int(time.time() * 1000)
+        opt_type = str(option_type or "").upper().strip()
+        cands = []
+        for row in instruments:
+            ikey = str(row.get("instrument_key", "")).strip()
+            if not ikey.startswith(f"{seg}|"):
+                continue
+            ins_type = str(row.get("instrument_type", "")).upper().strip()
+            if ins_type not in {"CE", "PE"}:
+                continue
+            if ins_type != opt_type:
+                continue
+            tsym = str(row.get("trading_symbol", "")).upper().strip()
+            if not tsym.startswith(script):
+                continue
+            expiry_ms = int(float(row.get("expiry", 0) or 0))
+            if expiry_ms and expiry_ms < now_ms:
+                continue
+            strike = self._safe_float(
+                row.get("strike_price", row.get("strike", row.get("strikePrice", 0.0))),
+                0.0,
+            )
+            if strike <= 0:
+                continue
+            lot_size = int(self._safe_float(row.get("lot_size", 0), 0))
+            cands.append(
+                {
+                    "instrument_key": ikey,
+                    "trading_symbol": tsym,
+                    "expiry_ms": expiry_ms,
+                    "strike": strike,
+                    "lot_size": max(1, lot_size),
+                }
+            )
+        if not cands:
+            return None
+        cands, target_ms = self._filter_option_chain_to_policy_expiry(script, cands)
+        if not cands:
+            return None
+        self._bot_logger.info(
+            "OPTIONS CHAIN: %s %s expiry_ms=%s policy=%s",
+            script,
+            opt_type,
+            target_ms,
+            "MONTHLY" if script == "BANKNIFTY" else "NEAREST_WEEKLY",
+        )
+        cands.sort(key=lambda c: (abs(c["strike"] - underlying_price), c["strike"]))
+        return cands[0]
+
+    def _option_hybrid_sl_premium(
+        self,
+        entry_underlying: float,
+        sl_underlying: float,
+        entry_option: float,
+    ) -> float:
+        """
+        Long-option protective sell: map futures-defined risk to premium using an assumed ATM delta,
+        with a minimum premium floor (no live Greeks API).
+        """
+        delta = float(self.config.get("options_sl_delta_assumption", 0.5))
+        floor_ratio = float(self.config.get("options_sl_min_premium_floor_ratio", 0.35))
+        risk = abs(float(entry_underlying) - float(sl_underlying))
+        raw_sl = float(entry_option) - delta * risk
+        floor_sl = max(0.0, float(entry_option) * floor_ratio)
+        sl = max(floor_sl, raw_sl)
+        if sl >= float(entry_option):
+            sl = max(0.0, float(entry_option) * 0.99)
+        return sl
+
+    def _options_scaled_rupee_profit_target(self, opt: dict) -> float | None:
+        """Scale futures nse_trade_pnl_levels.target_pnl by option lots vs reference futures lots."""
+        ob = self.config.get("options_rupee_profit_booking") or {}
+        if not bool(ob.get("enabled", True)):
+            return None
+        nse = self.config.get("nse_trade_pnl_levels") or {}
+        if not bool(nse.get("enabled", True)):
+            return None
+        base = float(nse.get("target_pnl", 5000.0))
+        if base <= 0:
+            return None
+        ref_raw = ob.get("futures_lots_reference")
+        if ref_raw is None:
+            ref_lots = max(1, int(self.config.get("quantity", 1)))
+        else:
+            ref_lots = max(1, int(ref_raw))
+        opt_lots = max(1, int(opt.get("total_lots", self.config.get("options_total_lots", 4))))
+        return base * (opt_lots / float(ref_lots))
+
+    @staticmethod
+    def _round_to_tick(p: float, tick: float = 0.05) -> float:
+        return round(round(float(p) / tick) * tick, 2)
+
+    def _compute_option_premium_r(
+        self,
+        fut_entry: float,
+        fut_sl: float,
+        strike: float,
+        expiry_ms: int,
+        opt_type: str,
+        opt_entry: float,
+    ) -> float:
+        """
+        Premium 'R' for 1:1 / 1:2 / 1:3 GTT spacing: ~|delta| * futures risk (BS delta if enabled).
+        """
+        fut_risk = abs(float(fut_entry) - float(fut_sl))
+        if fut_risk <= 0:
+            fut_risk = max(1.0, abs(float(fut_entry)) * 0.002)
+        use_bs = bool(self.config.get("options_use_bs_delta_for_r", True))
+        if use_bs:
+            T = years_to_expiry_from_ms(int(expiry_ms))
+            sigma = float(self.config.get("options_iv_annual", 0.18))
+            rfr = float(self.config.get("options_risk_free_rate", 0.0))
+            S = float(fut_entry)
+            K = float(strike) if float(strike) > 0 else float(fut_entry)
+            if str(opt_type).upper() == "CE":
+                d = bs_call_delta(S, K, T, sigma, rfr)
+            else:
+                d = bs_put_delta(S, K, T, sigma, rfr)
+            delta = abs(float(d))
+        else:
+            delta = float(self.config.get("options_sl_delta_assumption", 0.5))
+        r_prem = delta * fut_risk
+        return max(r_prem, 1.0)
+
+    def _cancel_all_option_gtts(self, opt_pos: dict) -> None:
+        if opt_pos.get("gtt_ladder"):
+            gids = opt_pos.get("gtt_ids") or {}
+            for name in ("sl", "tp1", "tp2", "tp3"):
+                gid = str(gids.get(name) or "").strip()
+                if not gid:
+                    continue
+                res = self.client.cancel_gtt_order(gid)
+                if res.get("status") == "success":
+                    self._bot_logger.info(f"OPTIONS GTT cancel {name}: id={gid}")
+                else:
+                    self._bot_logger.warning(
+                        f"OPTIONS GTT cancel failed {name}: id={gid} err={res.get('error')}"
+                    )
+            opt_pos["gtt_ids"] = {"sl": "", "tp1": "", "tp2": "", "tp3": ""}
+            return
+        gtt_id = str(opt_pos.get("active_sl_gtt_id") or "").strip()
+        if not gtt_id:
+            return
+        res = self.client.cancel_gtt_order(gtt_id)
+        if res.get("status") == "success":
+            self._bot_logger.info(f"OPTIONS GTT cancel success: gtt_id={gtt_id}")
+        else:
+            self._bot_logger.warning(
+                f"OPTIONS GTT cancel failed: gtt_id={gtt_id} err={res.get('error')}"
+            )
+        opt_pos["active_sl_gtt_id"] = ""
+
+    def _cancel_option_gtt_if_any(self, opt_pos: dict) -> None:
+        """Legacy single SL GTT cancel."""
+        if opt_pos.get("gtt_ladder"):
+            return
+        gtt_id = str(opt_pos.get("active_sl_gtt_id") or "").strip()
+        if not gtt_id:
+            return
+        res = self.client.cancel_gtt_order(gtt_id)
+        if res.get("status") == "success":
+            self._bot_logger.info(f"OPTIONS GTT cancel success: gtt_id={gtt_id}")
+        else:
+            self._bot_logger.warning(
+                f"OPTIONS GTT cancel failed: gtt_id={gtt_id} err={res.get('error')}"
+            )
+        opt_pos["active_sl_gtt_id"] = ""
+
+    def _place_or_replace_option_sl_gtt(self, script_name: str, opt_pos: dict) -> None:
+        if not bool(self.config.get("options_gtt_enabled", True)):
+            return
+        self._cancel_option_gtt_if_any(opt_pos)
+        qty_lots = int(opt_pos.get("remaining_lots", 0))
+        lot_size = int(opt_pos.get("lot_size", 1))
+        qty = max(0, qty_lots * lot_size)
+        if qty <= 0:
+            return
+        trigger = self._safe_float(opt_pos.get("sl_option_price", 0.0), 0.0)
+        if trigger <= 0:
+            return
+        res = self.client.place_gtt_order(
+            instrument_key=str(opt_pos.get("instrument_key") or ""),
+            quantity=qty,
+            transaction_type="SELL",
+            trigger_price=trigger,
+            limit_price=trigger,
+            tag=f"opt_sl_{script_name.lower()}",
+        )
+        if res.get("status") == "success":
+            gtt_data = res.get("data") or {}
+            opt_pos["active_sl_gtt_id"] = str(
+                gtt_data.get("id", gtt_data.get("gtt_id", gtt_data.get("trigger_id", "")))
+            )
+            self._bot_logger.info(
+                f"OPTIONS GTT placed: {script_name} trigger={trigger:.2f} qty={qty} id={opt_pos.get('active_sl_gtt_id')}"
+            )
+        else:
+            self._bot_logger.warning(
+                f"OPTIONS GTT placement failed for {script_name}: {res.get('error')}"
+            )
+
+    @staticmethod
+    def _gtt_id_from_response(res: dict) -> str:
+        d = res.get("data") or {}
+        return str(d.get("id", d.get("gtt_id", d.get("trigger_id", ""))))
+
+    def _place_option_gtt_ladder(self, script_name: str, opt: dict) -> None:
+        """Place SL + three TP GTTs on option premium (exchange may cap concurrent GTTs per symbol)."""
+        if not bool(self.config.get("options_gtt_enabled", True)):
+            return
+        ikey = str(opt.get("instrument_key") or "")
+        lot_size = max(1, int(opt.get("lot_size", 1)))
+        total_lots = max(1, int(opt.get("total_lots", 4)))
+        splits = list(self.config.get("options_tp_lot_splits") or [2, 1, 1])
+        if len(splits) != 3 or sum(splits) != total_lots:
+            self._bot_logger.error(
+                "OPTIONS: options_tp_lot_splits must be 3 integers summing to options_total_lots; using [2,1,1]"
+            )
+            splits = [2, 1, 1]
+        entry_o = float(opt.get("entry_price_option") or 0.0)
+        R = float(opt.get("premium_r") or 0.0)
+        if entry_o <= 0 or R <= 0:
+            self._bot_logger.warning("OPTIONS LADDER: missing entry or premium R; skipping GTT ladder")
+            return
+        sl_trig = self._round_to_tick(entry_o - R)
+        tp1_trig = self._round_to_tick(entry_o + R)
+        tp2_trig = self._round_to_tick(entry_o + 2.0 * R)
+        tp3_trig = self._round_to_tick(entry_o + 3.0 * R)
+        qty_sl = total_lots * lot_size
+        q1, q2, q3 = [max(1, int(s) * lot_size) for s in splits]
+        gtt_ids: dict[str, str] = {"sl": "", "tp1": "", "tp2": "", "tp3": ""}
+
+        def _place(bucket: str, tag: str, qty: int, trig: float) -> None:
+            if qty <= 0 or trig <= 0:
+                return
+            res = self.client.place_gtt_order(
+                instrument_key=ikey,
+                quantity=int(qty),
+                transaction_type="SELL",
+                trigger_price=float(trig),
+                limit_price=float(trig),
+                tag=tag,
+            )
+            if res.get("status") == "success":
+                gtt_ids[bucket] = self._gtt_id_from_response(res)
+                self._bot_logger.info(
+                    "OPTIONS LADDER GTT: %s %s qty=%d trigger=%.2f id=%s",
+                    script_name,
+                    tag,
+                    qty,
+                    trig,
+                    gtt_ids[bucket],
+                )
+            else:
+                self._bot_logger.error(
+                    "OPTIONS LADDER GTT FAILED: %s %s err=%s",
+                    script_name,
+                    tag,
+                    res.get("error"),
+                )
+
+        _place("sl", f"opt_sl_{script_name.lower()}", qty_sl, sl_trig)
+        _place("tp1", f"opt_tp1_{script_name.lower()}", q1, tp1_trig)
+        _place("tp2", f"opt_tp2_{script_name.lower()}", q2, tp2_trig)
+        _place("tp3", f"opt_tp3_{script_name.lower()}", q3, tp3_trig)
+        opt["gtt_ids"] = gtt_ids
+        opt["sl_option_price"] = float(sl_trig)
+        opt["tp_triggers"] = {"tp1": tp1_trig, "tp2": tp2_trig, "tp3": tp3_trig}
+
+    def _net_option_units_for_instrument(self, instrument_key: str) -> int | None:
+        for row in self.client.get_short_term_positions():
+            key = str(row.get("instrument_token") or row.get("instrument_key") or "")
+            if key != instrument_key:
+                continue
+            for fld in ("net_quantity", "quantity", "day_net_quantity"):
+                v = row.get(fld)
+                if v is None:
+                    continue
+                try:
+                    return int(float(v))
+                except (TypeError, ValueError):
+                    continue
+        return None
+
+    def _refresh_ladder_sl_gtt_from_futures(self, script_name: str, opt: dict) -> None:
+        """Cancel/replace SL GTT when futures trailing stop tightens (hybrid premium mapping)."""
+        if not bool(self.config.get("options_gtt_enabled", True)):
+            return
+        pos = self.positions.get(script_name)
+        if not isinstance(pos, dict):
+            return
+        opt["sl_underlying"] = float(pos.get("stop_loss", opt.get("sl_underlying", 0.0)))
+        entry_o = self._safe_float(opt.get("entry_price_option"), 0.0)
+        entry_u = self._safe_float(opt.get("entry_price_underlying"), 0.0)
+        sl_u = self._safe_float(opt.get("sl_underlying"), 0.0)
+        if entry_o <= 0 or entry_u <= 0:
+            return
+        new_trig = self._round_to_tick(self._option_hybrid_sl_premium(entry_u, sl_u, entry_o))
+        prev = self._safe_float(opt.get("sl_option_price"), 0.0)
+        if new_trig <= prev + 0.04:
+            return
+        lot_size = max(1, int(opt.get("lot_size", 1)))
+        rem_lots = max(0, int(opt.get("remaining_lots", 0)))
+        qty = rem_lots * lot_size
+        net_u = self._net_option_units_for_instrument(str(opt.get("instrument_key") or ""))
+        if net_u is not None and net_u > 0:
+            qty = max(1, int(net_u))
+        if qty <= 0:
+            return
+        opt["sl_option_price"] = float(new_trig)
+        gids = opt.setdefault("gtt_ids", {"sl": "", "tp1": "", "tp2": "", "tp3": ""})
+        old = str(gids.get("sl") or "").strip()
+        if old:
+            res_c = self.client.cancel_gtt_order(old)
+            if res_c.get("status") != "success":
+                self._bot_logger.warning(
+                    "OPTIONS LADDER: SL cancel failed (will attempt new GTT): %s", res_c.get("error")
+                )
+            gids["sl"] = ""
+        res = self.client.place_gtt_order(
+            instrument_key=str(opt.get("instrument_key") or ""),
+            quantity=int(qty),
+            transaction_type="SELL",
+            trigger_price=float(new_trig),
+            limit_price=float(new_trig),
+            tag=f"opt_sl_trail_{script_name.lower()}",
+        )
+        if res.get("status") == "success":
+            gids["sl"] = self._gtt_id_from_response(res)
+            self._bot_logger.info(
+                "OPTIONS LADDER SL REPLACE: %s trigger=%.2f qty=%s id=%s",
+                script_name,
+                new_trig,
+                qty,
+                gids["sl"],
+            )
+        else:
+            self._bot_logger.warning(
+                "OPTIONS LADDER SL REPLACE failed: %s err=%s", script_name, res.get("error")
+            )
+
+    def _ladder_replace_sl_breakeven(
+        self, script_name: str, opt: dict, lots_open: int, reason: str
+    ) -> None:
+        """After TP fills, cancel/replace protective SL GTT at ~entry premium for remaining lots."""
+        if not bool(self.config.get("options_gtt_enabled", True)):
+            return
+        lot_size = max(1, int(opt.get("lot_size", 1)))
+        qty = max(1, int(lots_open) * lot_size)
+        entry_o = self._safe_float(opt.get("entry_price_option"), 0.0)
+        if entry_o <= 0:
+            return
+        trig = self._round_to_tick(entry_o * 0.999)
+        gids = opt.setdefault("gtt_ids", {"sl": "", "tp1": "", "tp2": "", "tp3": ""})
+        old = str(gids.get("sl") or "").strip()
+        if old:
+            self.client.cancel_gtt_order(old)
+            gids["sl"] = ""
+        res = self.client.place_gtt_order(
+            instrument_key=str(opt.get("instrument_key") or ""),
+            quantity=int(qty),
+            transaction_type="SELL",
+            trigger_price=float(trig),
+            limit_price=float(trig),
+            tag=f"opt_sl_be_{script_name.lower()}",
+        )
+        if res.get("status") == "success":
+            gids["sl"] = self._gtt_id_from_response(res)
+            opt["sl_option_price"] = float(trig)
+            self._bot_logger.info(
+                "OPTIONS LADDER BE SL: %s reason=%s qty=%d trigger=%.2f id=%s",
+                script_name,
+                reason,
+                qty,
+                trig,
+                gids["sl"],
+            )
+
+    def _reconcile_ladder_partial_fills(self, script_name: str, opt: dict) -> None:
+        """Use broker net qty to detect TP leg fills and refresh SL GTT (post 1:1 / 1:2)."""
+        if not opt.get("gtt_ladder"):
+            return
+        ikey = str(opt.get("instrument_key") or "")
+        lot_size = max(1, int(opt.get("lot_size", 1)))
+        total_lots = max(1, int(opt.get("total_lots", 4)))
+        splits = list(self.config.get("options_tp_lot_splits") or [2, 1, 1])
+        u = self._net_option_units_for_instrument(ikey)
+        if u is None:
+            return
+        opt["last_net_units"] = int(u)
+        lots_open = max(0, int(u // lot_size))
+        prev = max(0, int(opt.get("remaining_lots", total_lots)))
+        if lots_open >= prev:
+            return
+        opt["remaining_lots"] = lots_open
+        self._bot_logger.info(
+            "OPTIONS LADDER FILL SYNC: %s net_units=%s lots_open=%s (was %s)",
+            script_name,
+            u,
+            lots_open,
+            prev,
+        )
+        if sum(splits) != total_lots or len(splits) != 3:
+            return
+        if (
+            not bool(opt.get("ladder_tp1_done"))
+            and lots_open <= total_lots - int(splits[0])
+        ):
+            opt["ladder_tp1_done"] = True
+            self._ladder_replace_sl_breakeven(script_name, opt, lots_open, "POST_TP1")
+        elif (
+            bool(opt.get("ladder_tp1_done"))
+            and not bool(opt.get("ladder_tp2_done"))
+            and lots_open <= total_lots - int(splits[0]) - int(splits[1])
+        ):
+            opt["ladder_tp2_done"] = True
+            self._ladder_replace_sl_breakeven(script_name, opt, lots_open, "POST_TP2")
+
+    def _option_chart_crossover_should_exit(self, opt: dict) -> bool:
+        """EMA crossover on option instrument intraday series (exit long option on bearish cross)."""
+        if not bool(self.config.get("options_chart_crossover_exit", True)):
+            return False
+        interval = str(self.config.get("options_crossover_interval") or "5minute")
+        ikey = str(opt.get("instrument_key") or "")
+        df = self.client.get_intraday_candles(ikey, interval)
+        if df is None or len(df) < 22:
+            return False
+        sig_df = self.analyzer.calculate_signals(df)
+        if sig_df is None or len(sig_df) < 3:
+            return False
+        row = sig_df.iloc[-1]
+        prev_sig = int(sig_df.iloc[-2].get("signal", 0))
+        cur_sig = int(row.get("signal", 0))
+        crossed = bool(row.get("crossover", False))
+        fut_side = str(opt.get("futures_side") or "BUY").upper()
+        if fut_side == "BUY":
+            return crossed and prev_sig == 1 and cur_sig == -1
+        return crossed and prev_sig == -1 and cur_sig == 1
+
+    def _start_options_companion(self, script_name: str, futures_position: dict, entry_price: float, initial_sl: float):
+        """Open ATM option companion trade with staged lot-management metadata."""
+        if not bool(self.config.get("options_enabled", False)):
+            return
+        if self._script_segment(script_name) != "NSE":
+            return
+        if script_name not in set(self.config.get("options_scripts", [])):
+            return
+        if script_name in self.option_positions:
+            return
+        fut_side = str(futures_position.get("type") or "").upper()
+        if fut_side not in {"BUY", "SELL"}:
+            return
+        opt_type = self._option_type_for_futures_side(fut_side)
+        opt_side = self._option_side_for_futures_side(fut_side)
+        atm = self._resolve_atm_option_for_script(script_name, float(entry_price), opt_type)
+        if not atm:
+            self._bot_logger.warning(f"OPTIONS: No ATM {opt_type} contract found for {script_name}")
+            return
+        now_ist = self._now_ist()
+        exp_d = _ist_date_from_expiry_ms(int(atm["expiry_ms"]))
+        cutoff = self._options_expiry_cutoff_dt(now_ist)
+        if exp_d == now_ist.date() and cutoff is not None and now_ist >= cutoff:
+            self._bot_logger.info(
+                "OPTIONS SKIP: %s no new companion after %s IST on option expiry day (expiry_date=%s)",
+                script_name,
+                str(self.config.get("options_expiry_day_cutoff_ist") or "12:00"),
+                exp_d.isoformat(),
+            )
+            return
+        total_lots = int(self.config.get("options_total_lots", 4))
+        lot_size = int(atm.get("lot_size", 1))
+        qty = max(1, total_lots * lot_size)
+        order = self.client.place_order(atm["instrument_key"], qty, opt_side)
+        if not order or order.get("status") != "success":
+            self._bot_logger.error(
+                f"OPTIONS ENTRY FAILED: {script_name} {opt_type} qty={qty} err={(order or {}).get('error')}"
+            )
+            return
+        order_id = str((order.get("data") or {}).get("order_id", "") or "").strip()
+        time.sleep(0.35)
+        fill_px = self.client.get_order_average_price(order_id) if order_id else None
+        opt_entry_price = float(fill_px) if fill_px and float(fill_px) > 0 else 0.0
+        if opt_entry_price <= 0:
+            ltp = self.client.get_ltp(atm["instrument_key"])
+            opt_entry_price = float(ltp) if ltp is not None and ltp > 0 else 0.0
+        if order_id:
+            self._bot_logger.info(
+                "OPTIONS ENTRY FILL: %s order_id=%s avg_fill=%s entry_opt_used=%.2f",
+                script_name,
+                order_id,
+                fill_px,
+                float(opt_entry_price),
+            )
+        risk_pts = abs(float(entry_price) - float(initial_sl))
+        if risk_pts <= 0:
+            risk_pts = max(1.0, abs(float(entry_price)) * 0.002)
+        side_mult = 1.0 if fut_side == "BUY" else -1.0
+        r1 = float(entry_price) + side_mult * risk_pts
+        r2 = float(entry_price) + side_mult * (2.0 * risk_pts)
+        r3 = float(entry_price) + side_mult * (float(self.config.get("options_target3_r", 3.0)) * risk_pts)
+
+        exit_mode = str(self.config.get("options_exit_mode") or "ladder_gtt").strip().lower()
+        if exit_mode == "ladder_gtt" and float(opt_entry_price) > 0:
+            premium_r = self._compute_option_premium_r(
+                float(entry_price),
+                float(initial_sl),
+                float(atm.get("strike") or 0.0),
+                int(atm.get("expiry_ms") or 0),
+                opt_type,
+                float(opt_entry_price),
+            )
+            self.option_positions[script_name] = {
+                "parent_trade_id": futures_position.get("trade_id"),
+                "futures_side": fut_side,
+                "instrument_key": atm["instrument_key"],
+                "trading_symbol": atm.get("trading_symbol"),
+                "option_type": opt_type,
+                "expiry_ms": int(atm.get("expiry_ms") or 0),
+                "atm_strike": float(atm.get("strike") or 0.0),
+                "entry_time": datetime.now().isoformat(),
+                "entry_order_id": order_id,
+                "entry_price_option": float(opt_entry_price),
+                "entry_price_underlying": float(entry_price),
+                "lot_size": lot_size,
+                "total_lots": total_lots,
+                "remaining_lots": total_lots,
+                "booked_lots": 0,
+                "gtt_ladder": True,
+                "gtt_ids": {"sl": "", "tp1": "", "tp2": "", "tp3": ""},
+                "premium_r": float(premium_r),
+                "ladder_tp1_done": False,
+                "ladder_tp2_done": False,
+                "last_net_units": None,
+                "initial_sl_underlying": float(initial_sl),
+                "sl_underlying": float(initial_sl),
+                "r1_underlying": float(r1),
+                "r2_underlying": float(r2),
+                "final_underlying": float(r3),
+                "sl_option_price": 0.0,
+                "active_sl_gtt_id": "",
+            }
+            sl_t = self._round_to_tick(float(opt_entry_price) - float(premium_r))
+            tp1_t = self._round_to_tick(float(opt_entry_price) + float(premium_r))
+            tp2_t = self._round_to_tick(float(opt_entry_price) + 2.0 * float(premium_r))
+            tp3_t = self._round_to_tick(float(opt_entry_price) + 3.0 * float(premium_r))
+            self._bot_logger.info(
+                "OPTIONS LADDER ENTRY: %s %s key=%s qty=%s entry_opt=%.2f premium_R=%.2f "
+                "SL_trig=%.2f TP1=%.2f TP2=%.2f TP3=%.2f fut_r1=%.2f",
+                script_name,
+                opt_type,
+                atm["instrument_key"],
+                qty,
+                float(opt_entry_price),
+                float(premium_r),
+                sl_t,
+                tp1_t,
+                tp2_t,
+                tp3_t,
+                r1,
+            )
+            self._log_order_event(
+                f"{script_name}_OPT",
+                action="ENTRY",
+                side="BUY",
+                price=float(opt_entry_price),
+                reason="FUTURES_SIGNAL_ATM_OPTION_LADDER",
+                extra=(
+                    f"symbol={atm.get('trading_symbol')}; order_id={order_id}; type={opt_type}; "
+                    f"lots={total_lots}; lot_size={lot_size}; premium_R={premium_r:.2f}; "
+                    f"fut_entry={entry_price:.2f}; fut_sl={initial_sl:.2f}; "
+                    f"sl_trig={sl_t:.2f}; tp1={tp1_t:.2f}; tp2={tp2_t:.2f}; tp3={tp3_t:.2f}"
+                ),
+            )
+            self._place_option_gtt_ladder(script_name, self.option_positions[script_name])
+            return
+
+        if float(opt_entry_price) <= 0:
+            self._bot_logger.warning(
+                "OPTIONS: %s LTP unavailable at entry — hybrid SL deferred until manage loop",
+                script_name,
+            )
+        sl_opt = self._option_hybrid_sl_premium(
+            float(entry_price), float(initial_sl), float(opt_entry_price or 0.0)
+        )
+        if float(opt_entry_price) <= 0:
+            sl_opt = 0.0
+        self.option_positions[script_name] = {
+            "parent_trade_id": futures_position.get("trade_id"),
+            "futures_side": fut_side,
+            "instrument_key": atm["instrument_key"],
+            "trading_symbol": atm.get("trading_symbol"),
+            "option_type": opt_type,
+            "expiry_ms": int(atm.get("expiry_ms") or 0),
+            "entry_time": datetime.now().isoformat(),
+            "entry_price_option": float(opt_entry_price),
+            "entry_price_underlying": float(entry_price),
+            "lot_size": lot_size,
+            "total_lots": total_lots,
+            "remaining_lots": total_lots,
+            "booked_lots": 0,
+            "r1_hit": False,
+            "r2_hit": False,
+            "final_hit": False,
+            "options_rupee_tp_done": False,
+            "gtt_ladder": False,
+            "initial_sl_underlying": float(initial_sl),
+            "sl_underlying": float(initial_sl),
+            "sl_option_price": float(sl_opt),
+            "r1_underlying": float(r1),
+            "r2_underlying": float(r2),
+            "final_underlying": float(r3),
+            "active_sl_gtt_id": "",
+        }
+        self._bot_logger.info(
+            f"OPTIONS ENTRY: {script_name} {opt_type} key={atm['instrument_key']} qty={qty} "
+            f"entry_opt={float(opt_entry_price):.2f} hybrid_sl_opt={float(sl_opt):.2f} "
+            f"r1={r1:.2f} r2={r2:.2f} final={r3:.2f} expiry_ms={atm.get('expiry_ms')}"
+        )
+        self._log_order_event(
+            f"{script_name}_OPT",
+            action="ENTRY",
+            side="BUY",
+            price=float(opt_entry_price),
+            reason="FUTURES_SIGNAL_ATM_OPTION",
+            extra=(
+                f"symbol={atm.get('trading_symbol')}; type={opt_type}; lots={total_lots}; lot_size={lot_size}; "
+                f"fut_entry={entry_price:.2f}; fut_sl={initial_sl:.2f}; hybrid_sl_opt={sl_opt:.2f}; "
+                f"r1={r1:.2f}; r2={r2:.2f}; final={r3:.2f}; expiry_ms={atm.get('expiry_ms')}"
+            ),
+        )
+        self._place_or_replace_option_sl_gtt(script_name, self.option_positions[script_name])
+
+    def _close_option_lots(self, script_name: str, opt_pos: dict, lots_to_close: int, reason: str) -> bool:
+        lot_size = int(opt_pos.get("lot_size", 1))
+        rem = int(opt_pos.get("remaining_lots", 0))
+        lots = min(max(0, int(lots_to_close)), rem)
+        if lots <= 0:
+            return False
+        qty = max(1, lots * lot_size)
+        res = self.client.place_order(str(opt_pos.get("instrument_key") or ""), qty, "SELL")
+        if not res or res.get("status") != "success":
+            self._bot_logger.error(
+                f"OPTIONS EXIT FAILED: {script_name} lots={lots} qty={qty} reason={reason} err={(res or {}).get('error')}"
+            )
+            return False
+        opt_ltp = self.client.get_ltp(str(opt_pos.get("instrument_key") or ""))
+        if opt_ltp is None:
+            opt_ltp = 0.0
+        opt_pos["remaining_lots"] = rem - lots
+        opt_pos["booked_lots"] = int(opt_pos.get("booked_lots", 0)) + lots
+        self._log_order_event(
+            f"{script_name}_OPT",
+            action="EXIT",
+            side="SELL",
+            price=float(opt_ltp),
+            reason=reason,
+            extra=f"lots={lots}; remaining_lots={opt_pos.get('remaining_lots')}; instrument={opt_pos.get('trading_symbol')}",
+        )
+        return True
+
+    def _close_all_option_for_script(self, script_name: str, reason: str, force_remove: bool = False) -> None:
+        opt = self.option_positions.get(script_name)
+        if not isinstance(opt, dict):
+            return
+        self._cancel_all_option_gtts(opt)
+        rem = int(opt.get("remaining_lots", 0))
+        if rem > 0:
+            ok = self._close_option_lots(script_name, opt, rem, reason)
+            if not ok and not force_remove:
+                return
+        self.option_positions.pop(script_name, None)
+
+    def _sync_option_sl_from_underlying_model(self, script_name: str, opt: dict) -> None:
+        """Ratchet option GTT trigger up when futures trailing SL tightens (delta-mapped premium)."""
+        if not bool(self.config.get("options_gtt_enabled", True)):
+            return
+        entry_opt = self._safe_float(opt.get("entry_price_option"), 0.0)
+        entry_u = self._safe_float(opt.get("entry_price_underlying"), 0.0)
+        sl_u = self._safe_float(opt.get("sl_underlying"), 0.0)
+        if entry_opt <= 0 or entry_u <= 0:
+            return
+        cand = self._option_hybrid_sl_premium(entry_u, sl_u, entry_opt)
+        prev = self._safe_float(opt.get("sl_option_price"), 0.0)
+        new_sl = max(prev, cand)
+        if new_sl > prev + 0.04:
+            opt["sl_option_price"] = float(new_sl)
+            self._place_or_replace_option_sl_gtt(script_name, opt)
+            self._bot_logger.info(
+                "OPTIONS SL SYNC: %s sl_opt %.2f -> %.2f (fut_sl=%.2f)",
+                script_name,
+                prev,
+                new_sl,
+                sl_u,
+            )
+
+    def _manage_option_positions(self, latest_prices: dict[str, float]) -> None:
+        if not self.option_positions:
+            return
+        for script_name in list(self.option_positions.keys()):
+            opt = self.option_positions.get(script_name)
+            if not isinstance(opt, dict):
+                continue
+            if script_name not in self.positions:
+                self._close_all_option_for_script(script_name, "FUTURES_POSITION_CLOSED", force_remove=True)
+                continue
+            px = latest_prices.get(script_name)
+            if px is None:
+                continue
+            side = str(opt.get("futures_side") or "").upper()
+            if side not in {"BUY", "SELL"}:
+                continue
+            if opt.get("gtt_ladder"):
+                if self._option_chart_crossover_should_exit(opt):
+                    self._bot_logger.info("OPTIONS LADDER CHART EXIT: %s", script_name)
+                    self._close_all_option_for_script(
+                        script_name, "OPT_CHART_CROSSOVER", force_remove=True
+                    )
+                    continue
+                self._refresh_ladder_sl_gtt_from_futures(script_name, opt)
+                self._reconcile_ladder_partial_fills(script_name, opt)
+                ikey = str(opt.get("instrument_key") or "")
+                netu = self._net_option_units_for_instrument(ikey)
+                if netu is not None and netu <= 0:
+                    self._cancel_all_option_gtts(opt)
+                    self.option_positions.pop(script_name, None)
+                    self._bot_logger.info(
+                        "OPTIONS LADDER: flat at broker; cleared state %s", script_name
+                    )
+                continue
+            if self._safe_float(opt.get("entry_price_option"), 0.0) <= 0:
+                seed_ltp = self.client.get_ltp(str(opt.get("instrument_key") or ""))
+                if seed_ltp is not None and seed_ltp > 0:
+                    opt["entry_price_option"] = float(seed_ltp)
+                    opt["sl_option_price"] = self._option_hybrid_sl_premium(
+                        self._safe_float(opt.get("entry_price_underlying"), 0.0),
+                        self._safe_float(opt.get("sl_underlying"), 0.0),
+                        float(seed_ltp),
+                    )
+                    self._bot_logger.info(
+                        "OPTIONS DEFER ENTRY: %s entry_opt=%.2f sl_opt=%.2f (first LTP)",
+                        script_name,
+                        float(seed_ltp),
+                        float(opt["sl_option_price"]),
+                    )
+                    self._place_or_replace_option_sl_gtt(script_name, opt)
+            self._sync_option_sl_from_underlying_model(script_name, opt)
+
+            tgt = self._options_scaled_rupee_profit_target(opt)
+            ob = self.config.get("options_rupee_profit_booking") or {}
+            if (
+                tgt is not None
+                and not bool(opt.get("options_rupee_tp_done"))
+                and int(opt.get("remaining_lots", 0)) > 0
+            ):
+                opt_ltp = self.client.get_ltp(str(opt.get("instrument_key") or ""))
+                if opt_ltp is not None and opt_ltp > 0:
+                    entry_opt = self._safe_float(opt.get("entry_price_option"), 0.0)
+                    if entry_opt > 0:
+                        rem_lots = int(opt.get("remaining_lots", 0))
+                        lot_sz = int(opt.get("lot_size", 1))
+                        qty_open = max(0, rem_lots * lot_sz)
+                        mfe_pnl = (float(opt_ltp) - entry_opt) * float(qty_open)
+                        if mfe_pnl >= float(tgt):
+                            frac = float(ob.get("lot_fraction", 0.25))
+                            lots_close = int(math.ceil(rem_lots * max(0.05, min(1.0, frac))))
+                            lots_close = max(1, min(lots_close, rem_lots))
+                            if self._close_option_lots(script_name, opt, lots_close, "OPT_RUPEE_TP"):
+                                opt["options_rupee_tp_done"] = True
+                                self._bot_logger.info(
+                                    "OPTIONS RUPEE TP: %s booked %d lots mfe_pnl=%.2f target=%.2f",
+                                    script_name,
+                                    lots_close,
+                                    mfe_pnl,
+                                    float(tgt),
+                                )
+                                self._place_or_replace_option_sl_gtt(script_name, opt)
+
+            r1 = self._safe_float(opt.get("r1_underlying"), 0.0)
+            r2 = self._safe_float(opt.get("r2_underlying"), 0.0)
+            r3 = self._safe_float(opt.get("final_underlying"), 0.0)
+            hit_r1 = px >= r1 if side == "BUY" else px <= r1
+            hit_r2 = px >= r2 if side == "BUY" else px <= r2
+            hit_r3 = px >= r3 if side == "BUY" else px <= r3
+
+            if (not bool(opt.get("r1_hit"))) and hit_r1:
+                if self._close_option_lots(script_name, opt, 2, "OPT_TP_1R"):
+                    opt["r1_hit"] = True
+                    opt["sl_underlying"] = float(opt.get("entry_price_underlying", px)) + (
+                        float(self.config.get("options_breakeven_buffer_points", 0.0)) * (1.0 if side == "BUY" else -1.0)
+                    )
+                    opt_ltp = self.client.get_ltp(str(opt.get("instrument_key") or ""))
+                    if opt_ltp is not None and opt_ltp > 0:
+                        prev_sl = self._safe_float(opt.get("sl_option_price"), 0.0)
+                        opt["sl_option_price"] = max(prev_sl, float(opt_ltp))
+                    self._place_or_replace_option_sl_gtt(script_name, opt)
+
+            if (not bool(opt.get("r2_hit"))) and hit_r2:
+                if self._close_option_lots(script_name, opt, 1, "OPT_TP_2R"):
+                    opt["r2_hit"] = True
+                    opt["sl_underlying"] = float(opt.get("r1_underlying", px))
+                    self._place_or_replace_option_sl_gtt(script_name, opt)
+
+            if (not bool(opt.get("final_hit"))) and hit_r3:
+                if self._close_option_lots(script_name, opt, int(opt.get("remaining_lots", 0)), "OPT_TP_FINAL"):
+                    opt["final_hit"] = True
+                    self._close_all_option_for_script(script_name, "OPT_CYCLE_DONE", force_remove=True)
+                    continue
+
+            if int(opt.get("remaining_lots", 0)) <= 0:
+                self.option_positions.pop(script_name, None)
 
     @staticmethod
     def _stoploss_reason(position):
@@ -1555,10 +2695,10 @@ class TradingBot:
             self._bse_instruments_cache_at = now_ts
         return instruments
 
-    def _get_fo_contract_candidates(self, script_name: str) -> list[str]:
+    def _list_fo_futures_candidates_sorted(self, script_name: str) -> list[tuple[int, str]]:
         """
-        Candidate keys for NSE_FO/BSE_FO rollovers.
-        Filters by FUT + correct segment + trading_symbol root + active expiry + lot_size.
+        Active NSE_FO/BSE_FO futures for this root, sorted by expiry then instrument_key.
+        Returns (expiry_ms, instrument_key) with unique keys.
         """
         seg = "BSE_FO" if script_name == "SENSEX" else "NSE_FO"
         exchange = "bse" if script_name == "SENSEX" else "nse"
@@ -1586,7 +2726,6 @@ class TradingBot:
             if instrument_type != "FUT":
                 continue
 
-            # Match root as the first token (e.g. "LT FUT ..."), not substring ("LT" must not match "BOSCHLTD").
             trading_symbol = str(row.get("trading_symbol", "")).upper().strip()
             first_tok = trading_symbol.split()[0] if trading_symbol else ""
             if first_tok not in roots:
@@ -1610,16 +2749,73 @@ class TradingBot:
 
             candidates.append((expiry_ms, instrument_key))
 
-        # Sort by expiry then key; remove duplicates by key while preserving order.
         candidates.sort(key=lambda item: (item[0], item[1]))
-        out: list[str] = []
+        out: list[tuple[int, str]] = []
         seen: set[str] = set()
-        for _, key in candidates:
+        for ms, key in candidates:
             if key in seen:
                 continue
             seen.add(key)
-            out.append(key)
+            out.append((ms, key))
         return out
+
+    def _get_fo_contract_candidates(self, script_name: str) -> list[str]:
+        """Candidate keys for NSE_FO/BSE_FO rollovers (front month first)."""
+        return [key for _, key in self._list_fo_futures_candidates_sorted(script_name)]
+
+    def _select_index_fo_contract_avoiding_expiring_front(self, script_name: str) -> str | None:
+        """
+        On the front contract's expiry day, trade the next serial month for index futures
+        (NIFTY / BANKNIFTY / SENSEX) so entries are not pinned to the expiring lot.
+        """
+        rows = self._list_fo_futures_candidates_sorted(script_name)
+        if not rows:
+            return None
+        if script_name not in _INDEX_FO_SCRIPT_NAMES:
+            return rows[0][1]
+        now_ist = self._now_ist()
+        today = now_ist.date()
+        front_ms, front_key = rows[0]
+        if _ist_date_from_expiry_ms(front_ms) == today:
+            if len(rows) > 1:
+                self._bot_logger.info(
+                    "INDEX FUTURES: %s expiry day — selecting next serial contract (skip expiring front %s)",
+                    script_name,
+                    front_key,
+                )
+                return rows[1][1]
+            self._bot_logger.warning(
+                "INDEX FUTURES: %s expiry day but only one contract in chain; using %s",
+                script_name,
+                front_key,
+            )
+        return front_key
+
+    def _maybe_refresh_index_futures_tokens_expiry_day(self) -> None:
+        """If live config still references today's expiring front-month index future, advance to next."""
+        now_ts = time.time()
+        if now_ts - self._last_index_fo_token_refresh_ts < 120.0:
+            return
+        self._last_index_fo_token_refresh_ts = now_ts
+        for script_name in _INDEX_FO_SCRIPT_NAMES:
+            rows = self._list_fo_futures_candidates_sorted(script_name)
+            if len(rows) < 2:
+                continue
+            front_ms, front_key = rows[0]
+            if _ist_date_from_expiry_ms(front_ms) != self._now_ist().date():
+                continue
+            cur = str(self._get_order_token(script_name) or "").strip()
+            if cur and cur != front_key:
+                continue
+            _, next_key = rows[1]
+            self._bot_logger.info(
+                "INDEX FUTURES ROLL: %s token %s -> %s (expiry-day next serial)",
+                script_name,
+                front_key,
+                next_key,
+            )
+            self.config.setdefault("scripts", {})[script_name] = next_key
+            self.config.setdefault("order_tokens", {})[script_name] = next_key
 
     def _get_mcx_contract_candidates(self, script_name):
         script_roots = {
@@ -2687,9 +3883,253 @@ class TradingBot:
         if closed_df.empty:
             return None
         return closed_df.iloc[-1]
-    
+
+    def _market_data_is_kite(self) -> bool:
+        return (
+            str(self.config.get("market_data_provider") or "upstox").strip().lower() == "kite"
+        )
+
+    def _signal_bucket_minutes(self) -> int:
+        """Minutes per bar for ``signal_interval`` (used for boundary wake timing)."""
+        s = str(self.config.get("signal_interval") or "5minute").strip().lower().replace(" ", "")
+        if s in ("5minute", "5m", "5min"):
+            return 5
+        if s in ("1minute", "1m", "1min"):
+            return 1
+        if s in ("3minute", "3m", "3min"):
+            return 3
+        if s in ("15minute", "15m", "15min"):
+            return 15
+        if s in ("30minute", "30m", "30min"):
+            return 30
+        if s in ("60minute", "60m", "1hour", "1h"):
+            return 60
+        return 5
+
+    def _kite_signal_boundary_wake_enabled(self) -> bool:
+        """Wake the main loop right after each signal bar closes (IST), not only on loop_interval."""
+        if not self._market_data_is_kite():
+            return False
+        return os.environ.get("KITE_SIGNAL_BOUNDARY_WAKE", "1").strip().lower() not in (
+            "0",
+            "false",
+            "no",
+        )
+
+    def _seconds_until_next_signal_bar_fire_ist(self) -> float:
+        """Seconds until (floor IST bucket + offset) for the next strategy evaluation after a bar close."""
+        try:
+            offset = float(os.environ.get("KITE_BOUNDARY_EVAL_OFFSET_SEC", "2"))
+        except ValueError:
+            offset = 2.0
+        offset = max(0.0, offset)
+        mins = max(1, int(self._signal_bucket_minutes()))
+        ts = pd.Timestamp(datetime.now(ZoneInfo("Asia/Kolkata")))
+        flo = ts.floor(f"{mins}min")
+        fire = flo + pd.Timedelta(seconds=offset)
+        if ts < fire:
+            return max(0.05, (fire - ts).total_seconds())
+        nxt = flo + pd.Timedelta(minutes=mins) + pd.Timedelta(seconds=offset)
+        return max(0.05, (nxt - ts).total_seconds())
+
+    def _kite_stream_drive_exits(self) -> bool:
+        """When True, SL/target checks run on Kite LTP ticks (not only on the strategy loop)."""
+        if not self._market_data_is_kite():
+            return False
+        return os.environ.get("KITE_STREAM_DRIVE_EXITS", "1").strip().lower() not in (
+            "0",
+            "false",
+            "no",
+        )
+
+    def _on_kite_stream_after_ticks(self) -> None:
+        """KiteTicker thread: throttle and run SL/target path without waiting for loop_interval."""
+        if not self.running:
+            return
+        if not self._kite_stream_drive_exits():
+            return
+        now_m = time.monotonic()
+        if now_m - self._last_stream_exit_mono < self._stream_exit_min_interval:
+            return
+        self._last_stream_exit_mono = now_m
+        if not self.positions and not self.paper_positions:
+            return
+        if not self._strategy_lock.acquire(blocking=False):
+            return
+        try:
+            self._do_stream_exit_pass()
+        finally:
+            self._strategy_lock.release()
+
+    def _do_stream_exit_pass(self) -> None:
+        """Merge live LTP into cached candle snapshot; fire SL/target exits via Upstox immediately."""
+        if self._kite_tick_stream is None:
+            return
+        script_data: list[dict] = []
+        seen: set[str] = set()
+        for script in list(self.positions.keys()) + list(self.paper_positions.keys()):
+            s = str(script or "").strip().upper()
+            if not s or s in seen:
+                continue
+            seen.add(s)
+            cache = self._script_data_cache.get(s)
+            if not cache:
+                continue
+            px = self._kite_tick_stream.last_price(s)
+            if px is None or px <= 0:
+                continue
+            px = float(px)
+            row = dict(cache)
+            row["current_price"] = px
+            ch = float(cache.get("current_high", px))
+            cl = float(cache.get("current_low", px))
+            row["current_high"] = max(ch, px)
+            row["current_low"] = min(cl, px)
+            row["instrument_key"] = cache.get("instrument_key")
+            script_data.append(row)
+        if not script_data:
+            return
+        self.execute_trading_logic(
+            script_data,
+            allow_new_entries=False,
+            now_ist=self._now_ist(),
+            stream_exit_only=True,
+        )
+
+    def _get_kite_credentials(self) -> tuple[str, str] | None:
+        z = load_zerodha_credentials_for_user(self.username)
+        api_key = (z.get("api_key") or "").strip()
+        access_token = (z.get("access_token") or "").strip()
+        if not api_key or not access_token:
+            return None
+        return api_key, access_token
+
+    def _resolve_kite_futures_token(self, script_name: str) -> int | None:
+        sn = str(script_name or "").strip().upper()
+        ov = (self.config.get("kite_instrument_token_overrides") or {}).get(sn)
+        if ov is not None:
+            try:
+                t = int(ov)
+                if t > 0:
+                    self._kite_script_tokens[sn] = t
+                    return t
+            except (TypeError, ValueError):
+                pass
+        if sn in self._kite_script_tokens:
+            return int(self._kite_script_tokens[sn])
+        creds = self._get_kite_credentials()
+        if not creds:
+            return None
+        api_key, access_token = creds
+        tok = resolve_futures_instrument_token(sn, api_key, access_token)
+        if tok and tok > 0:
+            self._kite_script_tokens[sn] = int(tok)
+            return int(tok)
+        return None
+
+    def _ensure_kite_tick_feed(self, script_names: list[str]) -> None:
+        """Subscribe Kite WebSocket LTP for the given scripts (idempotent)."""
+        if not self._market_data_is_kite():
+            return
+        creds = self._get_kite_credentials()
+        if not creds:
+            self._bot_logger.warning(
+                "KITE: missing api_key/access_token in zerodha_credentials.json — tick stream disabled"
+            )
+            return
+        api_key, access_token = creds
+        mp: dict[str, int] = {}
+        for sn in script_names:
+            s = str(sn or "").strip().upper()
+            if not s:
+                continue
+            tok = self._resolve_kite_futures_token(s)
+            if tok and tok > 0:
+                mp[s] = int(tok)
+        if not mp:
+            return
+        if self._kite_tick_stream is None:
+            self._kite_tick_stream = KiteTickStream(api_key, access_token, self._bot_logger)
+            self._kite_tick_stream.set_subscriptions(mp)
+            if self._kite_tick_stream.start():
+                self._bot_logger.info(
+                    "KITE TICK STREAM: started for %s", ",".join(sorted(mp.keys()))
+                )
+        else:
+            self._kite_tick_stream.set_subscriptions(mp)
+        if self._kite_tick_stream is not None:
+            self._kite_tick_stream.on_after_ticks = (
+                self._on_kite_stream_after_ticks if self._kite_stream_drive_exits() else None
+            )
+
+    def _fetch_market_data_kite(self, script_name: str, instrument_key: str):
+        """Candles from Kite REST (continuous futures where applicable); LTP from tick stream in process_script."""
+        creds = self._get_kite_credentials()
+        if not creds:
+            self._bot_logger.error(
+                "KITE: no Zerodha credentials for user %s — cannot load candles", self.username
+            )
+            return None
+        api_key, access_token = creds
+        tok = self._resolve_kite_futures_token(script_name)
+        if not tok:
+            self._bot_logger.error(
+                "KITE: could not resolve instrument_token for %s — set kite_instrument_token_overrides",
+                script_name,
+            )
+            return None
+        kite_iv = map_bot_interval_to_kite(self.config.get("interval", "1minute"))
+        from_d, to_d = default_swing_window()
+        use_cont = "1" if script_name in _INDEX_FO_SCRIPT_NAMES else "0"
+        try:
+            rows = fetch_historical_raw(
+                api_key,
+                access_token,
+                tok,
+                kite_iv,
+                from_d,
+                to_d,
+                continuous=use_cont,
+            )
+        except Exception as e:
+            self._bot_logger.warning(
+                "KITE: historical %s continuous=%s failed (%s); retry continuous=0",
+                script_name,
+                use_cont,
+                e,
+            )
+            try:
+                rows = fetch_historical_raw(
+                    api_key,
+                    access_token,
+                    tok,
+                    kite_iv,
+                    from_d,
+                    to_d,
+                    continuous="0",
+                )
+            except Exception as e2:
+                self._bot_logger.error("KITE: historical %s failed: %s", script_name, e2)
+                return None
+        df = kite_candles_to_dataframe(rows)
+        if df is None or df.empty:
+            return None
+        df = self._resample_for_signal(df)
+        if df is None or df.empty:
+            return None
+        self._bot_logger.info(
+            " %s: Kite %d candles (%s) | Latest close Rs%.2f",
+            script_name,
+            len(df),
+            self.config.get("signal_interval", "1minute"),
+            float(df["close"].iloc[-1]),
+        )
+        return df
+
     def fetch_market_data(self, script_name, instrument_key):
         """Fetch and combine historical + intraday market data"""
+        if self._market_data_is_kite():
+            return self._fetch_market_data_kite(script_name, instrument_key)
         try:
             instrument_key = self.config.get('scripts', {}).get(script_name, instrument_key)
             # Get dates
@@ -2835,7 +4275,7 @@ class TradingBot:
                 signal_status = "NEUTRAL"
                 color = Fore.YELLOW
             
-            return {
+            out = {
                 'script_name': script_name,
                 'instrument_key': self.config.get('scripts', {}).get(script_name, instrument_key),
                 'current_price': current_price,
@@ -2859,6 +4299,11 @@ class TradingBot:
                 'entry_candle_timestamp': closed_timestamp,
                 'df': df
             }
+            if self._market_data_is_kite() and self._kite_tick_stream is not None:
+                klp = self._kite_tick_stream.last_price(script_name)
+                if klp is not None and klp > 0:
+                    out["current_price"] = float(klp)
+            return out
             
         except Exception as e:
             self._bot_logger.error(f"ERROR: Error processing {script_name}: {e}")
@@ -2910,8 +4355,18 @@ class TradingBot:
                 )
         print("="*110 + "\n")
     
-    def execute_trading_logic(self, script_data, allow_new_entries=True, now_ist=None):
-        """Execute trading logic based on signals"""
+    def execute_trading_logic(
+        self,
+        script_data,
+        allow_new_entries=True,
+        now_ist=None,
+        stream_exit_only: bool = False,
+    ):
+        """Execute trading logic based on signals.
+
+        When ``stream_exit_only`` is True (Kite LTP path), only SL/target/trailing and
+        last_polled_price updates run; OB/crossover exits and new entries are skipped.
+        """
         if now_ist is None:
             now_ist = self._now_ist()
 
@@ -2920,6 +4375,8 @@ class TradingBot:
                 continue
             
             script_name = data['script_name']
+            if stream_exit_only and script_name not in self.positions and script_name not in self.paper_positions:
+                continue
             signal = data['signal']
             current_price = data['current_price']
             current_high = float(data.get('current_high', current_price) or current_price)
@@ -2954,7 +4411,11 @@ class TradingBot:
 
                 confirmed_time_text = confirmed_candle_timestamp.isoformat() if hasattr(confirmed_candle_timestamp, 'isoformat') else 'NA'
                 last_eval_ts = self.last_position_eval_logged.get(script_name)
-                if confirmed_time_text != 'NA' and last_eval_ts != confirmed_time_text:
+                if (
+                    not stream_exit_only
+                    and confirmed_time_text != 'NA'
+                    and last_eval_ts != confirmed_time_text
+                ):
                     self._bot_logger.info(
                         f"VERIFY: {script_name} open={position['type']} | entry={position['entry_price']:.2f} | "
                         f"closed_signal={confirmed_signal} | closed_crossover={bool(confirmed_crossover)} | "
@@ -3027,6 +4488,7 @@ class TradingBot:
                         if is_paper:
                             del self.paper_positions[script_name]
                         else:
+                            self._close_all_option_for_script(script_name, "FUTURES_EXIT")
                             del self.positions[script_name]
                         self.save_state()
                         continue
@@ -3076,6 +4538,7 @@ class TradingBot:
                         )
                     )
                     self._notify_dashboard_trade_close(script_name, position, current_price)
+                    self._close_all_option_for_script(script_name, "FUTURES_EXIT")
                     del self.positions[script_name]
                     self.save_state()
                     continue
@@ -3096,6 +4559,7 @@ class TradingBot:
                         if is_paper:
                             del self.paper_positions[script_name]
                         else:
+                            self._close_all_option_for_script(script_name, "FUTURES_EXIT")
                             del self.positions[script_name]
                         self.save_state()
                         continue
@@ -3145,6 +4609,7 @@ class TradingBot:
                         )
                     )
                     self._notify_dashboard_trade_close(script_name, position, current_price)
+                    self._close_all_option_for_script(script_name, "FUTURES_EXIT")
                     del self.positions[script_name]
                     self.save_state()
                     continue
@@ -3181,6 +4646,7 @@ class TradingBot:
                         if is_paper:
                             del self.paper_positions[script_name]
                         else:
+                            self._close_all_option_for_script(script_name, "FUTURES_EXIT")
                             del self.positions[script_name]
                         self.save_state()
                         continue
@@ -3231,12 +4697,16 @@ class TradingBot:
                         )
                     )
                     self._notify_dashboard_trade_close(script_name, position, current_price)
+                    self._close_all_option_for_script(script_name, "FUTURES_EXIT")
                     del self.positions[script_name]
                     self.save_state()
                     continue
 
-                # Carry forward the current observation as baseline for next 10s gap check.
+                # Carry forward the current observation as baseline for next gap check (loop or LTP stream).
                 position['last_polled_price'] = float(current_price)
+
+                if stream_exit_only:
+                    continue
 
                 # Exit on OB zone breach (BigBeluga logic) or on confirmed crossover (reversal) with OB present
                 ob_zone_boundary = position.get('initial_sl')
@@ -3329,6 +4799,7 @@ class TradingBot:
                         )
                     )
                     self._notify_dashboard_trade_close(script_name, position, current_price)
+                    self._close_all_option_for_script(script_name, "FUTURES_EXIT")
                     del self.positions[script_name]
                     self.save_state()
                     # Immediately take reversal trade if crossover exit
@@ -3745,6 +5216,12 @@ class TradingBot:
                                 f"ema{self.config['ema_long']}_prev={entry_ema_long_prev:.2f}"
                             )
                         )
+                        self._start_options_companion(
+                            script_name=script_name,
+                            futures_position=self.positions[script_name],
+                            entry_price=entry_price,
+                            initial_sl=initial_sl,
+                        )
                         self.last_entry_candle_processed[script_name] = entry_candle_timestamp
                         self.save_state()
                         self._notify_dashboard_trade_open(
@@ -3986,6 +5463,12 @@ class TradingBot:
                                 f"ema{self.config['ema_long']}_prev={entry_ema_long_prev:.2f}"
                             )
                         )
+                        self._start_options_companion(
+                            script_name=script_name,
+                            futures_position=self.positions[script_name],
+                            entry_price=entry_price,
+                            initial_sl=initial_sl,
+                        )
                         self.last_entry_candle_processed[script_name] = entry_candle_timestamp
                         self.save_state()
                         self._notify_dashboard_trade_open(
@@ -4095,8 +5578,11 @@ class TradingBot:
         - "shutdown_all" — daily shutdown (runner stops every account)
         """
         self.client.refresh_credentials_if_changed()
+        self._maybe_refresh_index_futures_tokens_expiry_day()
         self._apply_manual_controls_from_disk()
         cycle_items = list(self._scripts_for_cycle())
+        if self._market_data_is_kite():
+            self._ensure_kite_tick_feed([n for n, _ in cycle_items])
         if not self._cycle_scope_logged_once:
             self._cycle_scope_logged_once = True
             self._bot_logger.info(
@@ -4112,6 +5598,8 @@ class TradingBot:
                 time.sleep(batch_sleep)
             data = self.process_script(script_name, instrument_key)
             script_data.append(data)
+            if data:
+                self._script_data_cache[str(script_name or "").strip().upper()] = data
 
         self.print_status_table(script_data)
 
@@ -4137,7 +5625,11 @@ class TradingBot:
         now_ist = self._now_ist()
         self._run_eod_squareoff(now_ist, latest_prices=latest_prices)
 
-        self.execute_trading_logic(script_data, allow_new_entries=allow_new_entries, now_ist=now_ist)
+        with self._strategy_lock:
+            self.execute_trading_logic(
+                script_data, allow_new_entries=allow_new_entries, now_ist=now_ist
+            )
+        self._manage_option_positions(latest_prices)
 
         # Paper live P&L on the dashboard reads trading_state.json; last_polled_price updates in RAM
         # each loop but was not persisted unless save_state ran elsewhere — sync LTP and flush.
@@ -4160,6 +5652,8 @@ class TradingBot:
                 f" Portfolio stop loss hit! Total loss: Rs{self.total_pnl:.2f}"
             )
             self._bot_logger.error(" Exiting all positions and stopping this account.")
+            for _s in list(self.option_positions.keys()):
+                self._close_all_option_for_script(_s, "PORTFOLIO_STOP", force_remove=True)
             self.positions.clear()
             self.save_state()
             self.running = False
@@ -4189,8 +5683,33 @@ class TradingBot:
         self._wait_for_upstox()
         if not self.running:
             return
+        if self._market_data_is_kite():
+            if not self._get_kite_credentials():
+                self._bot_logger.error(
+                    "market_data_provider=kite requires zerodha_credentials.json with api_key and access_token. Exiting."
+                )
+                return
+            self._bot_logger.info(
+                "MARKET DATA: Zerodha Kite (REST candles + WebSocket LTP); ORDERS: Upstox (unchanged)"
+            )
+            if self._kite_stream_drive_exits():
+                self._bot_logger.info(
+                    "KITE_STREAM_DRIVE_EXITS: SL/target (and trailing) run on LTP ticks; "
+                    "strategy loop interval=%ss is for candles/entries/OB exits (set KITE_STRATEGY_LOOP_SEC).",
+                    self.config.get("loop_interval", 10),
+                )
+            if self._kite_signal_boundary_wake_enabled():
+                self._bot_logger.info(
+                    "KITE_SIGNAL_BOUNDARY_WAKE: wake at each %dm bar (signal_interval) + %ss offset so 5m entries "
+                    "are not delayed by loop_interval; sleep=min(loop_interval, boundary). Disable: KITE_SIGNAL_BOUNDARY_WAKE=0.",
+                    self._signal_bucket_minutes(),
+                    float(os.environ.get("KITE_BOUNDARY_EVAL_OFFSET_SEC", "2") or 2),
+                )
 
         try:
+            boundary_wake = (
+                self._market_data_is_kite() and self._kite_signal_boundary_wake_enabled()
+            )
             while self.running:
                 try:
                     code = self._run_one_cycle()
@@ -4198,7 +5717,14 @@ class TradingBot:
                         break
                     if code == "stop_bot":
                         break
-                    time.sleep(self.config["loop_interval"])
+                    li = float(self.config["loop_interval"])
+                    if boundary_wake:
+                        bd = self._seconds_until_next_signal_bar_fire_ist()
+                        sleep_s = min(li, bd)
+                    else:
+                        sleep_s = li
+                    sleep_s = max(0.05, float(sleep_s))
+                    time.sleep(sleep_s)
                 except KeyboardInterrupt:
                     self._bot_logger.info(
                         "\n Keyboard interrupt detected. Shutting down gracefully..."
@@ -4207,9 +5733,20 @@ class TradingBot:
                     break
                 except Exception as e:
                     self._bot_logger.error(f" Error in trading loop: {e}")
-                    time.sleep(self.config["loop_interval"])
+                    li = float(self.config["loop_interval"])
+                    if boundary_wake:
+                        sleep_s = max(0.05, min(li, self._seconds_until_next_signal_bar_fire_ist()))
+                    else:
+                        sleep_s = li
+                    time.sleep(sleep_s)
 
         finally:
+            if self._kite_tick_stream is not None:
+                try:
+                    self._kite_tick_stream.stop()
+                except Exception:
+                    pass
+                self._kite_tick_stream = None
             self.save_state()
             self._bot_logger.info("=" * 80)
             self._bot_logger.info(" Trading Bot Stopped [%s]", self.username)
@@ -4340,7 +5877,7 @@ def main():
                 continue
             base = creds.get("base_url") or API_CONFIG["base_url"]
             client = UpstoxClient(tok, base, username=un, log=None)
-            bot = TradingBot(TRADING_CONFIG, client, username=un)
+            bot = TradingBot(runtime_trading_config(), client, username=un)
             bots.append(bot)
             cf = credentials_file_for_user(un)
             print(

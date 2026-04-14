@@ -62,7 +62,7 @@ docker compose -f configs/docker-compose.yml up -d --build
 
 ## Auth & secrets
 
-- Dashboard login: **AK07**; password seed **`AK07_PASSWORD`** (see `src/server/src/app/services/users_store.py`).
+- Dashboard login: **AK07**; password seed **`AK07_PASSWORD`** only applies when **`src/server/data/users_auth.json`** is first created (see `users_store.py`). To **reset a forgotten password** locally, run **`python scripts/reset_dashboard_password.py`** or see **`docs/DASHBOARD_SETUP.md`**.
 - **`JWT_SECRET`**, **`BOT_API_TOKEN`**: set in `src/server/.env` (local API) or repo root **`.env`** (Docker).
 
 ## Deploy (GitHub Actions)

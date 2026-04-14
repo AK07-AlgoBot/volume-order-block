@@ -42,9 +42,13 @@ def _load_repo_dotenv() -> None:
         from dotenv import load_dotenv
     except ImportError:
         return
-    env_file = repo_root() / ".env"
-    if env_file.is_file():
-        load_dotenv(env_file, override=False)
+    root_env = repo_root() / ".env"
+    server_env = server_root() / ".env"
+    if root_env.is_file():
+        load_dotenv(root_env, override=False)
+    # Local API secrets (e.g. AK07_PASSWORD) often live here; wins over repo root.
+    if server_env.is_file():
+        load_dotenv(server_env, override=True)
 
 
 _load_repo_dotenv()

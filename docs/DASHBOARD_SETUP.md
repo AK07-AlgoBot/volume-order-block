@@ -11,3 +11,24 @@ Local path:
 5. Open the Vite URL and sign in as **AK07**
 
 The bot uses `X-Trading-User: AK07` and `X-Bot-Token` when `BOT_API_TOKEN` is set on the API.
+
+## Forgot the dashboard password (AK07)
+
+`AK07_PASSWORD` in `src/server/.env` is only used **the first time** `users_auth.json` is created. After that, the hash on disk wins—changing `.env` does not change your login.
+
+**Option A — reset script (recommended):** from repo root, with server venv / `bcrypt` installed:
+
+```bash
+python scripts/reset_dashboard_password.py
+```
+
+You will be prompted for the new password. Or non-interactive:
+
+```bash
+set AK07_NEW_PASSWORD=YourNewSecret
+python scripts/reset_dashboard_password.py
+```
+
+**Option B — re-seed from env:** stop the API, delete `src/server/data/users_auth.json`, set `AK07_PASSWORD` in `src/server/.env`, start the API again. The app will recreate AK07 with that password.
+
+Then restart the API if it was running.
