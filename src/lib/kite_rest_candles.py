@@ -68,11 +68,22 @@ def fetch_historical_raw(
 
 
 def kite_candles_to_dataframe(rows: list[list[Any]]) -> pd.DataFrame | None:
-    """Kite candle row: [timestamp, open, high, low, close, volume, oi]."""
+    """Kite candle row: [timestamp, open, high, low, close, volume, (optional) oi]."""
     if not rows:
         return None
+    # Kite can return either 6 fields (without OI) or 7 fields (with OI).
+    normalized: list[list[Any]] = []
+    for r in rows:
+        if not isinstance(r, list) or len(r) < 6:
+            continue
+        vals = list(r[:7])
+        if len(vals) == 6:
+            vals.append(None)
+        normalized.append(vals)
+    if not normalized:
+        return None
     df = pd.DataFrame(
-        rows,
+        normalized,
         columns=["timestamp", "open", "high", "low", "close", "volume", "oi"],
     )
     df["timestamp"] = pd.to_datetime(df["timestamp"])

@@ -55,11 +55,19 @@ class KiteTickStream:
             tokens = list(self._token_to_script.keys())
             if tokens:
                 try:
+                    ws_obj = getattr(self._kws, "ws", None)
+                    if ws_obj is None:
+                        # Socket not ready yet (or reconnecting). on_connect will subscribe.
+                        return
                     self._kws.subscribe(tokens)
                     self._kws.set_mode(KiteTicker.MODE_LTP, tokens)
                     self._log.info("Kite ticker: resubscribed count=%d", len(tokens))
                 except Exception as e:
-                    self._log.warning("Kite ticker resubscribe failed: %s", e)
+                    txt = str(e)
+                    if "sendMessage" in txt and "NoneType" in txt:
+                        self._log.info("Kite ticker: resubscribe deferred (socket reconnecting)")
+                    else:
+                        self._log.warning("Kite ticker resubscribe failed: %s", e)
 
     def last_price(self, script_name: str) -> float | None:
         s = str(script_name or "").strip().upper()
