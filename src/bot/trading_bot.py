@@ -4080,7 +4080,11 @@ class TradingBot:
             return None
         kite_iv = map_bot_interval_to_kite(self.config.get("interval", "1minute"))
         from_d, to_d = default_swing_window()
-        use_cont = "1" if script_name in _INDEX_FO_SCRIPT_NAMES else "0"
+        # Kite returns 400 for many `minute` + continuous=1 requests; we always retried with 0 successfully.
+        if kite_iv == "minute":
+            use_cont = "0"
+        else:
+            use_cont = "1" if script_name in _INDEX_FO_SCRIPT_NAMES else "0"
         try:
             rows = fetch_historical_raw(
                 api_key,
