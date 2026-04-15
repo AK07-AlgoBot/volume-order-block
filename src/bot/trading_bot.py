@@ -43,7 +43,7 @@ from trading_preferences_store import read_trading_preferences
 from trading_script_constants import is_paper_script
 from zerodha_credentials_store import load_zerodha_credentials_for_user
 
-from kite_fut_instrument import resolve_futures_instrument_token
+from kite_fut_instrument import resolve_kite_instrument_token
 from kite_rest_candles import (
     default_swing_window,
     fetch_historical_raw,
@@ -4021,7 +4021,7 @@ class TradingBot:
         if not creds:
             return None
         api_key, access_token = creds
-        tok = resolve_futures_instrument_token(sn, api_key, access_token)
+        tok = resolve_kite_instrument_token(sn, api_key, access_token)
         if tok and tok > 0:
             self._kite_script_tokens[sn] = int(tok)
             return int(tok)
@@ -4074,7 +4074,7 @@ class TradingBot:
         tok = self._resolve_kite_futures_token(script_name)
         if not tok:
             self._bot_logger.error(
-                "KITE: could not resolve instrument_token for %s — set kite_instrument_token_overrides",
+                "KITE: could not resolve instrument_token for %s (EQ/FUT) — set kite_instrument_token_overrides",
                 script_name,
             )
             return None

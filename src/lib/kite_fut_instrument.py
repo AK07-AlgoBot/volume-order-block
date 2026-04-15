@@ -1,4 +1,4 @@
-"""Resolve Zerodha Kite instrument_token for futures from instruments CSV."""
+"""Resolve Zerodha Kite instrument_token for futures or equity from instruments CSV."""
 
 from __future__ import annotations
 
@@ -120,3 +120,56 @@ def resolve_futures_instrument_token(
         return None
     use.sort(key=lambda r: r["expiry"])
     return int(use[0]["token"])
+
+
+def resolve_equity_instrument_token(
+    script_name: str,
+    api_key: str,
+    access_token: str,
+) -> int | None:
+    """
+    Resolve NSE/BSE cash equity token (segment EQ) by tradingsymbol/name.
+    """
+    sym = str(script_name or "").strip().upper()
+    if not sym:
+        return None
+    for ex in ("NSE", "BSE"):
+        text = _fetch_csv(ex, api_key, access_token)
+        reader = csv.DictReader(io.StringIO(text))
+        for row in reader:
+            if not isinstance(row, dict):
+                continue
+            seg = (row.get("segment") or "").strip().upper()
+            if not seg.endswith("-EQ"):
+                continue
+            ts = (row.get("tradingsymbol") or "").strip().upper()
+            nm = (row.get("name") or "").strip().upper()
+            if sym not in (ts, nm):
+                continue
+            try:
+                tok = int(float(row.get("instrument_token") or 0))
+            except (TypeError, ValueError):
+                continue
+            if tok > 0:
+                return tok
+    return None
+
+
+def resolve_kite_instrument_token(
+    script_name: str,
+    api_key: str,
+    access_token: str,
+) -> int | None:
+    """
+    Resolve correct token for strategy symbol:
+    - Index/MCX strategy symbols => nearest active futures token.
+    - Other symbols => cash equity token (fallback to futures if needed).
+    """
+    s = str(script_name or "").strip().upper()
+    force_fut = {"NIFTY", "BANKNIFTY", "SENSEX", "CRUDE", "GOLDMINI", "SILVERMINI"}
+    if s in force_fut:
+        return resolve_futures_instrument_token(s, api_key, access_token)
+    tok_eq = resolve_equity_instrument_token(s, api_key, access_token)
+    if tok_eq and tok_eq > 0:
+        return tok_eq
+    return resolve_futures_instrument_token(s, api_key, access_token)
