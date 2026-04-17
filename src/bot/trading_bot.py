@@ -132,7 +132,13 @@ def send_trade_notification(trade: dict, chat_id: int | str = None) -> bool:
     else:
         ts_str = str(timestamp)
 
-    entry_reasons = {"EMA_CROSSOVER"}
+    entry_reasons = {
+        "EMA_CROSSOVER",
+        "ATM_STANDALONE_VWAP_CROSS_LADDER",
+        "ATM_STANDALONE_VWAP_CROSS",
+        "FUTURES_SIGNAL_ATM_OPTION_LADDER",
+        "FUTURES_SIGNAL_ATM_OPTION",
+    }
     exit_reasons = {
         "STOP_LOSS_HIT",
         "TRAILING_STOP_LOSS_HIT",
@@ -657,10 +663,14 @@ TRADING_CONFIG = {
     "options_chart_crossover_exit": True,
     "options_crossover_interval": "5minute",
     # Standalone index options: evaluate on futures 5m candles (signal_interval) without a futures fill.
-    # VWAP + EMA crossover + ADX + volume spike vs prior two bars; SL = same swing OB as futures; R:R 1:3 via options_target3_r.
+    # VWAP + EMA crossover + ADX + RSI + volume spike vs prior two bars; SL = same swing OB as futures; R:R 1:3 via options_target3_r.
     "options_standalone_enabled": True,
     "options_standalone_skip_if_futures_open": True,
     "options_standalone_adx_min": 20.0,
+    "options_standalone_rsi_period": 14,
+    # CALL (CE): RSI > min_call; PUT (PE): RSI < max_put (Wilder RSI on futures close).
+    "options_standalone_rsi_min_call": 55.0,
+    "options_standalone_rsi_max_put": 45.0,
     "segment_scripts": {
         "NSE": [
             "NIFTY", "BANKNIFTY", "SENSEX",
@@ -1095,6 +1105,20 @@ class TechnicalAnalyzer:
         cum_v = v.groupby(day).cumsum().replace(0.0, np.nan)
         w = cum_pv / cum_v
         return pd.Series(w.to_numpy(), index=df.index)
+
+    @staticmethod
+    def calculate_rsi_series(close: pd.Series, period: int = 14) -> pd.Series:
+        """Wilder-style RSI on close (same length as input)."""
+        c = close.astype(float)
+        delta = c.diff()
+        gain = delta.clip(lower=0.0)
+        loss = (-delta).clip(lower=0.0)
+        alpha = 1.0 / max(1, int(period))
+        avg_gain = gain.ewm(alpha=alpha, adjust=False).mean()
+        avg_loss = loss.ewm(alpha=alpha, adjust=False).mean()
+        rs = avg_gain / avg_loss.replace(0.0, np.nan)
+        rsi = 100.0 - (100.0 / (1.0 + rs))
+        return rsi.replace([np.inf, -np.inf], np.nan)
 
 # ============================================================================
 # TRADING ENGINE
@@ -2267,6 +2291,43 @@ class TradingBot:
             opt["ladder_tp2_done"] = True
             self._ladder_replace_sl_breakeven(script_name, opt, lots_open, "POST_TP2")
 
+    def _maybe_telegram_option_entry(
+        self,
+        atm: dict,
+        script_name: str,
+        qty: int,
+        price: float,
+        reason: str,
+        *,
+        stop_loss: float | None = None,
+        target_price: float | None = None,
+        note: str | None = None,
+    ) -> None:
+        """Telegram for live option BUY fills (mirrors futures path via _place_order_with_result)."""
+        if not telegram_notifications_enabled_for_user(self.username):
+            return
+        sym = str(atm.get("trading_symbol") or "").strip() or f"{script_name}_OPT"
+        trade = {
+            "account": self.username,
+            "symbol": sym,
+            "action": "BUY",
+            "quantity": qty,
+            "price": float(price),
+            "reason": reason,
+            "stop_loss": stop_loss,
+            "target_price": target_price,
+            "timestamp": self._now_ist(),
+        }
+        if note:
+            trade["note"] = note
+        if not send_trade_notification(trade):
+            self._bot_logger.error(
+                "Failed Telegram notification for option ENTRY: %s %s qty=%s",
+                sym,
+                reason,
+                qty,
+            )
+
     def _option_chart_crossover_should_exit(self, opt: dict) -> bool:
         """EMA crossover on option instrument intraday series (exit long option on bearish cross)."""
         if not bool(self.config.get("options_chart_crossover_exit", True)):
@@ -2405,6 +2466,28 @@ class TradingBot:
                     f"fut_entry={entry_price:.2f}; fut_sl={initial_sl:.2f}"
                 ),
             )
+            if telegram_notifications_enabled_for_user(self.username):
+                if not send_paper_trade_notification(
+                    {
+                        "account": self.username,
+                        "symbol": str(atm.get("trading_symbol") or f"{script_name}_OPT"),
+                        "action": "BUY",
+                        "quantity": qty,
+                        "price": float(opt_entry_price),
+                        "reason": "PAPER_OPT_SHADOW",
+                        "stop_loss": float(sl_opt) if sl_opt and float(sl_opt) > 0 else None,
+                        "target_price": None,
+                        "note": f"Paper option shadow {opt_type}; index={script_name}",
+                        "timestamp": self._now_ist(),
+                    },
+                    is_entry=True,
+                ):
+                    self._bot_logger.error(
+                        "Failed Telegram PAPER_OPT_SHADOW: %s %s qty=%s",
+                        script_name,
+                        atm.get("trading_symbol"),
+                        qty,
+                    )
             self.save_state()
             return
 
@@ -2490,22 +2573,33 @@ class TradingBot:
                 tp3_t,
                 r1,
             )
+            opt_entry_reason = (
+                "ATM_STANDALONE_VWAP_CROSS_LADDER"
+                if standalone
+                else "FUTURES_SIGNAL_ATM_OPTION_LADDER"
+            )
             self._log_order_event(
                 f"{script_name}_OPT",
                 action="ENTRY",
                 side="BUY",
                 price=float(opt_entry_price),
-                reason=(
-                    "ATM_STANDALONE_VWAP_CROSS_LADDER"
-                    if standalone
-                    else "FUTURES_SIGNAL_ATM_OPTION_LADDER"
-                ),
+                reason=opt_entry_reason,
                 extra=(
                     f"symbol={atm.get('trading_symbol')}; order_id={order_id}; type={opt_type}; "
                     f"lots={total_lots}; lot_size={lot_size}; premium_R={premium_r:.2f}; "
                     f"fut_entry={entry_price:.2f}; fut_sl={initial_sl:.2f}; "
                     f"sl_trig={sl_t:.2f}; tp1={tp1_t:.2f}; tp2={tp2_t:.2f}; tp3={tp3_t:.2f}"
                 ),
+            )
+            self._maybe_telegram_option_entry(
+                atm,
+                script_name,
+                int(qty),
+                float(opt_entry_price),
+                opt_entry_reason,
+                stop_loss=float(sl_t),
+                target_price=float(tp3_t),
+                note=f"{opt_type} ladder; idx={script_name}; order_id={order_id}",
             )
             self._place_option_gtt_ladder(script_name, self.option_positions[script_name])
             return
@@ -2553,21 +2647,32 @@ class TradingBot:
             f"entry_opt={float(opt_entry_price):.2f} hybrid_sl_opt={float(sl_opt):.2f} "
             f"r1={r1:.2f} r2={r2:.2f} final={r3:.2f} expiry_ms={atm.get('expiry_ms')}"
         )
+        opt_entry_reason = (
+            "ATM_STANDALONE_VWAP_CROSS"
+            if standalone
+            else "FUTURES_SIGNAL_ATM_OPTION"
+        )
         self._log_order_event(
             f"{script_name}_OPT",
             action="ENTRY",
             side="BUY",
             price=float(opt_entry_price),
-            reason=(
-                "ATM_STANDALONE_VWAP_CROSS"
-                if standalone
-                else "FUTURES_SIGNAL_ATM_OPTION"
-            ),
+            reason=opt_entry_reason,
             extra=(
                 f"symbol={atm.get('trading_symbol')}; type={opt_type}; lots={total_lots}; lot_size={lot_size}; "
                 f"fut_entry={entry_price:.2f}; fut_sl={initial_sl:.2f}; hybrid_sl_opt={sl_opt:.2f}; "
                 f"r1={r1:.2f}; r2={r2:.2f}; final={r3:.2f}; expiry_ms={atm.get('expiry_ms')}"
             ),
+        )
+        self._maybe_telegram_option_entry(
+            atm,
+            script_name,
+            int(qty),
+            float(opt_entry_price),
+            opt_entry_reason,
+            stop_loss=float(sl_opt) if float(sl_opt or 0) > 0 else None,
+            target_price=float(r3),
+            note=f"{opt_type} hybrid SL GTT; underlying 3R≈{r3:.2f}; idx={script_name}",
         )
         self._place_or_replace_option_sl_gtt(script_name, self.option_positions[script_name])
 
@@ -2585,6 +2690,9 @@ class TradingBot:
         if not opt_syms:
             return
         min_adx = float(self.config.get("options_standalone_adx_min", 20.0))
+        rsi_period = max(2, int(self.config.get("options_standalone_rsi_period", 14)))
+        rsi_min_call = float(self.config.get("options_standalone_rsi_min_call", 55.0))
+        rsi_max_put = float(self.config.get("options_standalone_rsi_max_put", 45.0))
         skip_if_fut = bool(self.config.get("options_standalone_skip_if_futures_open", True))
 
         for script_name in opt_syms:
@@ -2615,6 +2723,7 @@ class TradingBot:
             )
             if df is None or "vwap" not in df.columns:
                 continue
+            df["rsi"] = TechnicalAnalyzer.calculate_rsi_series(df["close"], rsi_period)
 
             closed_row = self._get_last_closed_candle_row(df)
             if closed_row is None:
@@ -2716,6 +2825,31 @@ class TradingBot:
                 self.last_standalone_option_bar_ts[script_name] = self._bar_ts_key(cts)
                 continue
 
+            rsi_c = float(df.iloc[ci]["rsi"])
+            if not np.isfinite(rsi_c):
+                self.last_standalone_option_bar_ts[script_name] = self._bar_ts_key(cts)
+                continue
+            if entry_signal == 1 and rsi_c <= rsi_min_call:
+                self._bot_logger.info(
+                    "OPTIONS STANDALONE SKIP: %s CALL needs RSI>%.1f (rsi=%.2f) bar=%s",
+                    script_name,
+                    rsi_min_call,
+                    rsi_c,
+                    cts,
+                )
+                self.last_standalone_option_bar_ts[script_name] = self._bar_ts_key(cts)
+                continue
+            if entry_signal == -1 and rsi_c >= rsi_max_put:
+                self._bot_logger.info(
+                    "OPTIONS STANDALONE SKIP: %s PUT needs RSI<%.1f (rsi=%.2f) bar=%s",
+                    script_name,
+                    rsi_max_put,
+                    rsi_c,
+                    cts,
+                )
+                self.last_standalone_option_bar_ts[script_name] = self._bar_ts_key(cts)
+                continue
+
             side = "BUY" if entry_signal == 1 else "SELL"
             initial_sl = self._get_entry_swing_sl(df, cts, side)
             entry_price = cl
@@ -2736,12 +2870,13 @@ class TradingBot:
             }
             paper = is_paper_script(script_name)
             self._bot_logger.info(
-                "OPTIONS STANDALONE SIGNAL: %s %s close=%.2f vwap=%.2f adx=%.2f bar=%s — entering ATM",
+                "OPTIONS STANDALONE SIGNAL: %s %s close=%.2f vwap=%.2f adx=%.2f rsi=%.2f bar=%s — entering ATM",
                 script_name,
                 side,
                 cl,
                 vw_f,
                 adx_c,
+                rsi_c,
                 cts,
             )
             self._start_options_companion(
