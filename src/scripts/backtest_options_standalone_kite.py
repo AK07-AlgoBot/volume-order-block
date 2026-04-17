@@ -103,9 +103,9 @@ def _calculate_adx_values(df: pd.DataFrame, period: int = 14) -> tuple[pd.Series
     atr = tr.ewm(alpha=alpha, adjust=False).mean()
     plus_dm_sm = plus_dm.ewm(alpha=alpha, adjust=False).mean()
     minus_dm_sm = minus_dm.ewm(alpha=alpha, adjust=False).mean()
-    plus_di = 100.0 * (plus_dm_sm / atr.replace(0, pd.NA))
-    minus_di = 100.0 * (minus_dm_sm / atr.replace(0, pd.NA))
-    dx = 100.0 * ((plus_di - minus_di).abs() / (plus_di + minus_di).replace(0, pd.NA))
+    plus_di = 100.0 * (plus_dm_sm / atr.replace(0, float("nan")))
+    minus_di = 100.0 * (minus_dm_sm / atr.replace(0, float("nan")))
+    dx = 100.0 * ((plus_di - minus_di).abs() / (plus_di + minus_di).replace(0, float("nan")))
     adx = dx.ewm(alpha=alpha, adjust=False).mean()
     return adx.fillna(0.0), plus_di.fillna(0.0), minus_di.fillna(0.0)
 
@@ -117,7 +117,7 @@ def _calculate_session_vwap(df: pd.DataFrame) -> pd.Series:
     vol = work["volume"].astype(float).clip(lower=0.0)
     pv = tp * vol
     cum_pv = pv.groupby(day).cumsum()
-    cum_v = vol.groupby(day).cumsum().replace(0.0, pd.NA)
+    cum_v = vol.groupby(day).cumsum().replace(0.0, float("nan"))
     return pd.Series((cum_pv / cum_v).to_numpy(), index=df.index)
 
 
@@ -129,9 +129,20 @@ def _calculate_rsi(close: pd.Series, period: int = 14) -> pd.Series:
     alpha = 1.0 / max(1, int(period))
     avg_gain = gain.ewm(alpha=alpha, adjust=False).mean()
     avg_loss = loss.ewm(alpha=alpha, adjust=False).mean()
-    rs = avg_gain / avg_loss.replace(0.0, pd.NA)
+    rs = avg_gain / avg_loss.replace(0.0, float("nan"))
     rsi = 100.0 - (100.0 / (1.0 + rs))
     return rsi
+
+
+def _coerce_ohlcv_numeric(df: pd.DataFrame) -> pd.DataFrame:
+    out = df.copy()
+    for col in ("open", "high", "low", "close", "volume", "oi"):
+        if col in out.columns:
+            out[col] = pd.to_numeric(out[col], errors="coerce")
+    out = out.dropna(subset=["open", "high", "low", "close"])
+    if "volume" in out.columns:
+        out["volume"] = out["volume"].fillna(0.0)
+    return out
 
 
 def _resample(df: pd.DataFrame, mins: int) -> pd.DataFrame:
@@ -430,7 +441,9 @@ def run_backtest(
         if udf is None or udf.empty:
             warnings.append(f"{script}: underlying candles empty")
             continue
+        udf = _coerce_ohlcv_numeric(udf)
         udf = _resample(udf, mins)
+        udf = _coerce_ohlcv_numeric(udf)
         if len(udf) < long + 5:
             warnings.append(f"{script}: insufficient candles after resample ({len(udf)})")
             continue
@@ -508,7 +521,7 @@ def run_backtest(
                 if odf is None or odf.empty:
                     opt_cache[token] = pd.DataFrame()
                 else:
-                    opt_cache[token] = _resample(odf, mins)
+                    opt_cache[token] = _coerce_ohlcv_numeric(_resample(_coerce_ohlcv_numeric(odf), mins))
 
             odf = opt_cache.get(token)
             if odf is None or odf.empty:
