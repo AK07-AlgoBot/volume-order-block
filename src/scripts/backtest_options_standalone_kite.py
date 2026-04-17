@@ -5,7 +5,7 @@ import csv
 import io
 import math
 import sys
-import time
+import time as pytime
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
@@ -397,14 +397,14 @@ def run_backtest(
                 except Exception as e:  # noqa: BLE001
                     last_err = e
                     # exponential-ish backoff: 1.5s, 3s, 6s, 12s
-                    time.sleep(1.5 * (2 ** attempt))
+                    pytime.sleep(1.5 * (2 ** attempt))
             if rows is None:
                 if last_err is not None:
                     raise last_err
                 rows = []
             out.extend(rows)
             # small pause to reduce burst/rate pressure on Kite historical endpoint
-            time.sleep(0.25)
+            pytime.sleep(0.25)
             cur = end
         return out
 
