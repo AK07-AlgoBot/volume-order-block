@@ -332,20 +332,50 @@ def run_backtest(
     results: list[TradeResult] = []
     warnings: list[str] = []
 
+    def _fetch_with_cont_fallback(
+        token: int,
+        *,
+        interval: str,
+        from_dt_: datetime,
+        to_dt_: datetime,
+        prefer_cont: str,
+        oi: str = "0",
+    ) -> list[list]:
+        tries = [prefer_cont]
+        if prefer_cont != "0":
+            tries.append("0")
+        last_err: Exception | None = None
+        for cont in tries:
+            try:
+                return fetch_historical_raw(
+                    api_key,
+                    access_token,
+                    token,
+                    interval,
+                    from_dt_,
+                    to_dt_,
+                    continuous=cont,
+                    oi=oi,
+                )
+            except Exception as e:  # noqa: BLE001
+                last_err = e
+                continue
+        if last_err is not None:
+            raise last_err
+        return []
+
     for script in scripts:
         tok = resolve_kite_instrument_token(script, api_key, access_token)
         if not tok:
             warnings.append(f"{script}: unable to resolve Kite futures token")
             continue
         try:
-            rows = fetch_historical_raw(
-                api_key,
-                access_token,
+            rows = _fetch_with_cont_fallback(
                 tok,
-                kite_iv,
-                from_dt,
-                to_dt,
-                continuous="1",
+                interval=kite_iv,
+                from_dt_=from_dt,
+                to_dt_=to_dt,
+                prefer_cont="1",
                 oi="0",
             )
         except Exception as e:
@@ -419,14 +449,12 @@ def run_backtest(
             token = int(opt_row["token"])
             if token not in opt_cache:
                 try:
-                    o_rows = fetch_historical_raw(
-                        api_key,
-                        access_token,
+                    o_rows = _fetch_with_cont_fallback(
                         token,
-                        kite_iv,
-                        from_dt - timedelta(days=2),
-                        to_dt + timedelta(days=1),
-                        continuous="0",
+                        interval=kite_iv,
+                        from_dt_=from_dt - timedelta(days=2),
+                        to_dt_=to_dt + timedelta(days=1),
+                        prefer_cont="0",
                         oi="0",
                     )
                 except Exception:
