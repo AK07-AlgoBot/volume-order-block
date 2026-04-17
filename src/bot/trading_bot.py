@@ -495,7 +495,7 @@ TRADING_CONFIG = {
     # Optional { "NIFTY": 12345678 } if auto token resolve fails (Kite instruments CSV token).
     "kite_instrument_token_overrides": {},
     "interval": "1minute",  # Base candle interval (Kite: minute/5minute/…; Upstox: 1minute)
-    "signal_interval": "5minute",  # Strategy timeframe (EMA runs on 5-minute candles)
+    "signal_interval": "15minute",  # Strategy timeframe (EMA runs on resampled signal_interval candles)
     "ema_short": 5,
     "ema_long": 18,
     "portfolio_stop_loss": 10000,  # ₹10,000
@@ -4301,37 +4301,37 @@ class TradingBot:
 
     def _resample_for_signal(self, df):
         """Resample API candles to strategy timeframe for signal generation."""
-        signal_interval = self.config.get('signal_interval', '1minute')
-        if signal_interval == '1minute':
+        mins = max(1, int(self._signal_bucket_minutes()))
+        if mins <= 1:
             return df
 
-        if signal_interval == '5minute':
-            resampled = (
-                df.set_index('timestamp')
-                .sort_index()
-                .resample('5min')
-                .agg({
-                    'open': 'first',
-                    'high': 'max',
-                    'low': 'min',
-                    'close': 'last',
-                    'volume': 'sum',
-                    'oi': 'last'
-                })
-                .dropna(subset=['open', 'high', 'low', 'close'])
-                .reset_index()
-            )
-            return resampled
-
-        return df
+        agg_map = {
+            'open': 'first',
+            'high': 'max',
+            'low': 'min',
+            'close': 'last',
+        }
+        if 'volume' in df.columns:
+            agg_map['volume'] = 'sum'
+        if 'oi' in df.columns:
+            agg_map['oi'] = 'last'
+        resampled = (
+            df.set_index('timestamp')
+            .sort_index()
+            .resample(f'{mins}min')
+            .agg(agg_map)
+            .dropna(subset=['open', 'high', 'low', 'close'])
+            .reset_index()
+        )
+        return resampled
 
     def _get_last_closed_candle_row(self, df):
         """Return last fully closed signal candle row based on configured signal interval."""
         if df is None or df.empty:
             return None
 
-        signal_interval = self.config.get('signal_interval', '1minute')
-        if signal_interval != '5minute':
+        mins = max(1, int(self._signal_bucket_minutes()))
+        if mins <= 1:
             return df.iloc[-1]
 
         latest_ts = df['timestamp'].iloc[-1]
@@ -4340,8 +4340,8 @@ class TradingBot:
         else:
             now_ts = pd.Timestamp.now()
 
-        current_bucket_start = now_ts.floor('5min')
-        last_closed_bucket_start = current_bucket_start - pd.Timedelta(minutes=5)
+        current_bucket_start = now_ts.floor(f'{mins}min')
+        last_closed_bucket_start = current_bucket_start - pd.Timedelta(minutes=mins)
 
         closed_df = df[df['timestamp'] <= last_closed_bucket_start]
         if closed_df.empty:
