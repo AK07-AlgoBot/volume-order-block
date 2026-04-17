@@ -631,6 +631,7 @@ TRADING_CONFIG = {
     "options_enabled": True,
     "options_scripts": ["NIFTY", "BANKNIFTY", "SENSEX"],
     "options_total_lots": 4,
+    # Underlying distance for final TP leg (1:3 R multiple vs futures-defined risk).
     "options_target3_r": 3.0,
     "options_gtt_enabled": True,
     "options_breakeven_buffer_points": 0.0,
@@ -655,6 +656,11 @@ TRADING_CONFIG = {
     "options_risk_free_rate": 0.0,
     "options_chart_crossover_exit": True,
     "options_crossover_interval": "5minute",
+    # Standalone index options: evaluate on futures 5m candles (signal_interval) without a futures fill.
+    # VWAP + EMA crossover + ADX + volume spike vs prior two bars; SL = same swing OB as futures; R:R 1:3 via options_target3_r.
+    "options_standalone_enabled": True,
+    "options_standalone_skip_if_futures_open": True,
+    "options_standalone_adx_min": 20.0,
     "segment_scripts": {
         "NSE": [
             "NIFTY", "BANKNIFTY", "SENSEX",
@@ -1068,6 +1074,28 @@ class TechnicalAnalyzer:
         
         return df
 
+    @staticmethod
+    def calculate_session_vwap_series(df: pd.DataFrame) -> pd.Series:
+        """Session (calendar day) VWAP: cumulative(typical_price * volume) / cumulative(volume)."""
+        if df is None or df.empty:
+            return pd.Series(dtype=float)
+        need = {"timestamp", "high", "low", "close", "volume"}
+        if not need.issubset(df.columns):
+            return pd.Series(np.nan, index=df.index, dtype=float)
+        work = df.reset_index(drop=True)
+        day = pd.to_datetime(work["timestamp"], errors="coerce").dt.normalize()
+        tp = (
+            work["high"].astype(float)
+            + work["low"].astype(float)
+            + work["close"].astype(float)
+        ) / 3.0
+        v = work["volume"].astype(float).clip(lower=0.0)
+        pv = tp * v
+        cum_pv = pv.groupby(day).cumsum()
+        cum_v = v.groupby(day).cumsum().replace(0.0, np.nan)
+        w = cum_pv / cum_v
+        return pd.Series(w.to_numpy(), index=df.index)
+
 # ============================================================================
 # TRADING ENGINE
 # ============================================================================
@@ -1183,6 +1211,7 @@ class TradingBot:
             0.0,
             float(os.environ.get("KITE_STREAM_EXIT_MIN_INTERVAL_SEC", "0.025") or 0.0),
         )
+        self.last_standalone_option_bar_ts: dict[str, Any] = {}
         self.client._log = self._bot_logger
         # Fill blank NSE/BSE FO tokens (e.g., stock futures) on startup.
         self._seed_missing_fo_contract_tokens()
@@ -1199,6 +1228,9 @@ class TradingBot:
                     self.paper_total_pnl = float(state.get("paper_total_pnl", 0.0))
                     self.total_pnl = state.get("total_pnl", 0)
                     self.eod_squareoff_done = state.get("eod_squareoff_done", {})
+                    self.last_standalone_option_bar_ts = state.get(
+                        "last_standalone_option_bar_ts", {}
+                    )
                     for _sn, _pos in list(self.paper_positions.items()):
                         self._ensure_position_fields(_pos, _sn)
                     self._bot_logger.info(
@@ -1218,6 +1250,7 @@ class TradingBot:
                 "paper_total_pnl": self.paper_total_pnl,
                 "total_pnl": self.total_pnl,
                 "eod_squareoff_done": self.eod_squareoff_done,
+                "last_standalone_option_bar_ts": self.last_standalone_option_bar_ts,
                 "timestamp": datetime.now().isoformat(),
             }
             with open(self.state_file, "w", encoding="utf-8") as f:
@@ -1515,6 +1548,7 @@ class TradingBot:
         reason,
         extra_log="",
     ):
+        self._close_all_option_for_script(script_name, "PAPER_FUTURES_EXIT", force_remove=True)
         qty = float(position.get("quantity", self._get_order_quantity(script_name)))
         realized = self._calculate_realized_pnl(
             position["type"],
@@ -2254,8 +2288,24 @@ class TradingBot:
             return crossed and prev_sig == 1 and cur_sig == -1
         return crossed and prev_sig == -1 and cur_sig == 1
 
-    def _start_options_companion(self, script_name: str, futures_position: dict, entry_price: float, initial_sl: float):
-        """Open ATM option companion trade with staged lot-management metadata."""
+    def _start_options_companion(
+        self,
+        script_name: str,
+        futures_position: dict,
+        entry_price: float,
+        initial_sl: float,
+        *,
+        paper_parent: bool = False,
+        standalone: bool = False,
+    ):
+        """Open ATM option companion trade with staged lot-management metadata.
+
+        When ``paper_parent`` is True, record a shadow option leg (LTP from Upstox) without placing
+        option orders — used when the parent futures position is paper-simulated.
+
+        When ``standalone`` is True, the leg was opened from the standalone futures-chart signal (no
+        futures fill required); management does not require an open futures position.
+        """
         if not bool(self.config.get("options_enabled", False)):
             return
         if self._script_segment(script_name) != "NSE":
@@ -2287,6 +2337,77 @@ class TradingBot:
         total_lots = int(self.config.get("options_total_lots", 4))
         lot_size = int(atm.get("lot_size", 1))
         qty = max(1, total_lots * lot_size)
+        risk_pts = abs(float(entry_price) - float(initial_sl))
+        if risk_pts <= 0:
+            risk_pts = max(1.0, abs(float(entry_price)) * 0.002)
+        side_mult = 1.0 if fut_side == "BUY" else -1.0
+        r1 = float(entry_price) + side_mult * risk_pts
+        r2 = float(entry_price) + side_mult * (2.0 * risk_pts)
+        r3 = float(entry_price) + side_mult * (float(self.config.get("options_target3_r", 3.0)) * risk_pts)
+
+        if paper_parent:
+            opt_entry_price = float(
+                self.client.get_ltp(str(atm.get("instrument_key") or "")) or 0.0
+            )
+            sl_opt = self._option_hybrid_sl_premium(
+                float(entry_price), float(initial_sl), float(opt_entry_price or 0.0)
+            )
+            if float(opt_entry_price) <= 0:
+                sl_opt = 0.0
+            self.option_positions[script_name] = {
+                "paper_simulated": True,
+                "standalone": bool(standalone),
+                "parent_trade_id": futures_position.get("trade_id"),
+                "futures_side": fut_side,
+                "instrument_key": atm["instrument_key"],
+                "trading_symbol": atm.get("trading_symbol"),
+                "option_type": opt_type,
+                "expiry_ms": int(atm.get("expiry_ms") or 0),
+                "entry_time": datetime.now().isoformat(),
+                "entry_price_option": float(opt_entry_price),
+                "entry_price_underlying": float(entry_price),
+                "lot_size": lot_size,
+                "total_lots": total_lots,
+                "remaining_lots": total_lots,
+                "booked_lots": 0,
+                "r1_hit": False,
+                "r2_hit": False,
+                "final_hit": False,
+                "options_rupee_tp_done": False,
+                "gtt_ladder": False,
+                "initial_sl_underlying": float(initial_sl),
+                "sl_underlying": float(initial_sl),
+                "sl_option_price": float(sl_opt),
+                "r1_underlying": float(r1),
+                "r2_underlying": float(r2),
+                "final_underlying": float(r3),
+                "active_sl_gtt_id": "",
+            }
+            self._bot_logger.info(
+                "OPTIONS PAPER SHADOW: %s %s %s strike=%s entry_opt=%.2f hybrid_sl_opt=%.2f "
+                "(no Upstox option orders)",
+                script_name,
+                opt_type,
+                atm.get("trading_symbol"),
+                atm.get("strike"),
+                float(opt_entry_price),
+                float(sl_opt),
+            )
+            self._log_paper_order_event(
+                f"{script_name}_OPT",
+                "PAPER_OPT_SHADOW",
+                opt_side,
+                float(opt_entry_price),
+                "OPTIONS_COMPANION",
+                extra=(
+                    f"underlying={script_name}; type={opt_type}; sym={atm.get('trading_symbol')}; "
+                    f"lots={total_lots}; lot_size={lot_size}; hybrid_sl_opt={sl_opt:.2f}; "
+                    f"fut_entry={entry_price:.2f}; fut_sl={initial_sl:.2f}"
+                ),
+            )
+            self.save_state()
+            return
+
         order = self.client.place_order(atm["instrument_key"], qty, opt_side)
         if not order or order.get("status") != "success":
             self._bot_logger.error(
@@ -2308,13 +2429,6 @@ class TradingBot:
                 fill_px,
                 float(opt_entry_price),
             )
-        risk_pts = abs(float(entry_price) - float(initial_sl))
-        if risk_pts <= 0:
-            risk_pts = max(1.0, abs(float(entry_price)) * 0.002)
-        side_mult = 1.0 if fut_side == "BUY" else -1.0
-        r1 = float(entry_price) + side_mult * risk_pts
-        r2 = float(entry_price) + side_mult * (2.0 * risk_pts)
-        r3 = float(entry_price) + side_mult * (float(self.config.get("options_target3_r", 3.0)) * risk_pts)
 
         exit_mode = str(self.config.get("options_exit_mode") or "ladder_gtt").strip().lower()
         if exit_mode == "ladder_gtt" and float(opt_entry_price) > 0:
@@ -2327,6 +2441,7 @@ class TradingBot:
                 float(opt_entry_price),
             )
             self.option_positions[script_name] = {
+                "standalone": bool(standalone),
                 "parent_trade_id": futures_position.get("trade_id"),
                 "futures_side": fut_side,
                 "instrument_key": atm["instrument_key"],
@@ -2380,7 +2495,11 @@ class TradingBot:
                 action="ENTRY",
                 side="BUY",
                 price=float(opt_entry_price),
-                reason="FUTURES_SIGNAL_ATM_OPTION_LADDER",
+                reason=(
+                    "ATM_STANDALONE_VWAP_CROSS_LADDER"
+                    if standalone
+                    else "FUTURES_SIGNAL_ATM_OPTION_LADDER"
+                ),
                 extra=(
                     f"symbol={atm.get('trading_symbol')}; order_id={order_id}; type={opt_type}; "
                     f"lots={total_lots}; lot_size={lot_size}; premium_R={premium_r:.2f}; "
@@ -2402,6 +2521,7 @@ class TradingBot:
         if float(opt_entry_price) <= 0:
             sl_opt = 0.0
         self.option_positions[script_name] = {
+            "standalone": bool(standalone),
             "parent_trade_id": futures_position.get("trade_id"),
             "futures_side": fut_side,
             "instrument_key": atm["instrument_key"],
@@ -2438,7 +2558,11 @@ class TradingBot:
             action="ENTRY",
             side="BUY",
             price=float(opt_entry_price),
-            reason="FUTURES_SIGNAL_ATM_OPTION",
+            reason=(
+                "ATM_STANDALONE_VWAP_CROSS"
+                if standalone
+                else "FUTURES_SIGNAL_ATM_OPTION"
+            ),
             extra=(
                 f"symbol={atm.get('trading_symbol')}; type={opt_type}; lots={total_lots}; lot_size={lot_size}; "
                 f"fut_entry={entry_price:.2f}; fut_sl={initial_sl:.2f}; hybrid_sl_opt={sl_opt:.2f}; "
@@ -2446,6 +2570,191 @@ class TradingBot:
             ),
         )
         self._place_or_replace_option_sl_gtt(script_name, self.option_positions[script_name])
+
+    def _evaluate_standalone_option_entries(
+        self, *, allow_new_entries: bool, now_ist: datetime
+    ) -> None:
+        """Index options from futures 5m chart: VWAP, crossover, ADX, volume vs prior two bars; no futures fill."""
+        if not bool(self.config.get("options_enabled", False)):
+            return
+        if not bool(self.config.get("options_standalone_enabled", True)):
+            return
+        if not allow_new_entries:
+            return
+        opt_syms = [str(s).strip().upper() for s in (self.config.get("options_scripts") or [])]
+        if not opt_syms:
+            return
+        min_adx = float(self.config.get("options_standalone_adx_min", 20.0))
+        skip_if_fut = bool(self.config.get("options_standalone_skip_if_futures_open", True))
+
+        for script_name in opt_syms:
+            if script_name in self.option_positions:
+                continue
+            if skip_if_fut and (
+                script_name in self.positions or script_name in self.paper_positions
+            ):
+                continue
+            if self._is_before_segment_entry_start(script_name, now_ist):
+                continue
+            if self._is_after_segment_cutoff(script_name, now_ist):
+                continue
+
+            ikey = self.config.get("scripts", {}).get(script_name)
+            if not ikey:
+                continue
+            df = self.fetch_market_data(script_name, ikey)
+            if df is None or len(df) < max(self.config.get("ema_long", 18), 5):
+                continue
+
+            df = df.copy()
+            df["vwap"] = TechnicalAnalyzer.calculate_session_vwap_series(df)
+            df = self.analyzer.calculate_signals(
+                df,
+                self.config["ema_short"],
+                self.config["ema_long"],
+            )
+            if df is None or "vwap" not in df.columns:
+                continue
+
+            closed_row = self._get_last_closed_candle_row(df)
+            if closed_row is None:
+                continue
+            cts = closed_row["timestamp"]
+            last_ev = self.last_standalone_option_bar_ts.get(script_name)
+            if last_ev is not None:
+                try:
+                    if pd.Timestamp(cts) <= pd.Timestamp(last_ev):
+                        continue
+                except (TypeError, ValueError):
+                    pass
+
+            warmup_ts = self.entry_warmup_timestamps.get(script_name)
+            if warmup_ts is not None:
+                try:
+                    if pd.Timestamp(cts) <= pd.Timestamp(warmup_ts):
+                        self.last_standalone_option_bar_ts[script_name] = self._bar_ts_key(cts)
+                        continue
+                except (TypeError, ValueError):
+                    pass
+
+            adx_period = int(self.config.get("adx_period", 14))
+            adx_series, _, _ = self._calculate_adx_values(df, adx_period)
+
+            idx_matches = df.index[df["timestamp"] == cts]
+            if len(idx_matches) == 0:
+                le = df[df["timestamp"] <= cts]
+                if le.empty:
+                    self.last_standalone_option_bar_ts[script_name] = self._bar_ts_key(cts)
+                    continue
+                ci = int(le.index[-1])
+            else:
+                ci = int(idx_matches[0])
+            if ci < 2:
+                self.last_standalone_option_bar_ts[script_name] = self._bar_ts_key(cts)
+                continue
+
+            entry_signal = int(closed_row.get("signal", 0))
+            entry_crossover = bool(closed_row.get("crossover", False))
+            if not entry_crossover or entry_signal not in (1, -1):
+                self.last_standalone_option_bar_ts[script_name] = self._bar_ts_key(cts)
+                continue
+
+            adx_c = float(adx_series.iloc[ci])
+            if adx_c < min_adx:
+                self._bot_logger.info(
+                    "OPTIONS STANDALONE SKIP: %s ADX %.2f < min %.2f (bar=%s)",
+                    script_name,
+                    adx_c,
+                    min_adx,
+                    cts,
+                )
+                self.last_standalone_option_bar_ts[script_name] = self._bar_ts_key(cts)
+                continue
+
+            v_c = float(df.iloc[ci]["volume"])
+            v_p1 = float(df.iloc[ci - 1]["volume"])
+            v_p2 = float(df.iloc[ci - 2]["volume"])
+            if v_c <= max(v_p1, v_p2):
+                self._bot_logger.info(
+                    "OPTIONS STANDALONE SKIP: %s volume spike fail (v=%.0f vs prev2 max=%.0f) bar=%s",
+                    script_name,
+                    v_c,
+                    max(v_p1, v_p2),
+                    cts,
+                )
+                self.last_standalone_option_bar_ts[script_name] = self._bar_ts_key(cts)
+                continue
+
+            vw = closed_row.get("vwap")
+            cl = float(closed_row["close"])
+            try:
+                vw_f = float(vw)
+            except (TypeError, ValueError):
+                self.last_standalone_option_bar_ts[script_name] = self._bar_ts_key(cts)
+                continue
+            if not np.isfinite(vw_f):
+                self.last_standalone_option_bar_ts[script_name] = self._bar_ts_key(cts)
+                continue
+            if entry_signal == 1 and not (cl > vw_f):
+                self._bot_logger.info(
+                    "OPTIONS STANDALONE SKIP: %s BUY needs close>VWAP (close=%.2f vwap=%.2f) bar=%s",
+                    script_name,
+                    cl,
+                    vw_f,
+                    cts,
+                )
+                self.last_standalone_option_bar_ts[script_name] = self._bar_ts_key(cts)
+                continue
+            if entry_signal == -1 and not (cl < vw_f):
+                self._bot_logger.info(
+                    "OPTIONS STANDALONE SKIP: %s SELL needs close<VWAP (close=%.2f vwap=%.2f) bar=%s",
+                    script_name,
+                    cl,
+                    vw_f,
+                    cts,
+                )
+                self.last_standalone_option_bar_ts[script_name] = self._bar_ts_key(cts)
+                continue
+
+            side = "BUY" if entry_signal == 1 else "SELL"
+            initial_sl = self._get_entry_swing_sl(df, cts, side)
+            entry_price = cl
+            if initial_sl is None:
+                self.last_standalone_option_bar_ts[script_name] = self._bar_ts_key(cts)
+                continue
+            if side == "BUY" and not (initial_sl < entry_price):
+                self.last_standalone_option_bar_ts[script_name] = self._bar_ts_key(cts)
+                continue
+            if side == "SELL" and not (initial_sl > entry_price):
+                self.last_standalone_option_bar_ts[script_name] = self._bar_ts_key(cts)
+                continue
+
+            fut_pos = {
+                "type": side,
+                "trade_id": f"standalone_opt_{script_name}_{cts}",
+                "standalone_bar_ts": cts.isoformat() if hasattr(cts, "isoformat") else str(cts),
+            }
+            paper = is_paper_script(script_name)
+            self._bot_logger.info(
+                "OPTIONS STANDALONE SIGNAL: %s %s close=%.2f vwap=%.2f adx=%.2f bar=%s — entering ATM",
+                script_name,
+                side,
+                cl,
+                vw_f,
+                adx_c,
+                cts,
+            )
+            self._start_options_companion(
+                script_name=script_name,
+                futures_position=fut_pos,
+                entry_price=float(entry_price),
+                initial_sl=float(initial_sl),
+                paper_parent=paper,
+                standalone=True,
+            )
+            self.last_standalone_option_bar_ts[script_name] = self._bar_ts_key(cts)
+            if script_name in self.option_positions:
+                self.save_state()
 
     def _close_option_lots(self, script_name: str, opt_pos: dict, lots_to_close: int, reason: str) -> bool:
         lot_size = int(opt_pos.get("lot_size", 1))
@@ -2478,6 +2787,14 @@ class TradingBot:
     def _close_all_option_for_script(self, script_name: str, reason: str, force_remove: bool = False) -> None:
         opt = self.option_positions.get(script_name)
         if not isinstance(opt, dict):
+            return
+        if bool(opt.get("paper_simulated")):
+            self.option_positions.pop(script_name, None)
+            self._bot_logger.info(
+                "OPTIONS PAPER SHADOW cleared: %s reason=%s",
+                script_name,
+                reason,
+            )
             return
         self._cancel_all_option_gtts(opt)
         rem = int(opt.get("remaining_lots", 0))
@@ -2517,8 +2834,16 @@ class TradingBot:
             opt = self.option_positions.get(script_name)
             if not isinstance(opt, dict):
                 continue
-            if script_name not in self.positions:
-                self._close_all_option_for_script(script_name, "FUTURES_POSITION_CLOSED", force_remove=True)
+            if (
+                not bool(opt.get("standalone"))
+                and script_name not in self.positions
+                and script_name not in self.paper_positions
+            ):
+                self._close_all_option_for_script(
+                    script_name, "FUTURES_POSITION_CLOSED", force_remove=True
+                )
+                continue
+            if bool(opt.get("paper_simulated")):
                 continue
             px = latest_prices.get(script_name)
             if px is None:
@@ -3260,6 +3585,10 @@ class TradingBot:
 
     def _now_ist(self):
         return datetime.now(ZoneInfo("Asia/Kolkata"))
+
+    @staticmethod
+    def _bar_ts_key(ts) -> str:
+        return ts.isoformat() if hasattr(ts, "isoformat") else str(ts)
 
     def _script_segment(self, script_name):
         segment_scripts = self.config.get('segment_scripts', {})
@@ -5220,12 +5549,6 @@ class TradingBot:
                                 f"ema{self.config['ema_long']}_prev={entry_ema_long_prev:.2f}"
                             )
                         )
-                        self._start_options_companion(
-                            script_name=script_name,
-                            futures_position=self.positions[script_name],
-                            entry_price=entry_price,
-                            initial_sl=initial_sl,
-                        )
                         self.last_entry_candle_processed[script_name] = entry_candle_timestamp
                         self.save_state()
                         self._notify_dashboard_trade_open(
@@ -5467,12 +5790,6 @@ class TradingBot:
                                 f"ema{self.config['ema_long']}_prev={entry_ema_long_prev:.2f}"
                             )
                         )
-                        self._start_options_companion(
-                            script_name=script_name,
-                            futures_position=self.positions[script_name],
-                            entry_price=entry_price,
-                            initial_sl=initial_sl,
-                        )
                         self.last_entry_candle_processed[script_name] = entry_candle_timestamp
                         self.save_state()
                         self._notify_dashboard_trade_open(
@@ -5568,6 +5885,12 @@ class TradingBot:
             chosen.add(sym)
         for sym in self.paper_positions.keys():
             chosen.add(sym)
+        if bool(self.config.get("options_enabled", False)) and bool(
+            self.config.get("options_standalone_enabled", True)
+        ):
+            for _on in self.config.get("options_scripts") or []:
+                if _on in dict(all_items):
+                    chosen.add(str(_on).strip().upper())
         out: list[tuple[str, str]] = []
         for name, key in all_items:
             if name in chosen:
@@ -5632,6 +5955,9 @@ class TradingBot:
         with self._strategy_lock:
             self.execute_trading_logic(
                 script_data, allow_new_entries=allow_new_entries, now_ist=now_ist
+            )
+            self._evaluate_standalone_option_entries(
+                allow_new_entries=allow_new_entries, now_ist=now_ist
             )
         self._manage_option_positions(latest_prices)
 
