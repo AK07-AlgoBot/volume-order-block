@@ -47,6 +47,18 @@ class TradeResult:
     expiry: str
 
 
+def _trade_pnl_points(r: TradeResult) -> float:
+    # Backtest models long options for both CE/PE entries.
+    return float(r.exit_option) - float(r.entry_option)
+
+
+def _trade_r_multiple(r: TradeResult) -> float:
+    risk = float(r.entry_option) - float(r.sl_option)
+    if risk <= 0:
+        return 0.0
+    return _trade_pnl_points(r) / risk
+
+
 def _headers(api_key: str, access_token: str) -> dict[str, str]:
     return {
         "X-Kite-Version": "3",
@@ -615,6 +627,8 @@ def main() -> None:
                 "exit_option",
                 "outcome",
                 "reason",
+                "pnl_points",
+                "r_multiple",
                 "strike",
                 "expiry",
             ]
@@ -634,6 +648,8 @@ def main() -> None:
                     f"{r.exit_option:.2f}",
                     r.outcome,
                     r.reason,
+                    f"{_trade_pnl_points(r):.2f}",
+                    f"{_trade_r_multiple(r):.2f}",
                     f"{r.strike:.2f}",
                     r.expiry,
                 ]
@@ -642,12 +658,27 @@ def main() -> None:
     wins = sum(1 for r in out if r.outcome == "WIN")
     loss = sum(1 for r in out if r.outcome == "LOSS")
     be = sum(1 for r in out if r.outcome == "BREAKEVEN")
+    total_pnl = sum(_trade_pnl_points(r) for r in out)
+    avg_pnl = (total_pnl / len(out)) if out else 0.0
+    total_r = sum(_trade_r_multiple(r) for r in out)
+    timeout_rows = [r for r in out if r.reason == "TIMEOUT"]
+    timeout_pos = sum(1 for r in timeout_rows if _trade_pnl_points(r) > 0)
+    timeout_neg = sum(1 for r in timeout_rows if _trade_pnl_points(r) < 0)
+    timeout_flat = sum(1 for r in timeout_rows if abs(_trade_pnl_points(r)) < 1e-9)
+    timeout_pnl = sum(_trade_pnl_points(r) for r in timeout_rows)
 
     print(
         f"Standalone options backtest complete | user={args.user} | days={args.days} "
         f"| signal_interval={args.signal_interval}"
     )
     print(f"Trades={len(out)} | Wins={wins} | Losses={loss} | Breakeven={be}")
+    print(
+        f"PnL(points, qty=1)={total_pnl:.2f} | Avg/Trade={avg_pnl:.2f} | Total_R={total_r:.2f}"
+    )
+    print(
+        f"Timeout trades={len(timeout_rows)} | Timeout PnL={timeout_pnl:.2f} "
+        f"| Timeout +/−/0 = {timeout_pos}/{timeout_neg}/{timeout_flat}"
+    )
     print(f"CSV={args.csv_out}")
     if warns:
         print("\nWarnings:")
@@ -657,7 +688,8 @@ def main() -> None:
     for r in out[:10]:
         print(
             f"{_fmt_ts(r.entry_ts)} | {r.script} {r.side} {r.option_symbol} "
-            f"-> {_fmt_ts(r.exit_ts)} | {r.outcome} ({r.reason})"
+            f"-> {_fmt_ts(r.exit_ts)} | {r.outcome} ({r.reason}) "
+            f"| pnl={_trade_pnl_points(r):.2f} | R={_trade_r_multiple(r):.2f}"
         )
 
 
