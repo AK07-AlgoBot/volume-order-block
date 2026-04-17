@@ -66,11 +66,11 @@ def _headers(api_key: str, access_token: str) -> dict[str, str]:
     }
 
 
-def _fetch_nfo_csv(api_key: str, access_token: str) -> str:
+def _fetch_instruments_csv(api_key: str, access_token: str, exchange: str) -> str:
     import requests
 
     r = requests.get(
-        f"{KITE_ROOT.rstrip('/')}/instruments/NFO",
+        f"{KITE_ROOT.rstrip('/')}/instruments/{exchange.strip().upper()}",
         headers=_headers(api_key, access_token),
         timeout=180,
     )
@@ -196,7 +196,8 @@ def _parse_option_master(csv_text: str, script: str) -> list[dict]:
     want_name = script.upper()
     reader = csv.DictReader(io.StringIO(csv_text))
     for r in reader:
-        if (r.get("segment") or "").strip() != "NFO-OPT":
+        seg = (r.get("segment") or "").strip().upper()
+        if seg not in {"NFO-OPT", "BFO-OPT"}:
             continue
         if (r.get("name") or "").strip().upper() != want_name:
             continue
@@ -350,8 +351,11 @@ def run_backtest(
     from_dt = now - timedelta(days=max(2, int(days)))
     to_dt = now
 
-    nfo_csv = _fetch_nfo_csv(api_key, access_token)
-    option_rows = {s: _parse_option_master(nfo_csv, s) for s in scripts}
+    nfo_csv = _fetch_instruments_csv(api_key, access_token, "NFO")
+    bfo_csv = _fetch_instruments_csv(api_key, access_token, "BFO")
+    option_rows = {
+        s: (_parse_option_master(nfo_csv, s) + _parse_option_master(bfo_csv, s)) for s in scripts
+    }
     opt_cache: dict[int, pd.DataFrame] = {}
     results: list[TradeResult] = []
     warnings: list[str] = []
@@ -467,7 +471,7 @@ def run_backtest(
 
         rows_opt_master = option_rows.get(script) or []
         if not rows_opt_master:
-            warnings.append(f"{script}: no option rows in NFO master")
+            warnings.append(f"{script}: no option rows in NFO/BFO option master")
             continue
 
         for i in range(max(long, 3), len(udf) - 1):
@@ -666,6 +670,23 @@ def main() -> None:
     timeout_neg = sum(1 for r in timeout_rows if _trade_pnl_points(r) < 0)
     timeout_flat = sum(1 for r in timeout_rows if abs(_trade_pnl_points(r)) < 1e-9)
     timeout_pnl = sum(_trade_pnl_points(r) for r in timeout_rows)
+    by_script: dict[str, dict[str, float]] = {}
+    by_reason: dict[str, dict[str, float]] = {}
+    for r in out:
+        pnl = _trade_pnl_points(r)
+        s = by_script.setdefault(r.script, {"trades": 0.0, "pnl": 0.0, "wins": 0.0, "losses": 0.0, "timeouts": 0.0})
+        s["trades"] += 1.0
+        s["pnl"] += pnl
+        if r.outcome == "WIN":
+            s["wins"] += 1.0
+        elif r.outcome == "LOSS":
+            s["losses"] += 1.0
+        elif r.outcome == "BREAKEVEN":
+            s["timeouts"] += 1.0
+
+        rr = by_reason.setdefault(r.reason, {"trades": 0.0, "pnl": 0.0})
+        rr["trades"] += 1.0
+        rr["pnl"] += pnl
 
     print(
         f"Standalone options backtest complete | user={args.user} | days={args.days} "
@@ -679,6 +700,18 @@ def main() -> None:
         f"Timeout trades={len(timeout_rows)} | Timeout PnL={timeout_pnl:.2f} "
         f"| Timeout +/−/0 = {timeout_pos}/{timeout_neg}/{timeout_flat}"
     )
+    if out:
+        print("\nPnL by script:")
+        for script in sorted(by_script.keys()):
+            s = by_script[script]
+            print(
+                f"- {script}: trades={int(s['trades'])} | pnl={s['pnl']:.2f} | "
+                f"wins/losses/timeouts={int(s['wins'])}/{int(s['losses'])}/{int(s['timeouts'])}"
+            )
+        print("\nPnL by exit reason:")
+        for reason in sorted(by_reason.keys()):
+            rr = by_reason[reason]
+            print(f"- {reason}: trades={int(rr['trades'])} | pnl={rr['pnl']:.2f}")
     print(f"CSV={args.csv_out}")
     if warns:
         print("\nWarnings:")
