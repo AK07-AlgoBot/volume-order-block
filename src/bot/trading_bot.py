@@ -495,7 +495,12 @@ TRADING_CONFIG = {
     # Optional { "NIFTY": 12345678 } if auto token resolve fails (Kite instruments CSV token).
     "kite_instrument_token_overrides": {},
     "interval": "1minute",  # Base candle interval (Kite: minute/5minute/…; Upstox: 1minute)
-    "signal_interval": "15minute",  # Strategy timeframe (EMA runs on resampled signal_interval candles)
+    "signal_interval": "15minute",  # Legacy fallback (use per-script keys below).
+    # Per-script signal TF split:
+    # - live scripts (NIFTY/BANKNIFTY/SENSEX/CRUDE/GOLDMINI/SILVERMINI): 5m
+    # - paper scripts (equity paper flow): 15m
+    "signal_interval_live": "5minute",
+    "signal_interval_paper": "15minute",
     "ema_short": 5,
     "ema_long": 18,
     "portfolio_stop_loss": 10000,  # ₹10,000
@@ -662,7 +667,7 @@ TRADING_CONFIG = {
     "options_risk_free_rate": 0.0,
     "options_chart_crossover_exit": True,
     "options_crossover_interval": "5minute",
-    # Standalone index options: evaluate on futures 5m candles (signal_interval) without a futures fill.
+    # Standalone index options: evaluate on live-script signal timeframe (default 5m) without a futures fill.
     # VWAP + EMA crossover + ADX + RSI + volume spike vs prior two bars; SL = same swing OB as futures; R:R 1:3 via options_target3_r.
     "options_standalone_enabled": True,
     "options_standalone_skip_if_futures_open": True,
@@ -2725,7 +2730,7 @@ class TradingBot:
                 continue
             df["rsi"] = TechnicalAnalyzer.calculate_rsi_series(df["close"], rsi_period)
 
-            closed_row = self._get_last_closed_candle_row(df)
+            closed_row = self._get_last_closed_candle_row(df, script_name)
             if closed_row is None:
                 continue
             cts = closed_row["timestamp"]
@@ -4299,9 +4304,9 @@ class TradingBot:
         )
         return True
 
-    def _resample_for_signal(self, df):
+    def _resample_for_signal(self, df, script_name: str | None = None):
         """Resample API candles to strategy timeframe for signal generation."""
-        mins = max(1, int(self._signal_bucket_minutes()))
+        mins = max(1, int(self._signal_bucket_minutes(script_name)))
         if mins <= 1:
             return df
 
@@ -4325,12 +4330,12 @@ class TradingBot:
         )
         return resampled
 
-    def _get_last_closed_candle_row(self, df):
+    def _get_last_closed_candle_row(self, df, script_name: str | None = None):
         """Return last fully closed signal candle row based on configured signal interval."""
         if df is None or df.empty:
             return None
 
-        mins = max(1, int(self._signal_bucket_minutes()))
+        mins = max(1, int(self._signal_bucket_minutes(script_name)))
         if mins <= 1:
             return df.iloc[-1]
 
@@ -4353,9 +4358,9 @@ class TradingBot:
             str(self.config.get("market_data_provider") or "upstox").strip().lower() == "kite"
         )
 
-    def _signal_bucket_minutes(self) -> int:
-        """Minutes per bar for ``signal_interval`` (used for boundary wake timing)."""
-        s = str(self.config.get("signal_interval") or "5minute").strip().lower().replace(" ", "")
+    @staticmethod
+    def _interval_to_minutes(interval: str) -> int:
+        s = str(interval or "5minute").strip().lower().replace(" ", "")
         if s in ("5minute", "5m", "5min"):
             return 5
         if s in ("1minute", "1m", "1min"):
@@ -4369,6 +4374,28 @@ class TradingBot:
         if s in ("60minute", "60m", "1hour", "1h"):
             return 60
         return 5
+
+    def _signal_interval_for_script(self, script_name: str | None = None) -> str:
+        """Effective strategy interval for a script (paper vs live split)."""
+        if script_name and is_paper_script(str(script_name)):
+            return str(
+                self.config.get("signal_interval_paper")
+                or self.config.get("signal_interval")
+                or "15minute"
+            )
+        return str(
+            self.config.get("signal_interval_live")
+            or self.config.get("signal_interval")
+            or "5minute"
+        )
+
+    def _signal_bucket_minutes(self, script_name: str | None = None) -> int:
+        """Minutes per bar for the given script; when script_name is None use fastest configured bucket."""
+        if script_name:
+            return max(1, int(self._interval_to_minutes(self._signal_interval_for_script(script_name))))
+        live_m = self._interval_to_minutes(self._signal_interval_for_script("NIFTY"))
+        paper_m = self._interval_to_minutes(self._signal_interval_for_script("RELIANCE"))
+        return max(1, int(min(live_m, paper_m)))
 
     def _kite_signal_boundary_wake_enabled(self) -> bool:
         """Wake the main loop right after each signal bar closes (IST), not only on loop_interval."""
@@ -4582,14 +4609,14 @@ class TradingBot:
         df = kite_candles_to_dataframe(rows)
         if df is None or df.empty:
             return None
-        df = self._resample_for_signal(df)
+        df = self._resample_for_signal(df, script_name)
         if df is None or df.empty:
             return None
         self._bot_logger.info(
             " %s: Kite %d candles (%s) | Latest close Rs%.2f",
             script_name,
             len(df),
-            self.config.get("signal_interval", "1minute"),
+            self._signal_interval_for_script(script_name),
             float(df["close"].iloc[-1]),
         )
         return df
@@ -4653,12 +4680,12 @@ class TradingBot:
             else:
                 return None
 
-            df = self._resample_for_signal(df)
+            df = self._resample_for_signal(df, script_name)
             if df is None or df.empty:
                 return None
             
             self._bot_logger.info(
-                f" {script_name}: {len(df)} candles ({self.config.get('signal_interval', '1minute')}) "
+                f" {script_name}: {len(df)} candles ({self._signal_interval_for_script(script_name)}) "
                 f"| Latest: Rs{df['close'].iloc[-1]:.2f}"
             )
             return df
@@ -4698,7 +4725,7 @@ class TradingBot:
             crossover = latest['crossover']
 
             # Last fully closed candle values (used for strict entry)
-            closed_row = self._get_last_closed_candle_row(df)
+            closed_row = self._get_last_closed_candle_row(df, script_name)
             if closed_row is not None:
                 closed_signal = closed_row['signal']
                 closed_crossover = closed_row['crossover']
@@ -5178,7 +5205,7 @@ class TradingBot:
 
                 # Exit on OB zone breach (BigBeluga logic) or on confirmed crossover (reversal) with OB present
                 ob_zone_boundary = position.get('initial_sl')
-                last_closed_candle = self._get_last_closed_candle_row(data.get('df'))
+                last_closed_candle = self._get_last_closed_candle_row(data.get('df'), script_name)
                 crossover_exit = False
                 ob_breached = False
                 if ob_zone_boundary is not None and last_closed_candle is not None:
@@ -6165,8 +6192,8 @@ class TradingBot:
                 )
             if self._kite_signal_boundary_wake_enabled():
                 self._bot_logger.info(
-                    "KITE_SIGNAL_BOUNDARY_WAKE: wake at each %dm bar (signal_interval) + %ss offset so 5m entries "
-                    "are not delayed by loop_interval; sleep=min(loop_interval, boundary). Disable: KITE_SIGNAL_BOUNDARY_WAKE=0.",
+                    "KITE_SIGNAL_BOUNDARY_WAKE: wake at each %dm bar (effective signal bucket) + %ss offset "
+                    "so entries are not delayed by loop_interval; sleep=min(loop_interval, boundary). Disable: KITE_SIGNAL_BOUNDARY_WAKE=0.",
                     self._signal_bucket_minutes(),
                     float(os.environ.get("KITE_BOUNDARY_EVAL_OFFSET_SEC", "2") or 2),
                 )
