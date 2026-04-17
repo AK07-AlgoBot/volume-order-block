@@ -5,6 +5,7 @@ import csv
 import io
 import math
 import sys
+import time
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
@@ -364,13 +365,56 @@ def run_backtest(
             raise last_err
         return []
 
+    def _fetch_chunked(
+        token: int,
+        *,
+        interval: str,
+        from_dt_: datetime,
+        to_dt_: datetime,
+        prefer_cont: str,
+        oi: str = "0",
+        chunk_days: int = 3,
+        max_retries: int = 4,
+    ) -> list[list]:
+        out: list[list] = []
+        cur = from_dt_
+        while cur < to_dt_:
+            end = min(to_dt_, cur + timedelta(days=max(1, int(chunk_days))))
+            rows: list[list] | None = None
+            last_err: Exception | None = None
+            for attempt in range(max_retries):
+                try:
+                    rows = _fetch_with_cont_fallback(
+                        token,
+                        interval=interval,
+                        from_dt_=cur,
+                        to_dt_=end,
+                        prefer_cont=prefer_cont,
+                        oi=oi,
+                    )
+                    last_err = None
+                    break
+                except Exception as e:  # noqa: BLE001
+                    last_err = e
+                    # exponential-ish backoff: 1.5s, 3s, 6s, 12s
+                    time.sleep(1.5 * (2 ** attempt))
+            if rows is None:
+                if last_err is not None:
+                    raise last_err
+                rows = []
+            out.extend(rows)
+            # small pause to reduce burst/rate pressure on Kite historical endpoint
+            time.sleep(0.25)
+            cur = end
+        return out
+
     for script in scripts:
         tok = resolve_kite_instrument_token(script, api_key, access_token)
         if not tok:
             warnings.append(f"{script}: unable to resolve Kite futures token")
             continue
         try:
-            rows = _fetch_with_cont_fallback(
+            rows = _fetch_chunked(
                 tok,
                 interval=kite_iv,
                 from_dt_=from_dt,
@@ -449,7 +493,7 @@ def run_backtest(
             token = int(opt_row["token"])
             if token not in opt_cache:
                 try:
-                    o_rows = _fetch_with_cont_fallback(
+                    o_rows = _fetch_chunked(
                         token,
                         interval=kite_iv,
                         from_dt_=from_dt - timedelta(days=2),
