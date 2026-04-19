@@ -100,13 +100,21 @@ def main() -> None:
     i5 = map_bot_interval_to_kite("5minute")
     i30 = map_bot_interval_to_kite("30minute")
 
-    raw1 = _fetch_chunked(api_key, access_token, tok, i1, from_dt, to_dt, prefer_cont="1")
+    raw1: list = []
+    try:
+        raw1 = _fetch_chunked(api_key, access_token, tok, i1, from_dt, to_dt, prefer_cont="1")
+    except Exception as e:
+        print(f"Warning: 1-minute history unavailable ({e}); continuing without 1m trap confirmation.")
     raw5 = _fetch_chunked(api_key, access_token, tok, i5, from_dt, to_dt, prefer_cont="1")
     raw30 = _fetch_chunked(api_key, access_token, tok, i30, from_dt, to_dt, prefer_cont="1")
 
-    df1 = kite_candles_to_dataframe(raw1) or pd.DataFrame()
-    df5 = kite_candles_to_dataframe(raw5) or pd.DataFrame()
-    df30 = kite_candles_to_dataframe(raw30) or pd.DataFrame()
+    def _df_or_empty(rows: list) -> pd.DataFrame:
+        d = kite_candles_to_dataframe(rows)
+        return d if d is not None and not d.empty else pd.DataFrame()
+
+    df1 = _df_or_empty(raw1)
+    df5 = _df_or_empty(raw5)
+    df30 = _df_or_empty(raw30)
 
     cfg = SwingTrapConfig()
     trades = run_swing_trap_backtest(df1, df5, df30, cfg)
