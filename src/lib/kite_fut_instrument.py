@@ -155,6 +155,58 @@ def resolve_equity_instrument_token(
     return None
 
 
+def _norm_symbol(s: str) -> str:
+    return "".join((s or "").strip().upper().split())
+
+
+# Strategy script keys → (Kite exchange CSV, index tradingsymbol as in instruments list).
+_INDEX_INSTRUMENT: dict[str, tuple[str, str]] = {
+    "NIFTY": ("NSE", "NIFTY 50"),
+    "NIFTY50": ("NSE", "NIFTY 50"),
+    "BANKNIFTY": ("NSE", "NIFTY BANK"),
+    "SENSEX": ("BSE", "SENSEX"),
+}
+
+
+def resolve_nse_index_instrument_token(
+    script_name: str,
+    api_key: str,
+    access_token: str,
+) -> int | None:
+    """
+    Resolve NSE/BSE **spot index** instrument_token (INDEX in *-INDICES segment).
+
+    Use for backtests on the cash index (e.g. NIFTY 50) instead of futures.
+    """
+    key = _norm_symbol(str(script_name or ""))
+    if not key:
+        return None
+    pair = _INDEX_INSTRUMENT.get(key)
+    if not pair:
+        return None
+    exchange, want_ts = pair
+    want_norm = _norm_symbol(want_ts)
+    text = _fetch_csv(exchange, api_key, access_token)
+    reader = csv.DictReader(io.StringIO(text))
+    for row in reader:
+        if not isinstance(row, dict):
+            continue
+        seg = (row.get("segment") or "").strip().upper()
+        # Kite uses segment INDICES with instrument_type EQ (not INDEX) for spot indices.
+        if seg != "INDICES":
+            continue
+        ts = (row.get("tradingsymbol") or "").strip()
+        if _norm_symbol(ts) != want_norm:
+            continue
+        try:
+            tok = int(float(row.get("instrument_token") or 0))
+        except (TypeError, ValueError):
+            continue
+        if tok > 0:
+            return tok
+    return None
+
+
 def resolve_kite_instrument_token(
     script_name: str,
     api_key: str,
