@@ -40,7 +40,7 @@ from upstox_credentials_store import (
     user_data_dir,
 )
 from trading_preferences_store import read_trading_preferences
-from trading_script_constants import is_paper_script
+from trading_script_constants import AVAILABLE_SCRIPT_NAMES, is_paper_script
 from zerodha_credentials_store import load_zerodha_credentials_for_user
 
 from kite_fut_instrument import resolve_kite_instrument_token
@@ -57,6 +57,8 @@ from option_greeks import (
     bs_put_delta,
     years_to_expiry_from_ms,
 )
+from strategy.swing_trap.backtest_runner import run_swing_trap_backtest
+from strategy.swing_trap.config import SwingTrapConfig
 
 # Initialize colorama
 init(autoreset=True)
@@ -697,6 +699,16 @@ TRADING_CONFIG = {
         "MCX": "23:20"
     },
     "daily_shutdown_time": DAILY_SHUTDOWN_TIME,
+    # Entry logic mode:
+    # - ema_crossover: legacy EMA crossover flow
+    # - swing_trap: use swing/trap logic for scripts listed in swing_trap_scripts
+    "entry_logic_mode": "swing_trap",
+    "swing_trap_scripts": list(AVAILABLE_SCRIPT_NAMES),
+    "swing_trap_use_1m_confirm": False,
+    "swing_trap_daily_reference": "prior_day_30m_range",
+    "swing_trap_rr_multiple": 3.0,
+    # Disable legacy EMA-crossover paper entries by default; keep paper path focused on explicit strategies.
+    "paper_trade_ema_entries_enabled": False,
     "auto_archive_on_shutdown": True
 }
 
@@ -4915,6 +4927,93 @@ class TradingBot:
         except Exception as e:
             self._bot_logger.error(f"ERROR: Error fetching data for {script_name}: {e}")
             return None
+
+    def _swing_trap_enabled_for_script(self, script_name: str) -> bool:
+        mode = str(self.config.get("entry_logic_mode") or "ema_crossover").strip().lower()
+        if mode != "swing_trap":
+            return False
+        name = str(script_name or "").strip().upper()
+        # Keep existing live-trading logic untouched; swing-trap is applied to paper symbols.
+        if not is_paper_script(name):
+            return False
+        allowed = {str(s).strip().upper() for s in (self.config.get("swing_trap_scripts") or [])}
+        return name in allowed
+
+    @staticmethod
+    def _resample_5m_to_30m(df5: pd.DataFrame) -> pd.DataFrame:
+        base = df5.copy()
+        base["timestamp"] = pd.to_datetime(base["timestamp"], errors="coerce")
+        base = base.dropna(subset=["timestamp"]).sort_values("timestamp")
+        if base.empty:
+            return pd.DataFrame()
+        ts = base["timestamp"]
+        if getattr(ts.dt, "tz", None) is None:
+            base["timestamp"] = ts.dt.tz_localize("Asia/Kolkata")
+        else:
+            base["timestamp"] = ts.dt.tz_convert("Asia/Kolkata")
+        agg = (
+            base.set_index("timestamp")
+            .resample("30min", label="left", closed="left")
+            .agg({"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"})
+            .dropna(subset=["open", "high", "low", "close"])
+            .reset_index()
+        )
+        return agg
+
+    def _compute_swing_trap_signal(self, script_name: str, df5: pd.DataFrame) -> dict | None:
+        """Return swing-trap entry payload for the latest closed 5m bar, else None."""
+        try:
+            if df5 is None or df5.empty or len(df5) < 80:
+                return None
+            closed = self._get_last_closed_candle_row(df5, script_name)
+            if closed is None:
+                return None
+            closed_ts = pd.to_datetime(closed["timestamp"], errors="coerce")
+            if pd.isna(closed_ts):
+                return None
+            if getattr(closed_ts, "tzinfo", None) is None:
+                closed_ts = closed_ts.tz_localize("Asia/Kolkata")
+            else:
+                closed_ts = closed_ts.tz_convert("Asia/Kolkata")
+
+            df30 = self._resample_5m_to_30m(df5)
+            if df30 is None or df30.empty:
+                return None
+            rr = float(self.config.get("swing_trap_rr_multiple", 3.0))
+            cfg = SwingTrapConfig(
+                use_1m_trap_fallback=bool(self.config.get("swing_trap_use_1m_confirm", False)),
+                reward_risk_multiple=max(1.0, rr),
+                default_target_fallback_rr=max(1.0, rr),
+                daily_breakout_reference=str(
+                    self.config.get("swing_trap_daily_reference", "prior_day_30m_range")
+                ),
+            )
+            trades = run_swing_trap_backtest(pd.DataFrame(), df5.copy(), df30.copy(), cfg)
+            if not trades:
+                return None
+            latest = trades[-1]
+            ets = pd.to_datetime(latest.entry_ts, errors="coerce")
+            if pd.isna(ets):
+                return None
+            if getattr(ets, "tzinfo", None) is None:
+                ets = ets.tz_localize("Asia/Kolkata")
+            else:
+                ets = ets.tz_convert("Asia/Kolkata")
+            # Backtest uses bar-end timestamps; bot stores bar-start timestamp for entry gating.
+            expected_bar_start = ets - pd.Timedelta(minutes=5)
+            if abs((closed_ts - expected_bar_start).total_seconds()) > 1:
+                return None
+            side_sig = 1 if str(latest.side).upper() == "LONG" else -1
+            return {
+                "entry_signal": side_sig,
+                "entry_crossover": True,
+                "entry_stop_loss": float(latest.stop_loss),
+                "entry_target_price": float(latest.target_price),
+                "entry_reason": "SWING_TRAP",
+            }
+        except Exception as e:
+            self._bot_logger.warning("SWING_TRAP signal computation failed for %s: %s", script_name, e)
+            return None
     
     def process_script(self, script_name, instrument_key):
         """Process a single script for trading signals"""
@@ -4980,6 +5079,13 @@ class TradingBot:
                 closed_adx = float(adx_series.iloc[-1])
                 closed_plus_di = float(plus_di_series.iloc[-1])
                 closed_minus_di = float(minus_di_series.iloc[-1])
+
+            swing_signal_payload = None
+            if self._swing_trap_enabled_for_script(script_name):
+                swing_signal_payload = self._compute_swing_trap_signal(script_name, df)
+                if swing_signal_payload:
+                    closed_signal = int(swing_signal_payload.get("entry_signal", closed_signal))
+                    closed_crossover = bool(swing_signal_payload.get("entry_crossover", True))
             
             # Determine signal status
             if signal == 1:
@@ -5014,6 +5120,21 @@ class TradingBot:
                 'entry_plus_di': closed_plus_di,
                 'entry_minus_di': closed_minus_di,
                 'entry_candle_timestamp': closed_timestamp,
+                'entry_reason': (
+                    str(swing_signal_payload.get("entry_reason"))
+                    if swing_signal_payload
+                    else "EMA_CROSSOVER"
+                ),
+                'entry_stop_loss': (
+                    float(swing_signal_payload.get("entry_stop_loss"))
+                    if swing_signal_payload and swing_signal_payload.get("entry_stop_loss") is not None
+                    else None
+                ),
+                'entry_target_price': (
+                    float(swing_signal_payload.get("entry_target_price"))
+                    if swing_signal_payload and swing_signal_payload.get("entry_target_price") is not None
+                    else None
+                ),
                 'df': df
             }
             if self._market_data_is_kite() and self._kite_tick_stream is not None:
@@ -5557,6 +5678,20 @@ class TradingBot:
                 if last_processed is not None and entry_candle_timestamp <= last_processed:
                     continue
 
+                signal_reason = str(data.get("entry_reason") or "EMA_CROSSOVER")
+                if signal_reason == "EMA_CROSSOVER" and is_paper_script(script_name) and not bool(
+                    self.config.get("paper_trade_ema_entries_enabled", False)
+                ):
+                    self._log_skip_event(
+                        script_name,
+                        "BUY" if int(data.get("entry_signal", signal) or 0) == 1 else "SELL",
+                        current_price,
+                        "PAPER_EMA_DISABLED",
+                        "paper_trade_ema_entries_enabled=false",
+                    )
+                    self.last_entry_candle_processed[script_name] = entry_candle_timestamp
+                    continue
+
                 entry_signal = data.get('entry_signal', signal)
                 entry_crossover = data.get('entry_crossover', crossover)
                 entry_ema_short = float(data.get('entry_ema_short', data.get('ema_short', 0.0)))
@@ -5565,6 +5700,17 @@ class TradingBot:
                 entry_adx = float(data.get('entry_adx', 0.0) or 0.0)
                 entry_plus_di = float(data.get('entry_plus_di', 0.0) or 0.0)
                 entry_minus_di = float(data.get('entry_minus_di', 0.0) or 0.0)
+                if signal_reason != "EMA_CROSSOVER":
+                    min_sep_cfg = self._get_min_ema_separation_percent(script_name)
+                    gap = abs(entry_ema_long) * max(min_sep_cfg, 0.03) / 100.0
+                    if entry_signal == 1:
+                        entry_ema_short = max(entry_ema_short, entry_ema_long + gap)
+                        entry_ema_long_prev = min(entry_ema_long_prev, entry_ema_long - max(0.01, gap * 0.5))
+                    elif entry_signal == -1:
+                        entry_ema_short = min(entry_ema_short, entry_ema_long - gap)
+                        entry_ema_long_prev = max(entry_ema_long_prev, entry_ema_long + max(0.01, gap * 0.5))
+                    if self.config.get('adx_filter_enabled', False):
+                        entry_adx = max(entry_adx, self._get_adx_min_threshold(script_name) + 1.0)
                 entry_price = current_price
                 signal_df = data.get('df')
                 level_metrics = self._compute_percent_level_metrics(
@@ -5699,7 +5845,11 @@ class TradingBot:
                             continue
 
                     if entry_signal == 1:
-                        initial_sl = self._get_entry_swing_sl(signal_df, entry_candle_timestamp, 'BUY')
+                        initial_sl = (
+                            float(data.get("entry_stop_loss"))
+                            if data.get("entry_stop_loss") is not None
+                            else self._get_entry_swing_sl(signal_df, entry_candle_timestamp, 'BUY')
+                        )
                         if initial_sl is None or initial_sl >= entry_price:
                             trade_prob, trade_prob_bucket = self._estimate_trade_probability(
                                 script_name, True, ema_sep_pct, min_sep_pct, 0.0, level_metrics
@@ -5730,8 +5880,14 @@ class TradingBot:
                             entry_price=entry_price,
                             quantity=qty,
                         )
-                        target_price = nse_target if nse_target is not None else (
-                            entry_price * (1 + self.config['target_percent'] / 100)
+                        target_price = (
+                            float(data.get("entry_target_price"))
+                            if data.get("entry_target_price") is not None
+                            else (
+                                nse_target
+                                if nse_target is not None
+                                else (entry_price * (1 + self.config['target_percent'] / 100))
+                            )
                         )
                         self._bot_logger.info(f"BUY signal for {script_name} at {entry_price:.2f}")
                         if is_paper_script(script_name):
@@ -5791,7 +5947,7 @@ class TradingBot:
                                 "PAPER_ENTRY",
                                 "BUY",
                                 entry_price,
-                                "EMA_CROSSOVER",
+                                signal_reason,
                                 extra=entry_extra,
                             )
                             if telegram_notifications_enabled_for_user(self.username):
@@ -5802,7 +5958,7 @@ class TradingBot:
                                         "action": "BUY",
                                         "quantity": self._get_order_quantity(script_name),
                                         "price": entry_price,
-                                        "reason": "EMA_CROSSOVER",
+                                        "reason": signal_reason,
                                         "stop_loss": initial_sl,
                                         "target_price": target_price,
                                         "win_percent": trade_prob,
@@ -5825,7 +5981,7 @@ class TradingBot:
                             script_name,
                             "BUY",
                             entry_price,
-                            "EMA_CROSSOVER",
+                            signal_reason,
                             stop_loss=initial_sl,
                             target_price=target_price,
                             win_percent=trade_prob,
@@ -5915,7 +6071,7 @@ class TradingBot:
                             action="ENTRY",
                             side="BUY",
                             price=entry_price,
-                            reason="EMA_CROSSOVER",
+                            reason=signal_reason,
                             extra=(
                                 f"sl={initial_sl:.2f}; target={target_price:.2f}; "
                                 f"ob_pct={ob_percent:.2f}; "
@@ -5940,7 +6096,11 @@ class TradingBot:
                         )
                     
                     elif entry_signal == -1:
-                        initial_sl = self._get_entry_swing_sl(signal_df, entry_candle_timestamp, 'SELL')
+                        initial_sl = (
+                            float(data.get("entry_stop_loss"))
+                            if data.get("entry_stop_loss") is not None
+                            else self._get_entry_swing_sl(signal_df, entry_candle_timestamp, 'SELL')
+                        )
                         if initial_sl is None or initial_sl <= entry_price:
                             trade_prob, trade_prob_bucket = self._estimate_trade_probability(
                                 script_name, True, ema_sep_pct, min_sep_pct, 0.0, level_metrics
@@ -5971,8 +6131,14 @@ class TradingBot:
                             entry_price=entry_price,
                             quantity=qty,
                         )
-                        target_price = nse_target if nse_target is not None else (
-                            entry_price * (1 - self.config['target_percent'] / 100)
+                        target_price = (
+                            float(data.get("entry_target_price"))
+                            if data.get("entry_target_price") is not None
+                            else (
+                                nse_target
+                                if nse_target is not None
+                                else (entry_price * (1 - self.config['target_percent'] / 100))
+                            )
                         )
                         self._bot_logger.info(f"SELL signal for {script_name} at {entry_price:.2f}")
                         if is_paper_script(script_name):
@@ -6032,7 +6198,7 @@ class TradingBot:
                                 "PAPER_ENTRY",
                                 "SELL",
                                 entry_price,
-                                "EMA_CROSSOVER",
+                                signal_reason,
                                 extra=entry_extra,
                             )
                             if telegram_notifications_enabled_for_user(self.username):
@@ -6043,7 +6209,7 @@ class TradingBot:
                                         "action": "SELL",
                                         "quantity": self._get_order_quantity(script_name),
                                         "price": entry_price,
-                                        "reason": "EMA_CROSSOVER",
+                                        "reason": signal_reason,
                                         "stop_loss": initial_sl,
                                         "target_price": target_price,
                                         "win_percent": trade_prob,
@@ -6066,7 +6232,7 @@ class TradingBot:
                             script_name,
                             "SELL",
                             entry_price,
-                            "EMA_CROSSOVER",
+                            signal_reason,
                             stop_loss=initial_sl,
                             target_price=target_price,
                             win_percent=trade_prob,
@@ -6156,7 +6322,7 @@ class TradingBot:
                             action="ENTRY",
                             side="SELL",
                             price=entry_price,
-                            reason="EMA_CROSSOVER",
+                            reason=signal_reason,
                             extra=(
                                 f"sl={initial_sl:.2f}; target={target_price:.2f}; "
                                 f"ob_pct={ob_percent:.2f}; "
@@ -6493,6 +6659,7 @@ class TradingBot:
             if current_price is None:
                 continue
             self._queue_dashboard_trade_update(script_name, position, current_price)
+        option_state_dirty = False
         for script_name, opt in self.option_positions.items():
             if not isinstance(opt, dict) or bool(opt.get("paper_simulated")):
                 continue
@@ -6501,11 +6668,17 @@ class TradingBot:
                 continue
             opt_ltp = self.client.get_ltp(ikey)
             if opt_ltp is not None and float(opt_ltp) > 0:
-                opt["last_price_option"] = float(opt_ltp)
+                prev_opt_ltp = float(opt.get("last_price_option") or 0.0)
+                new_opt_ltp = float(opt_ltp)
+                opt["last_price_option"] = new_opt_ltp
+                if abs(new_opt_ltp - prev_opt_ltp) > 1e-9:
+                    option_state_dirty = True
             else:
                 opt_ltp = float(opt.get("last_price_option") or opt.get("entry_price_option") or 0.0)
             self._queue_dashboard_option_update(script_name, opt, float(opt_ltp or 0.0))
         self._flush_dashboard_trade_updates()
+        if option_state_dirty:
+            self.save_state()
 
         if self.total_pnl < -self.config["portfolio_stop_loss"]:
             self._bot_logger.error(
