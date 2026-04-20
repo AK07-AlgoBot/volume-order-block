@@ -2,8 +2,10 @@
 Kite historical backtest for swing/trap strategy (30m swings, 5m entry, optional 1m confirm).
 
 Usage:
-  python src/scripts/backtest_swing_trap_kite.py --user AK07 --script NIFTY --days 5 \\
+  python src/scripts/backtest_swing_trap_kite.py --user AK07 --scripts NIFTY,BANKNIFTY,SENSEX --days 5 \\
     --csv-out tmp/swing_trap_backtest.csv --json-out tmp/swing_trap_backtest.json
+
+  Default is **NIFTY 50 index** (spot index), not futures. Pass --futures for continuous futures.
 """
 
 from __future__ import annotations
@@ -23,14 +25,39 @@ for p in (REPO_ROOT, REPO_ROOT / "src", REPO_ROOT / "src" / "lib"):
     if s not in sys.path:
         sys.path.insert(0, s)
 
-from kite_fut_instrument import resolve_kite_instrument_token
+from kite_fut_instrument import resolve_kite_instrument_token, resolve_nse_index_instrument_token
 from kite_rest_candles import fetch_historical_raw, kite_candles_to_dataframe, map_bot_interval_to_kite
 from strategy.swing_trap.backtest_runner import run_swing_trap_backtest
 from strategy.swing_trap.config import SwingTrapConfig
+from strategy.swing_trap.models import SwingTrapTrade
 from strategy.swing_trap.reporter import trades_to_csv, trades_to_json
 from zerodha_credentials_store import load_zerodha_credentials_for_user
 
 IST = ZoneInfo("Asia/Kolkata")
+
+
+def _parse_scripts(args: argparse.Namespace) -> list[str]:
+    raw_items: list[str] = []
+    scripts_text = str(getattr(args, "scripts", "") or "")
+    if scripts_text.strip():
+        raw_items.extend(scripts_text.split(","))
+
+    legacy_script = str(getattr(args, "script", "") or "")
+    if legacy_script.strip():
+        raw_items.append(legacy_script)
+
+    out: list[str] = []
+    seen: set[str] = set()
+    for item in raw_items:
+        s = str(item or "").strip().upper()
+        if not s or s in seen:
+            continue
+        seen.add(s)
+        out.append(s)
+
+    if out:
+        return out
+    return ["NIFTY", "BANKNIFTY", "SENSEX"]
 
 
 def _fetch_chunked(
@@ -44,15 +71,17 @@ def _fetch_chunked(
     prefer_cont: str = "1",
     chunk_days: int = 3,
     max_retries: int = 4,
+    index_mode: bool = False,
 ) -> list:
     out: list = []
     cur = from_dt
+    cont_order = ("0",) if index_mode else ((prefer_cont, "0") if prefer_cont != "0" else ("0",))
     while cur < to_dt:
         end = min(to_dt, cur + timedelta(days=max(1, chunk_days)))
         rows = None
         last_err = None
         for attempt in range(max_retries):
-            for cont in (prefer_cont, "0") if prefer_cont != "0" else ("0",):
+            for cont in cont_order:
                 try:
                     rows = fetch_historical_raw(
                         api_key, access_token, token, kite_interval, cur, end, continuous=cont, oi="0"
@@ -76,7 +105,21 @@ def _fetch_chunked(
 def main() -> None:
     ap = argparse.ArgumentParser(description="Swing/trap strategy backtest (Kite)")
     ap.add_argument("--user", default="AK07")
-    ap.add_argument("--script", default="NIFTY", help="NIFTY, BANKNIFTY, SENSEX, ...")
+    ap.add_argument(
+        "--script",
+        default="",
+        help="Legacy single symbol input (deprecated). Prefer --scripts.",
+    )
+    ap.add_argument(
+        "--scripts",
+        default="NIFTY,BANKNIFTY,SENSEX",
+        help="Comma-separated symbols (example: NIFTY,BANKNIFTY,SENSEX).",
+    )
+    ap.add_argument(
+        "--futures",
+        action="store_true",
+        help="Use nearest futures contract instead of the cash index (NIFTY 50, NIFTY BANK, …).",
+    )
     ap.add_argument("--days", type=int, default=5)
     ap.add_argument("--csv-out", type=Path, default=REPO_ROOT / "tmp" / "swing_trap_backtest.csv")
     ap.add_argument("--json-out", type=Path, default=REPO_ROOT / "tmp" / "swing_trap_backtest.json")
@@ -88,10 +131,6 @@ def main() -> None:
     if not api_key or not access_token:
         raise SystemExit(f"Missing Kite credentials for user={args.user}")
 
-    tok = resolve_kite_instrument_token(args.script, api_key, access_token)
-    if not tok:
-        raise SystemExit(f"No futures token for script={args.script}")
-
     now = datetime.now(IST)
     from_dt = now - timedelta(days=max(2, int(args.days)))
     to_dt = now
@@ -100,33 +139,69 @@ def main() -> None:
     i5 = map_bot_interval_to_kite("5minute")
     i30 = map_bot_interval_to_kite("30minute")
 
-    raw1: list = []
-    try:
-        raw1 = _fetch_chunked(api_key, access_token, tok, i1, from_dt, to_dt, prefer_cont="1")
-    except Exception as e:
-        print(f"Warning: 1-minute history unavailable ({e}); continuing without 1m trap confirmation.")
-    raw5 = _fetch_chunked(api_key, access_token, tok, i5, from_dt, to_dt, prefer_cont="1")
-    raw30 = _fetch_chunked(api_key, access_token, tok, i30, from_dt, to_dt, prefer_cont="1")
+    scripts = _parse_scripts(args)
+    cfg = SwingTrapConfig()
+    all_trades: list[SwingTrapTrade] = []
+    processed: list[tuple[str, str]] = []
 
     def _df_or_empty(rows: list) -> pd.DataFrame:
         d = kite_candles_to_dataframe(rows)
         return d if d is not None and not d.empty else pd.DataFrame()
 
-    df1 = _df_or_empty(raw1)
-    df5 = _df_or_empty(raw5)
-    df30 = _df_or_empty(raw30)
+    for script in scripts:
+        index_mode = not args.futures
+        tok: int | None = None
+        if index_mode:
+            tok = resolve_nse_index_instrument_token(script, api_key, access_token)
+        if not tok:
+            tok = resolve_kite_instrument_token(script, api_key, access_token)
+            index_mode = False
+        if not tok:
+            print(f"Warning: no Kite instrument token for script={script}; skipping.")
+            continue
 
-    cfg = SwingTrapConfig()
-    trades = run_swing_trap_backtest(df1, df5, df30, cfg)
+        raw1: list = []
+        try:
+            raw1 = _fetch_chunked(
+                api_key, access_token, tok, i1, from_dt, to_dt, prefer_cont="1", index_mode=index_mode
+            )
+        except Exception as e:
+            print(
+                f"Warning: 1-minute history unavailable for {script} ({e}); "
+                "continuing without 1m trap confirmation."
+            )
+        raw5 = _fetch_chunked(
+            api_key, access_token, tok, i5, from_dt, to_dt, prefer_cont="1", index_mode=index_mode
+        )
+        raw30 = _fetch_chunked(
+            api_key, access_token, tok, i30, from_dt, to_dt, prefer_cont="1", index_mode=index_mode
+        )
 
-    trades_to_csv(args.csv_out, trades)
-    trades_to_json(args.json_out, trades)
+        df1 = _df_or_empty(raw1)
+        df5 = _df_or_empty(raw5)
+        df30 = _df_or_empty(raw30)
+        trades = run_swing_trap_backtest(df1, df5, df30, cfg)
+        for t in trades:
+            meta = dict(t.meta or {})
+            meta["script"] = script
+            t.meta = meta
+        all_trades.extend(trades)
+        processed.append((script, "index" if index_mode else "futures"))
 
-    total_pts = sum(t.total_points for t in trades)
+    if not all_trades:
+        raise SystemExit(f"No trades generated for scripts={','.join(scripts)}")
+
+    all_trades.sort(key=lambda t: t.entry_ts)
+    trades_to_csv(args.csv_out, all_trades)
+    trades_to_json(args.json_out, all_trades)
+
+    total_pts = sum(t.total_points for t in all_trades)
+    series_summary = ", ".join(f"{s}:{src}" for s, src in processed)
     print(
-        f"Swing/trap backtest | user={args.user} | script={args.script} | days={args.days} | trades={len(trades)} | "
-        f"total_points={total_pts:.2f}"
+        f"Swing/trap backtest | user={args.user} | scripts={','.join(scripts)} | days={args.days} | "
+        f"trades={len(all_trades)} | total_points={total_pts:.2f}"
     )
+    print(f"Resolved series={series_summary}")
     print(f"CSV={args.csv_out}")
     print(f"JSON={args.json_out}")
 
