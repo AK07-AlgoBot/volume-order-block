@@ -5,7 +5,9 @@ Usage:
   python src/scripts/backtest_swing_trap_kite.py --user AK07 --scripts NIFTY,BANKNIFTY,SENSEX --days 5 \\
     --csv-out tmp/swing_trap_backtest.csv --json-out tmp/swing_trap_backtest.json
 
-  Default is **NIFTY 50 index** (spot index), not futures. Pass --futures for continuous futures.
+  When --scripts is omitted, all configured scripts are tested (35 currently).
+  For each script, index token is preferred; fallback is futures token.
+  Pass --futures to force futures-only resolution.
 """
 
 from __future__ import annotations
@@ -24,6 +26,10 @@ for p in (REPO_ROOT, REPO_ROOT / "src", REPO_ROOT / "src" / "lib"):
     s = str(p)
     if s not in sys.path:
         sys.path.insert(0, s)
+for p in (REPO_ROOT / "src" / "bot",):
+    s = str(p)
+    if s not in sys.path:
+        sys.path.insert(0, s)
 
 from kite_fut_instrument import resolve_kite_instrument_token, resolve_nse_index_instrument_token
 from kite_rest_candles import fetch_historical_raw, kite_candles_to_dataframe, map_bot_interval_to_kite
@@ -31,9 +37,83 @@ from strategy.swing_trap.backtest_runner import run_swing_trap_backtest
 from strategy.swing_trap.config import SwingTrapConfig
 from strategy.swing_trap.models import SwingTrapTrade
 from strategy.swing_trap.reporter import trades_to_csv, trades_to_json
+from trading_script_constants import AVAILABLE_SCRIPT_NAMES
+from trading_bot import send_paper_trade_notification, telegram_notifications_enabled_for_user
 from zerodha_credentials_store import load_zerodha_credentials_for_user
 
 IST = ZoneInfo("Asia/Kolkata")
+
+
+def _print_trade_levels_log(script: str, trades: list[SwingTrapTrade]) -> None:
+    if not trades:
+        print(f"[{script}] no swing-trap trades generated.")
+        return
+
+    print(f"[{script}] swing-trap trades={len(trades)}")
+    for t in trades:
+        meta = dict(t.meta or {})
+        b_idx = meta.get("breakout_idx")
+        r_idx = meta.get("retest_idx")
+        tr_idx = meta.get("trap_idx")
+        e_idx = meta.get("entry_idx")
+        ref_mode = meta.get("reference_mode", "NA")
+        ref_day = meta.get("reference_30m_day", "NA")
+        print(
+            f"[{script}] {t.side} entry={t.entry_ts.isoformat()} "
+            f"30m_high={t.swing_high_ref:.2f} 30m_low={t.swing_low_ref:.2f} "
+            f"breakout_lvl={t.breakout_level:.2f} sl={t.stop_loss:.2f} target={t.target_price:.2f} "
+            f"pts={t.total_points:.2f} exit={t.exit_reason} "
+            f"idx(b/r/t/e)=({b_idx}/{r_idx}/{tr_idx}/{e_idx}) "
+            f"ref={ref_mode}:{ref_day}"
+        )
+
+
+def _notify_telegram_for_trades(user: str, script: str, trades: list[SwingTrapTrade], qty: float) -> None:
+    if not trades:
+        return
+    if not telegram_notifications_enabled_for_user(user):
+        return
+
+    sent = 0
+    for t in trades:
+        meta = dict(t.meta or {})
+        b_idx = meta.get("breakout_idx")
+        r_idx = meta.get("retest_idx")
+        tr_idx = meta.get("trap_idx")
+        e_idx = meta.get("entry_idx")
+        ref_mode = meta.get("reference_mode", "NA")
+        ref_day = meta.get("reference_30m_day", "NA")
+        exit_px = None
+        if t.lot_exits:
+            try:
+                exit_px = float(t.lot_exits[-1].exit_price)
+            except Exception:
+                exit_px = None
+        if exit_px is None:
+            exit_px = float(t.entry_price)
+        note = (
+            f"swing30m_high={t.swing_high_ref:.2f}, swing30m_low={t.swing_low_ref:.2f}, "
+            f"breakout={t.breakout_level:.2f}, sl={t.stop_loss:.2f}, target={t.target_price:.2f}, "
+            f"points={t.total_points:.2f}, idx(b/r/t/e)=({b_idx}/{r_idx}/{tr_idx}/{e_idx}), "
+            f"ref={ref_mode}:{ref_day}"
+        )
+        ok = send_paper_trade_notification(
+            {
+                "account": user,
+                "symbol": script,
+                "action": "SELL" if t.side == "LONG" else "BUY",
+                "quantity": qty,
+                "price": exit_px,
+                "reason": f"SWING_TRAP_{t.exit_reason}",
+                "realized_pnl": float(t.total_points),
+                "note": note,
+                "timestamp": t.exit_ts or t.entry_ts,
+            },
+            is_entry=False,
+        )
+        if ok:
+            sent += 1
+    print(f"[{script}] telegram_sent={sent}/{len(trades)}")
 
 
 def _parse_scripts(args: argparse.Namespace) -> list[str]:
@@ -57,7 +137,7 @@ def _parse_scripts(args: argparse.Namespace) -> list[str]:
 
     if out:
         return out
-    return ["NIFTY", "BANKNIFTY", "SENSEX"]
+    return [str(s).strip().upper() for s in AVAILABLE_SCRIPT_NAMES]
 
 
 def _fetch_chunked(
@@ -112,8 +192,11 @@ def main() -> None:
     )
     ap.add_argument(
         "--scripts",
-        default="NIFTY,BANKNIFTY,SENSEX",
-        help="Comma-separated symbols (example: NIFTY,BANKNIFTY,SENSEX).",
+        default="",
+        help=(
+            "Comma-separated symbols (example: NIFTY,BANKNIFTY,SENSEX). "
+            "Empty means all configured scripts."
+        ),
     )
     ap.add_argument(
         "--futures",
@@ -121,6 +204,11 @@ def main() -> None:
         help="Use nearest futures contract instead of the cash index (NIFTY 50, NIFTY BANK, …).",
     )
     ap.add_argument("--days", type=int, default=5)
+    ap.add_argument(
+        "--telegram",
+        action="store_true",
+        help="Send Telegram paper-style notifications for each generated swing-trap trade.",
+    )
     ap.add_argument("--csv-out", type=Path, default=REPO_ROOT / "tmp" / "swing_trap_backtest.csv")
     ap.add_argument("--json-out", type=Path, default=REPO_ROOT / "tmp" / "swing_trap_backtest.json")
     args = ap.parse_args()
@@ -186,6 +274,14 @@ def main() -> None:
             meta["script"] = script
             t.meta = meta
         all_trades.extend(trades)
+        _print_trade_levels_log(script, trades)
+        if args.telegram:
+            _notify_telegram_for_trades(
+                user=args.user,
+                script=script,
+                trades=trades,
+                qty=float(cfg.total_lots),
+            )
         processed.append((script, "index" if index_mode else "futures"))
 
     if not all_trades:
