@@ -57,8 +57,13 @@ from option_greeks import (
     bs_put_delta,
     years_to_expiry_from_ms,
 )
-from strategy.swing_trap.backtest_runner import run_swing_trap_backtest
-from strategy.swing_trap.config import SwingTrapConfig
+try:
+    from strategy.swing_trap.backtest_runner import run_swing_trap_backtest
+    from strategy.swing_trap.config import SwingTrapConfig
+except ModuleNotFoundError:
+    # Docker image layouts may expose package root as /app (src.strategy...) instead of /app/src (strategy...).
+    from src.strategy.swing_trap.backtest_runner import run_swing_trap_backtest
+    from src.strategy.swing_trap.config import SwingTrapConfig
 
 # Initialize colorama
 init(autoreset=True)
