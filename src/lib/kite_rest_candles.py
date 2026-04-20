@@ -58,7 +58,14 @@ def fetch_historical_raw(
     qs = urlencode({"from": from_s, "to": to_s, "continuous": continuous, "oi": oi})
     url = f"{path}?{qs}"
     r = requests.get(url, headers=_headers(api_key, access_token), timeout=90)
-    r.raise_for_status()
+    if not r.ok:
+        body = (r.text or "")[:1200].strip()
+        raise requests.HTTPError(
+            f"{r.status_code} Client Error for historical candles "
+            f"(instrument_token={instrument_token}, interval={kite_interval}). "
+            f"Kite response: {body or '(empty body)'}",
+            response=r,
+        )
     payload = r.json()
     if not isinstance(payload, dict) or payload.get("status") != "success":
         raise ValueError(str(payload.get("message") or payload))
