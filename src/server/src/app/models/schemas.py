@@ -38,6 +38,12 @@ class ManualClosedTradeUpdateBody(BaseModel):
     exit_price: float | None = Field(default=None, gt=0)
 
 
+class QueueBotExitBody(BaseModel):
+    """Ask the live trading bot to exit this open position (matched by dashboard trade id)."""
+
+    trade_id: str = Field(..., min_length=1, max_length=512)
+
+
 class WeeklyPnlPoint(BaseModel):
     date: str
     pnl: float

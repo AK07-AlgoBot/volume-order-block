@@ -470,6 +470,32 @@ export default function DashboardPage() {
     }
   };
 
+  const onRequestBotExit = async (trade) => {
+    const ok = window.confirm(
+      `Queue broker exit for ${trade?.symbol || ""}? The bot will send the exit order on its next loop (usually within seconds).`
+    );
+    if (!ok) return;
+    setManualActionTradeId(trade.id);
+    try {
+      const res = await apiFetch("/api/dashboard/bot-exit-queue", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ trade_id: trade.id }),
+      });
+      const payload = await res.json();
+      if (!res.ok) {
+        throw new Error(payload?.detail || "Failed to queue exit");
+      }
+      window.alert(
+        "Exit queued. If the bot is running, it will close this position shortly and update Live Trades."
+      );
+    } catch (e) {
+      window.alert(e?.message || "Failed to queue exit");
+    } finally {
+      setManualActionTradeId("");
+    }
+  };
+
   const onRemoveManualTrade = async (trade) => {
     const ok = window.confirm(
       `Remove manual trade ${trade?.symbol || ""}? This hides it from dashboard and P&L.`
@@ -616,6 +642,7 @@ export default function DashboardPage() {
             trades={liveTrades}
             onEditManualEntry={onEditManualEntry}
             onRemoveManualTrade={onRemoveManualTrade}
+            onRequestClose={onRequestBotExit}
             busyTradeId={manualActionTradeId}
           />
           <WeeklyPnlChart

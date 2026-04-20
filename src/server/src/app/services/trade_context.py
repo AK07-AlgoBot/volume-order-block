@@ -86,6 +86,7 @@ class TradeUserContext:
                 "ignored_trade_ids": [],
                 "entry_price_overrides": {},
                 "closed_trade_overrides": {},
+                "pending_bot_exit_ids": [],
             }
         try:
             raw = json.loads(path.read_text(encoding="utf-8"))
@@ -94,10 +95,12 @@ class TradeUserContext:
                 "ignored_trade_ids": [],
                 "entry_price_overrides": {},
                 "closed_trade_overrides": {},
+                "pending_bot_exit_ids": [],
             }
         ignored = raw.get("ignored_trade_ids") or []
         overrides = raw.get("entry_price_overrides") or {}
         closed_overrides = raw.get("closed_trade_overrides") or {}
+        pending_exit = raw.get("pending_bot_exit_ids") or []
         return {
             "ignored_trade_ids": [str(x) for x in ignored if str(x).strip()],
             "entry_price_overrides": {
@@ -110,6 +113,7 @@ class TradeUserContext:
                 for k, v in dict(closed_overrides).items()
                 if str(k).strip() and isinstance(v, dict)
             },
+            "pending_bot_exit_ids": [str(x) for x in pending_exit if str(x).strip()],
         }
 
     def _save_manual_controls(self, controls: dict) -> None:
@@ -117,6 +121,7 @@ class TradeUserContext:
             "ignored_trade_ids": list(dict.fromkeys(controls.get("ignored_trade_ids") or [])),
             "entry_price_overrides": controls.get("entry_price_overrides") or {},
             "closed_trade_overrides": controls.get("closed_trade_overrides") or {},
+            "pending_bot_exit_ids": list(dict.fromkeys(controls.get("pending_bot_exit_ids") or [])),
             "updated_at": datetime.utcnow().isoformat(),
         }
         self._manual_controls_path.write_text(
@@ -785,6 +790,20 @@ class TradeUserContext:
         )
         await self.broadcast({"type": "trade_closed", "trade": current})
         return {"removed": True, "trade_id": trade_id}
+
+    async def queue_bot_exit(self, trade_id: str) -> dict:
+        """Append a dashboard trade id to the bot-side exit queue (manual_trade_controls.json)."""
+        tid = str(trade_id or "").strip()
+        if not tid:
+            raise ValueError("trade_id required")
+        controls = self._load_manual_controls()
+        pending = list(dict.fromkeys((controls.get("pending_bot_exit_ids") or []) + [tid]))
+        controls["pending_bot_exit_ids"] = pending
+        self._save_manual_controls(controls)
+        self._append_manual_log_line(
+            f"QUEUE_UI_EXIT | trade_id={tid} | pending_count={len(pending)}"
+        )
+        return {"trade_id": tid, "queued": True, "pending_count": len(pending)}
 
     def _effective_closed_trades(self, limit: int = 1000) -> list[dict]:
         reconstructed = self._build_closed_trades_from_orders(limit=limit)

@@ -5,6 +5,7 @@ from app.models.schemas import (
     ManualClosedTradeUpdateBody,
     ManualEntryUpdateBody,
     ManualTradeRemoveBody,
+    QueueBotExitBody,
 )
 from app.services.audit_log import read_recent_audit_lines
 from app.services.trade_context import TradeUserContext
@@ -96,6 +97,19 @@ async def dashboard_manual_trade_update_closed(
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
     return {"ok": True, "trade": updated}
+
+
+@router.post("/bot-exit-queue")
+async def dashboard_queue_bot_exit(
+    body: QueueBotExitBody,
+    user: UserClaims = Depends(require_user),
+):
+    ctx = trade_context_for(user)
+    try:
+        result = await ctx.queue_bot_exit(body.trade_id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    return {"ok": True, **result}
 
 
 @router.get("/weekly-pnl")

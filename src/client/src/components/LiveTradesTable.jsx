@@ -24,6 +24,7 @@ export function LiveTradesTable({
   title = "Live Trades",
   onEditManualEntry,
   onRemoveManualTrade,
+  onRequestClose,
   busyTradeId = "",
 }) {
   return (
@@ -105,28 +106,40 @@ export function LiveTradesTable({
                     <td className={`col-center-num ${pnl >= 0 ? "pnl-pos" : "pnl-neg"}`}>{pnl.toFixed(2)}</td>
                     <td className="col-left date-cell">{formatTimestamp(trade.opened_at)}</td>
                     <td className="col-left">
-                      {isManual ? (
-                        <div className="manual-actions">
+                      <div className="manual-actions">
+                        {onRequestClose ? (
                           <button
                             type="button"
                             className="manual-btn"
                             disabled={isBusy}
-                            onClick={() => onEditManualEntry?.(trade)}
+                            title="Queue exit with the bot (next cycle)"
+                            onClick={() => onRequestClose(trade)}
                           >
-                            Edit entry
+                            Close
                           </button>
-                          <button
-                            type="button"
-                            className="manual-btn danger"
-                            disabled={isBusy}
-                            onClick={() => onRemoveManualTrade?.(trade)}
-                          >
-                            Remove
-                          </button>
-                        </div>
-                      ) : (
-                        "-"
-                      )}
+                        ) : null}
+                        {isManual ? (
+                          <>
+                            <button
+                              type="button"
+                              className="manual-btn"
+                              disabled={isBusy}
+                              onClick={() => onEditManualEntry?.(trade)}
+                            >
+                              Edit entry
+                            </button>
+                            <button
+                              type="button"
+                              className="manual-btn danger"
+                              disabled={isBusy}
+                              onClick={() => onRemoveManualTrade?.(trade)}
+                            >
+                              Remove
+                            </button>
+                          </>
+                        ) : null}
+                        {!onRequestClose && !isManual ? "—" : null}
+                      </div>
                     </td>
                   </tr>
                 );

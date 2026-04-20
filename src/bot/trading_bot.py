@@ -1532,6 +1532,74 @@ class TradingBot:
         )
         self.dashboard_client.post_trade_close(payload)
 
+    @staticmethod
+    def _option_dashboard_trade_id(script_name: str, order_id: str) -> str:
+        oid = str(order_id or "").strip()
+        if oid:
+            return f"{script_name}_OPT_{oid}"
+        return TradingBot._build_trade_id(f"{script_name}_OPT", datetime.now().isoformat())
+
+    def _notify_dashboard_option_open(
+        self,
+        script_name: str,
+        *,
+        order_id: str,
+        qty: float,
+        entry_opt: float,
+        stop_loss: float,
+        target_price: float,
+    ) -> None:
+        """Push option leg to dashboard Live Trades (futures-only rows used to omit options)."""
+        if not str(order_id or "").strip():
+            return
+        opened = datetime.now().isoformat()
+        tid = self._option_dashboard_trade_id(script_name, order_id)
+        sym = f"{script_name}_OPT"
+        payload = {
+            "id": tid,
+            "symbol": sym,
+            "side": "BUY",
+            "quantity": float(qty),
+            "entry_price": float(entry_opt),
+            "stop_loss": float(stop_loss),
+            "target_price": float(target_price),
+            "chart_percent": None,
+            "win_percent": None,
+            "exit_price": None,
+            "last_price": float(entry_opt),
+            "unrealized_pnl": 0.0,
+            "realized_pnl": None,
+            "opened_at": opened,
+            "closed_at": None,
+            "manual_execution": False,
+        }
+        if not self.dashboard_client.post_trade_open(payload):
+            self._bot_logger.warning("DASHBOARD: failed to open Live Trade row for %s id=%s", sym, tid)
+
+    def _notify_dashboard_option_close(self, script_name: str, opt: dict, exit_price: float) -> None:
+        """Remove option leg from Live Trades when position is fully closed (matches open id)."""
+        oid = str(opt.get("entry_order_id") or "").strip()
+        if not oid:
+            return
+        tid = self._option_dashboard_trade_id(script_name, oid)
+        entry_opt = float(opt.get("entry_price_option") or 0.0)
+        tot_lots = int(opt.get("total_lots") or 0)
+        lot_sz = int(opt.get("lot_size") or 1)
+        qty = float(max(1, tot_lots * lot_sz)) if tot_lots else float(lot_sz)
+        opened = str(opt.get("entry_time") or datetime.now().isoformat())
+        sym = f"{script_name}_OPT"
+        position = {
+            "type": "BUY",
+            "entry_price": entry_opt,
+            "quantity": qty,
+            "entry_time": opened,
+            "trade_id": tid,
+            "stop_loss": float(opt.get("sl_option_price") or entry_opt),
+            "target_price": float(opt.get("sl_option_price") or entry_opt),
+            "initial_sl": float(opt.get("sl_option_price") or entry_opt),
+        }
+        self._notify_dashboard_trade_close(sym, position, float(exit_price))
+
     def _log_order_event(self, script_name, action, side, price, reason, extra=""):
         self._order_logger.info(
             f"{script_name} | ACTION={action} | SIDE={side} | PRICE={price:.2f} | REASON={reason}"
@@ -2606,6 +2674,14 @@ class TradingBot:
                 target_price=float(tp3_t),
                 note=f"{opt_type} ladder; idx={script_name}; order_id={order_id}",
             )
+            self._notify_dashboard_option_open(
+                script_name,
+                order_id=order_id,
+                qty=float(qty),
+                entry_opt=float(opt_entry_price),
+                stop_loss=float(sl_t),
+                target_price=float(tp3_t),
+            )
             self._place_option_gtt_ladder(script_name, self.option_positions[script_name])
             return
 
@@ -2628,6 +2704,7 @@ class TradingBot:
             "option_type": opt_type,
             "expiry_ms": int(atm.get("expiry_ms") or 0),
             "entry_time": datetime.now().isoformat(),
+            "entry_order_id": order_id,
             "entry_price_option": float(opt_entry_price),
             "entry_price_underlying": float(entry_price),
             "lot_size": lot_size,
@@ -2678,6 +2755,17 @@ class TradingBot:
             stop_loss=float(sl_opt) if float(sl_opt or 0) > 0 else None,
             target_price=float(r3),
             note=f"{opt_type} hybrid SL GTT; underlying 3R≈{r3:.2f}; idx={script_name}",
+        )
+        tp_opt_disp = float(opt_entry_price) + 3.0 * max(
+            0.01, abs(float(opt_entry_price) - float(sl_opt or 0))
+        )
+        self._notify_dashboard_option_open(
+            script_name,
+            order_id=order_id,
+            qty=float(qty),
+            entry_opt=float(opt_entry_price),
+            stop_loss=float(sl_opt) if float(sl_opt or 0) > 0 else float(opt_entry_price),
+            target_price=float(tp_opt_disp),
         )
         self._place_or_replace_option_sl_gtt(script_name, self.option_positions[script_name])
 
@@ -2942,6 +3030,13 @@ class TradingBot:
             ok = self._close_option_lots(script_name, opt, rem, reason)
             if not ok and not force_remove:
                 return
+        ex = self.client.get_ltp(str(opt.get("instrument_key") or ""))
+        ex_f = (
+            float(ex)
+            if ex is not None and float(ex) > 0
+            else float(opt.get("entry_price_option") or 0.0)
+        )
+        self._notify_dashboard_option_close(script_name, opt, ex_f)
         self.option_positions.pop(script_name, None)
 
     def _sync_option_sl_from_underlying_model(self, script_name: str, opt: dict) -> None:
@@ -3004,6 +3099,13 @@ class TradingBot:
                 netu = self._net_option_units_for_instrument(ikey)
                 if netu is not None and netu <= 0:
                     self._cancel_all_option_gtts(opt)
+                    lx = self.client.get_ltp(str(opt.get("instrument_key") or ""))
+                    lx_f = (
+                        float(lx)
+                        if lx is not None and float(lx) > 0
+                        else float(opt.get("entry_price_option") or 0.0)
+                    )
+                    self._notify_dashboard_option_close(script_name, opt, lx_f)
                     self.option_positions.pop(script_name, None)
                     self._bot_logger.info(
                         "OPTIONS LADDER: flat at broker; cleared state %s", script_name
@@ -3089,6 +3191,13 @@ class TradingBot:
                     continue
 
             if int(opt.get("remaining_lots", 0)) <= 0:
+                zx = self.client.get_ltp(str(opt.get("instrument_key") or ""))
+                zx_f = (
+                    float(zx)
+                    if zx is not None and float(zx) > 0
+                    else float(opt.get("entry_price_option") or 0.0)
+                )
+                self._notify_dashboard_option_close(script_name, opt, zx_f)
                 self.option_positions.pop(script_name, None)
 
     @staticmethod
@@ -6026,6 +6135,139 @@ class TradingBot:
         if changed:
             self.save_state()
 
+    def _resolve_ltp_for_script(self, script_name: str) -> float:
+        cached = self._script_data_cache.get(str(script_name or "").strip().upper())
+        if isinstance(cached, dict):
+            cp = cached.get("current_price")
+            try:
+                if cp is not None and float(cp) > 0:
+                    return float(cp)
+            except (TypeError, ValueError):
+                pass
+        tok = self._get_order_token(script_name)
+        if not tok:
+            return 0.0
+        ltp = self.client.get_ltp(tok)
+        if ltp is not None and float(ltp) > 0:
+            return float(ltp)
+        return 0.0
+
+    def _exit_futures_position_from_ui(self, script_name: str, position: dict, *, is_paper: bool) -> bool:
+        """Market-style exit for dashboard request. Returns True when done or irrecoverable (clear queue)."""
+        self._ensure_position_fields(position, script_name)
+        current_price = self._resolve_ltp_for_script(script_name)
+        if current_price <= 0:
+            current_price = float(position.get("entry_price") or 0.0)
+        exit_side = "SELL" if position.get("type") == "BUY" else "BUY"
+        reason = "UI_CLOSE_REQUEST"
+        qty = float(position.get("quantity", self._get_order_quantity(script_name)))
+        if is_paper:
+            self._paper_exit_after_signal(
+                script_name,
+                position,
+                exit_side,
+                current_price,
+                reason,
+                extra_log="dashboard_ui_close",
+            )
+            return True
+        if bool(position.get("manual_execution")):
+            self._notify_manual_close_needed(
+                script_name, position, exit_side, current_price, reason
+            )
+            self._close_all_option_for_script(script_name, "UI_CLOSE_REQUEST", force_remove=True)
+            self._notify_dashboard_trade_close(script_name, position, current_price)
+            if script_name in self.positions:
+                del self.positions[script_name]
+            self.save_state()
+            return True
+        success, order_result = self._place_order_with_result(
+            script_name,
+            exit_side,
+            current_price,
+            reason,
+            realized_pnl=self._calculate_realized_pnl(
+                position["type"],
+                float(position["entry_price"]),
+                float(current_price),
+                qty,
+            ),
+            entry_adx=float(position.get("signal_adx", 0.0) or 0.0),
+            entry_plus_di=float(position.get("signal_plus_di", 0.0) or 0.0),
+            entry_minus_di=float(position.get("signal_minus_di", 0.0) or 0.0),
+        )
+        if not success:
+            return False
+        oid = (order_result.get("data") or {}).get("order_id", "NA")
+        self._log_order_event(
+            script_name,
+            action="EXIT",
+            side=exit_side,
+            price=current_price,
+            reason=reason,
+            extra=f"entry={float(position['entry_price']):.2f}; order_id={oid}; dashboard_ui",
+        )
+        self._notify_dashboard_trade_close(script_name, position, current_price)
+        self._close_all_option_for_script(script_name, "FUTURES_EXIT")
+        if script_name in self.positions:
+            del self.positions[script_name]
+        self.save_state()
+        return True
+
+    def _execute_ui_exit_trade_id(self, trade_id: str) -> bool:
+        """Return True to drop this id from the pending queue (processed, stale, or option-only done)."""
+        tid = str(trade_id or "").strip()
+        if not tid:
+            return True
+        for is_paper, bucket in ((False, self.positions), (True, self.paper_positions)):
+            for script_name, pos in list(bucket.items()):
+                if not isinstance(pos, dict):
+                    continue
+                self._ensure_position_fields(pos, script_name)
+                if str(pos.get("trade_id") or "") != tid:
+                    continue
+                return self._exit_futures_position_from_ui(script_name, pos, is_paper=is_paper)
+        marker = "_OPT_"
+        if marker in tid:
+            idx = tid.rfind(marker)
+            if idx > 0:
+                script_name = tid[:idx]
+                oid = str(tid[idx + len(marker) :]).strip()
+                opt = self.option_positions.get(script_name)
+                if isinstance(opt, dict):
+                    eoid = str(opt.get("entry_order_id") or "").strip()
+                    if not oid or not eoid or eoid == oid:
+                        self._close_all_option_for_script(script_name, "UI_CLOSE_REQUEST", force_remove=True)
+                        return True
+        return True
+
+    def _apply_pending_bot_exits_from_disk(self) -> None:
+        path = user_data_dir(self.username) / "manual_trade_controls.json"
+        if not path.is_file():
+            return
+        try:
+            controls = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            return
+        pending = list(controls.get("pending_bot_exit_ids") or [])
+        if not pending:
+            return
+        remaining: list[str] = []
+        for raw in pending:
+            tid = str(raw).strip()
+            if not tid:
+                continue
+            if self._execute_ui_exit_trade_id(tid):
+                continue
+            remaining.append(tid)
+        if remaining == pending:
+            return
+        controls["pending_bot_exit_ids"] = remaining
+        try:
+            path.write_text(json.dumps(controls, indent=2), encoding="utf-8")
+        except OSError:
+            return
+
     def _scripts_for_cycle(self) -> list[tuple[str, str]]:
         """Symbols to fetch this loop: user scope ∪ open positions (order preserved from TRADING_CONFIG)."""
         prefs = read_trading_preferences(self.username)
@@ -6069,6 +6311,7 @@ class TradingBot:
         self.client.refresh_credentials_if_changed()
         self._maybe_refresh_index_futures_tokens_expiry_day()
         self._apply_manual_controls_from_disk()
+        self._apply_pending_bot_exits_from_disk()
         cycle_items = list(self._scripts_for_cycle())
         if self._market_data_is_kite():
             self._ensure_kite_tick_feed([n for n, _ in cycle_items])
