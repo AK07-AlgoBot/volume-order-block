@@ -3,10 +3,13 @@ function runtimeApiBase() {
   if (env) {
     return env.replace(/\/$/, "");
   }
-  // Vite dev serves the UI on :5173. Default API :8080 so it matches Kite's redirect
-  // (e.g. http://127.0.0.1:8080/kite/callback). Override with VITE_DASHBOARD_API_BASE.
+  // Dev: use same origin as Vite (e.g. http://localhost:5173); vite.config.js proxies /api and /ws → :8080.
+  // Override with VITE_DASHBOARD_API_BASE=http://127.0.0.1:8080 only if you skip the proxy.
   if (import.meta.env.DEV) {
-    return "http://127.0.0.1:8080";
+    if (typeof window !== "undefined" && window.location?.origin) {
+      return window.location.origin;
+    }
+    return "http://127.0.0.1:5173";
   }
   if (typeof window !== "undefined" && window.location?.origin) {
     return window.location.origin;

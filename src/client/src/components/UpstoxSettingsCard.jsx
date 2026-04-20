@@ -198,14 +198,23 @@ export function UpstoxSettingsCard() {
   const brokerHelp =
     broker === "zerodha" ? (
       <>
-        Zerodha uses Kite Connect. Set <code className="inline-code">KITE_API_KEY</code>,{" "}
+        <strong>Update Kite without OAuth:</strong> paste <strong>Access token</strong>,{" "}
+        <strong>API key</strong>, and <strong>API secret</strong> below, set base URL to{" "}
+        <code className="inline-code">https://api.kite.trade</code>, then <strong>Save</strong> and{" "}
+        <strong>Test connection</strong>. The API must be running on port <strong>8080</strong> and you
+        must be signed in to the dashboard.
+        <br />
+        <br />
+        <strong>OAuth instead:</strong> set <code className="inline-code">KITE_API_KEY</code>,{" "}
         <code className="inline-code">KITE_API_SECRET</code>, and{" "}
-        <code className="inline-code">KITE_REDIRECT_URL</code> on the server (repo{" "}
-        <code className="inline-code">.env</code>) to match your Kite app — redirect URL must be exactly{" "}
-        <code className="inline-code">…/kite/callback</code> on this API. Use{" "}
-        <strong>Connect with Zerodha</strong> to log in at Zerodha (OTP as usual); the server exchanges
-        the token and saves <code className="inline-code">zerodha_credentials.json</code>. Or paste
-        credentials manually. The live trading bot still uses Upstox until Zerodha execution is wired in.
+        <code className="inline-code">KITE_REDIRECT_URL</code> in the server <code className="inline-code">
+          .env
+        </code>{" "}
+        (redirect must match your Kite app, e.g. <code className="inline-code">
+          http://127.0.0.1:8080/kite/callback
+        </code>
+        ). Then use <strong>Connect with Zerodha</strong>. Or paste credentials manually. The live trading
+        bot still uses Upstox until Zerodha execution is wired in.
       </>
     ) : (
       <>

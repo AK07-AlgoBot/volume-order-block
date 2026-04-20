@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 import pandas as pd
 
 from strategy.swing_trap.models import LotExit
-from strategy.swing_trap.session_clock import IST
+from strategy.swing_trap.session_clock import IST, trading_day_for_ts
 
 if TYPE_CHECKING:
     from strategy.swing_trap.config import SwingTrapConfig
@@ -27,6 +27,21 @@ def _row_ts(row: pd.Series) -> datetime:
     if t.tzinfo is None:
         t = t.tz_localize(IST)
     return t.to_pydatetime()
+
+
+def _bars_after_entry_same_day(path_df: pd.DataFrame, entry_bar_idx: int) -> pd.DataFrame:
+    """Intraday path only: bars after entry through the same calendar session day."""
+    tail = path_df.iloc[entry_bar_idx + 1 :]
+    if tail.empty or entry_bar_idx < 0:
+        return tail.copy()
+    day0 = trading_day_for_ts(_row_ts(path_df.iloc[entry_bar_idx]))
+    keep_idx: list[int] = []
+    for i, (_, row) in enumerate(tail.iterrows()):
+        if trading_day_for_ts(_row_ts(row)) == day0:
+            keep_idx.append(i)
+    if not keep_idx:
+        return tail.iloc[0:0].copy()
+    return tail.iloc[keep_idx].copy()
 
 
 def simulate_long_ladder(
@@ -53,11 +68,12 @@ def simulate_long_ladder(
     t2 = e + 2.0 * R
 
     fe = force_exit_time.astimezone(IST) if force_exit_time.tzinfo else force_exit_time.replace(tzinfo=IST)
-    sub = path_df.iloc[entry_bar_idx + 1 :].copy()
+    sub = _bars_after_entry_same_day(path_df, entry_bar_idx)
     exits: list[LotExit] = []
     total_pts = 0.0
     lots_left = int(cfg.total_lots)
     phase = 0
+    last_px = e
 
     if sub.empty:
         for i in range(lots_left):
@@ -118,7 +134,9 @@ def simulate_long_ladder(
                 total_pts += px - e
             return LadderSimResult(exits, total_pts, "SL_HIT", ts, px)
 
-    px = float(sub.iloc[-1]["close"])
+        last_px = float(row["close"])
+
+    px = last_px
     while lots_left > 0:
         exits.append(LotExit(len(exits) + 1, fe, px, px - e, "FORCE_EOD"))
         total_pts += px - e
@@ -145,11 +163,12 @@ def simulate_short_ladder(
     t1 = e - R
     t2 = e - 2.0 * R
     fe = force_exit_time.astimezone(IST) if force_exit_time.tzinfo else force_exit_time.replace(tzinfo=IST)
-    sub = path_df.iloc[entry_bar_idx + 1 :].copy()
+    sub = _bars_after_entry_same_day(path_df, entry_bar_idx)
     exits: list[LotExit] = []
     total_pts = 0.0
     lots_left = int(cfg.total_lots)
     phase = 0
+    last_px = e
 
     if sub.empty:
         for i in range(lots_left):
@@ -208,7 +227,9 @@ def simulate_short_ladder(
                 total_pts += e - px
             return LadderSimResult(exits, total_pts, "SL_HIT", ts, px)
 
-    px = float(sub.iloc[-1]["close"])
+        last_px = float(row["close"])
+
+    px = last_px
     while lots_left > 0:
         exits.append(LotExit(len(exits) + 1, fe, px, e - px, "FORCE_EOD"))
         total_pts += e - px

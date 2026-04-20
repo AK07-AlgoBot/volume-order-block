@@ -43,6 +43,19 @@ Use port **8080** so it matches a typical Kite Connect redirect (`http://127.0.0
 cd src/client && npm install && npm run dev
 ```
 
+Open **http://localhost:5173** (Vite proxies `/api` to the API on **8080** — start the API first).
+
+### Kite (Zerodha) credentials from the dashboard
+
+1. Start the API on **8080** and the client (`npm run dev` in `src/client`).
+2. Sign in at `/login` as **AK07** (password from `AK07_PASSWORD` / `users_auth.json`; reset with `python scripts/reset_dashboard_password.py` if needed).
+3. On the dashboard, scroll to **Broker credentials**.
+4. Choose **Zerodha (Kite)**.
+5. **Manual update (works without OAuth):** paste **Access token**, **API key**, and **API secret**, set base URL to `https://api.kite.trade` if empty, then **Save** and **Test connection**.
+6. **OAuth instead:** set `KITE_API_KEY`, `KITE_API_SECRET`, and `KITE_REDIRECT_URL` (must be exactly `http://127.0.0.1:8080/kite/callback` for local API) in repo root **`.env`**, restart uvicorn, then use **Connect with Zerodha**.
+
+If the UI will not load, save credentials from the shell: `python scripts/save_kite_credentials.py --help`.
+
 **Bot**
 
 ```bash
@@ -104,7 +117,7 @@ chmod -R a+rX /var/lib/docker/volumes/configs_ak07_server_data/_data/users/AK07/
 
 Quick restart (pick up new runtime data/log files):
 
-```bash
+`cl``bash
 cd /root/volume-order-block
 docker compose -f configs/docker-compose.yml restart api bot
 ```

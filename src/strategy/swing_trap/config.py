@@ -18,7 +18,10 @@ class SwingTrapConfig:
     no_new_entries_after_hms: tuple[int, int, int] = (15, 0, 0)
     force_exit_open_positions_by_hms: tuple[int, int, int] = (15, 19, 0)
 
-    # Swing: rolling session extremes on 30m (expand range as new 30m bars complete)
+    # Swing reference for breakouts (30m data):
+    # - "prior_day_30m_range": each day, trade only breaks of previous session's 30m high/low (fixed at day start).
+    # - "rolling_session_30m": legacy — intraday running high/low of completed 30m bars (expands through the day).
+    daily_breakout_reference: str = "prior_day_30m_range"
     use_session_extrema_swings: bool = True
     pivot_lookback_bars: int = 2
 

@@ -129,6 +129,7 @@ class Swing30mSeries:
         self.cfg = cfg
         self.df = prepare_30m_df(df30)
         self._by_day: dict[date, pd.DataFrame] = {}
+        self._sorted_days: list[date] = []
         ts = pd.to_datetime(self.df["timestamp"], errors="coerce")
         if ts.dt.tz is None:
             ts = ts.dt.tz_localize(IST)
@@ -137,10 +138,23 @@ class Swing30mSeries:
         self.df["_day"] = ts.dt.date
         for d, g in self.df.groupby("_day"):
             self._by_day[d] = g.drop(columns=["_day"]).reset_index(drop=True)
+        self._sorted_days = sorted(self._by_day.keys())
 
     def day_df(self, day: date) -> pd.DataFrame | None:
         g = self._by_day.get(day)
         return g.copy() if g is not None else None
+
+    def prior_trading_day(self, day: date) -> date | None:
+        """Latest calendar day in 30m data strictly before `day` (previous session)."""
+        prior = [d for d in self._sorted_days if d < day]
+        return prior[-1] if prior else None
+
+    def session_high_low_30m(self, day: date) -> tuple[float, float] | None:
+        """Session range from 30m bars on that day: (max high, min low)."""
+        g = self._by_day.get(day)
+        if g is None or g.empty:
+            return None
+        return float(g["high"].max()), float(g["low"].min())
 
     def snapshot_at(self, decision_time: datetime) -> Swing30mSnapshot | None:
         """Session running high/low from all 30m bars fully closed before or at decision_time."""

@@ -47,6 +47,12 @@ def run_swing_trap_backtest(
 ) -> list[SwingTrapTrade]:
     """
     Walk 5m bars in time order; detect breakout -> retest -> trap -> entry; simulate 4-lot ladder.
+
+    Breakout levels (config ``daily_breakout_reference``):
+    - ``prior_day_30m_range`` (default): each session uses the **previous trading day's**
+      30m session high / low as fixed references; first close through those levels starts
+      the retest/trap search (break up = long, break down = short).
+    - ``rolling_session_30m``: legacy intraday running high/low from completed 30m bars.
     """
     df1 = _coerce_df(df1) if not df1.empty else df1
     df5 = _coerce_df(df5)
@@ -74,15 +80,29 @@ def run_swing_trap_backtest(
             i += 1
             continue
 
-        snap_prev = swing.snapshot_at(_bar_end_ts(prev, 5))
-        if snap_prev is None:
-            i += 1
-            continue
+        ref_meta: dict = {}
+        if getattr(cfg, "daily_breakout_reference", "prior_day_30m_range") == "prior_day_30m_range":
+            ref_day = swing.prior_trading_day(day)
+            if ref_day is None:
+                i += 1
+                continue
+            hl = swing.session_high_low_30m(ref_day)
+            if hl is None:
+                i += 1
+                continue
+            sh, sl_ = float(hl[0]), float(hl[1])
+            ref_meta = {"reference_mode": "prior_day_30m_range", "reference_30m_day": ref_day.isoformat()}
+        else:
+            snap_prev = swing.snapshot_at(_bar_end_ts(prev, 5))
+            if snap_prev is None:
+                i += 1
+                continue
+            sh = float(snap_prev.session_high)
+            sl_ = float(snap_prev.session_low)
+            ref_meta = {"reference_mode": "rolling_session_30m"}
 
         c = float(row["close"])
         c0 = float(prev["close"])
-        sh = float(snap_prev.session_high)
-        sl_ = float(snap_prev.session_low)
 
         long_break = c > sh and c0 <= sh
         short_break = c < sl_ and c0 >= sl_
@@ -123,8 +143,12 @@ def run_swing_trap_backtest(
         entry_row = df5.iloc[entry_idx]
         entry_px = float(entry_row["close"])
         entry_ts = _bar_end_ts(entry_row, 5)
+        # Ladder must square same session as entry; breakout can be days earlier.
+        entry_day = trading_day_for_ts(entry_ts)
+        force_exit_for_trade = force_exit_deadline(entry_day, cfg.force_exit_open_positions_by_hms)
 
-        day_df30 = swing.day_df(day)
+        entry_cal_day = trading_day_for_ts(entry_ts)
+        day_df30 = swing.day_df(entry_cal_day)
         if day_df30 is None or day_df30.empty:
             i += 1
             continue
@@ -153,7 +177,7 @@ def run_swing_trap_backtest(
                 cfg=cfg,
                 path_df=df5,
                 entry_bar_idx=entry_idx,
-                force_exit_time=force_exit_at,
+                force_exit_time=force_exit_for_trade,
             )
         else:
             sim = simulate_short_ladder(
@@ -163,7 +187,7 @@ def run_swing_trap_backtest(
                 cfg=cfg,
                 path_df=df5,
                 entry_bar_idx=entry_idx,
-                force_exit_time=force_exit_at,
+                force_exit_time=force_exit_for_trade,
             )
 
         trades.append(
@@ -189,6 +213,7 @@ def run_swing_trap_backtest(
                     "trap_idx": setup.trap_idx,
                     "entry_idx": entry_idx,
                     "used_1m_confirm": setup.used_1m_confirm,
+                    **ref_meta,
                 },
             )
         )

@@ -64,3 +64,6 @@ config.json
 *.key
 *.token
 upstox_credentials.json
+
+# Local backtest / scratch output
+tmp/
