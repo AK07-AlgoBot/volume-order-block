@@ -21,7 +21,7 @@ from zoneinfo import ZoneInfo
 from pathlib import Path
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
-for _p in (_REPO_ROOT, _REPO_ROOT / "src" / "lib", _REPO_ROOT / "src" / "bot"):
+for _p in (_REPO_ROOT, _REPO_ROOT / "src", _REPO_ROOT / "src" / "lib", _REPO_ROOT / "src" / "bot"):
     _s = str(_p)
     if _s not in sys.path:
         sys.path.insert(0, _s)
