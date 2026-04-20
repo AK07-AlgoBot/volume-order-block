@@ -20,6 +20,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import pandas as pd
+import requests
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 for p in (REPO_ROOT, REPO_ROOT / "src", REPO_ROOT / "src" / "lib"):
@@ -248,44 +249,55 @@ def main() -> None:
             print(f"Warning: no Kite instrument token for script={script}; skipping.")
             continue
 
-        raw1: list = []
         try:
-            raw1 = _fetch_chunked(
-                api_key, access_token, tok, i1, from_dt, to_dt, prefer_cont="1", index_mode=index_mode
+            raw1: list = []
+            try:
+                raw1 = _fetch_chunked(
+                    api_key, access_token, tok, i1, from_dt, to_dt, prefer_cont="1", index_mode=index_mode
+                )
+            except Exception as e:
+                print(
+                    f"Warning: 1-minute history unavailable for {script} ({e}); "
+                    "continuing without 1m trap confirmation."
+                )
+            raw5 = _fetch_chunked(
+                api_key, access_token, tok, i5, from_dt, to_dt, prefer_cont="1", index_mode=index_mode
             )
-        except Exception as e:
-            print(
-                f"Warning: 1-minute history unavailable for {script} ({e}); "
-                "continuing without 1m trap confirmation."
+            raw30 = _fetch_chunked(
+                api_key, access_token, tok, i30, from_dt, to_dt, prefer_cont="1", index_mode=index_mode
             )
-        raw5 = _fetch_chunked(
-            api_key, access_token, tok, i5, from_dt, to_dt, prefer_cont="1", index_mode=index_mode
-        )
-        raw30 = _fetch_chunked(
-            api_key, access_token, tok, i30, from_dt, to_dt, prefer_cont="1", index_mode=index_mode
-        )
 
-        df1 = _df_or_empty(raw1)
-        df5 = _df_or_empty(raw5)
-        df30 = _df_or_empty(raw30)
-        trades = run_swing_trap_backtest(df1, df5, df30, cfg)
-        for t in trades:
-            meta = dict(t.meta or {})
-            meta["script"] = script
-            t.meta = meta
-        all_trades.extend(trades)
-        _print_trade_levels_log(script, trades)
-        if args.telegram:
-            _notify_telegram_for_trades(
-                user=args.user,
-                script=script,
-                trades=trades,
-                qty=float(cfg.total_lots),
-            )
-        processed.append((script, "index" if index_mode else "futures"))
+            df1 = _df_or_empty(raw1)
+            df5 = _df_or_empty(raw5)
+            df30 = _df_or_empty(raw30)
+            trades = run_swing_trap_backtest(df1, df5, df30, cfg)
+            for t in trades:
+                meta = dict(t.meta or {})
+                meta["script"] = script
+                t.meta = meta
+            all_trades.extend(trades)
+            _print_trade_levels_log(script, trades)
+            if args.telegram:
+                _notify_telegram_for_trades(
+                    user=args.user,
+                    script=script,
+                    trades=trades,
+                    qty=float(cfg.total_lots),
+                )
+            processed.append((script, "index" if index_mode else "futures"))
+        except requests.RequestException as e:
+            print(f"Warning: Kite API error for {script}, skipping symbol. ({e})")
+            continue
+        except Exception as e:
+            print(f"Warning: backtest failed for {script}, skipping symbol. ({e})")
+            continue
 
     if not all_trades:
-        raise SystemExit(f"No trades generated for scripts={','.join(scripts)}")
+        raise SystemExit(
+            f"No trades generated for scripts={','.join(scripts)}. "
+            "If you saw TokenException or 403, refresh api_key/access_token in "
+            f"src/server/data/users/{args.user}/zerodha_credentials.json"
+        )
 
     all_trades.sort(key=lambda t: t.entry_ts)
     trades_to_csv(args.csv_out, all_trades)
