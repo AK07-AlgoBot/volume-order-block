@@ -652,6 +652,8 @@ TRADING_CONFIG = {
     # Underlying distance for final TP leg (1:3 R multiple vs futures-defined risk).
     "options_target3_r": 3.0,
     "options_gtt_enabled": True,
+    # Temporary safety switch: bypass option GTT placement and use bot-managed market exits.
+    "options_force_market_exits": True,
     "options_breakeven_buffer_points": 0.0,
     # IST time after which no new option entries on that contract's expiry day.
     "options_expiry_day_cutoff_ist": "12:00",
@@ -664,6 +666,17 @@ TRADING_CONFIG = {
         "enabled": True,
         "lot_fraction": 0.25,
         "futures_lots_reference": None,
+    },
+    # Option profit protection (ladder mode):
+    # - At first_trigger_pnl: book first_book_lots, move SL to cost for remaining.
+    # - At second_trigger_pnl: book second_book_lots.
+    # Remaining lots continue with TP2/TP3 logic.
+    "options_profit_protect": {
+        "enabled": True,
+        "first_trigger_pnl": 5000.0,
+        "first_book_lots": 2,
+        "second_trigger_pnl": 10000.0,
+        "second_book_lots": 1,
     },
     # ladder_gtt: after fill, place SL + TP GTTs on OPTION premium (1:1 / 1:2 / 1:3 lot splits).
     # legacy_underlying: prior behaviour (underlying R-level partials + single SL GTT).
@@ -1243,6 +1256,7 @@ class TradingBot:
         self._last_index_fo_token_refresh_ts = 0.0
         self._kite_tick_stream: KiteTickStream | None = None
         self._kite_script_tokens: dict[str, int] = {}
+        self._kite_option_tokens: dict[str, int] = {}
         self._mcx_instruments_cache = []
         self._mcx_instruments_cache_at = 0.0
         self._nse_instruments_cache = []
@@ -2160,6 +2174,12 @@ class TradingBot:
         opt_pos["active_sl_gtt_id"] = ""
 
     def _place_or_replace_option_sl_gtt(self, script_name: str, opt_pos: dict) -> None:
+        if bool(self.config.get("options_force_market_exits", False)):
+            self._bot_logger.info(
+                "OPTIONS GTT BYPASS: %s using market-exit management (options_force_market_exits=1)",
+                script_name,
+            )
+            return
         if not bool(self.config.get("options_gtt_enabled", True)):
             return
         self._cancel_option_gtt_if_any(opt_pos)
@@ -2199,8 +2219,6 @@ class TradingBot:
 
     def _place_option_gtt_ladder(self, script_name: str, opt: dict) -> None:
         """Place SL + three TP GTTs on option premium (exchange may cap concurrent GTTs per symbol)."""
-        if not bool(self.config.get("options_gtt_enabled", True)):
-            return
         ikey = str(opt.get("instrument_key") or "")
         lot_size = max(1, int(opt.get("lot_size", 1)))
         total_lots = max(1, int(opt.get("total_lots", 4)))
@@ -2222,6 +2240,23 @@ class TradingBot:
         qty_sl = total_lots * lot_size
         q1, q2, q3 = [max(1, int(s) * lot_size) for s in splits]
         gtt_ids: dict[str, str] = {"sl": "", "tp1": "", "tp2": "", "tp3": ""}
+        opt["gtt_ids"] = gtt_ids
+        opt["sl_option_price"] = float(sl_trig)
+        opt["tp_triggers"] = {"tp1": tp1_trig, "tp2": tp2_trig, "tp3": tp3_trig}
+        if bool(self.config.get("options_force_market_exits", False)):
+            opt["ladder_manual_exit"] = True
+            self._bot_logger.warning(
+                "OPTIONS LADDER MARKET-ONLY: %s GTT bypassed; triggers managed via normal market exits",
+                script_name,
+            )
+            return
+        if not bool(self.config.get("options_gtt_enabled", True)):
+            opt["ladder_manual_exit"] = True
+            self._bot_logger.warning(
+                "OPTIONS LADDER MARKET-ONLY: %s options_gtt_enabled=0; using normal market exits",
+                script_name,
+            )
+            return
         failed_buckets: list[str] = []
 
         def _place(bucket: str, tag: str, qty: int, trig: float) -> None:
@@ -2258,9 +2293,6 @@ class TradingBot:
         _place("tp1", f"opt_tp1_{script_name.lower()}", q1, tp1_trig)
         _place("tp2", f"opt_tp2_{script_name.lower()}", q2, tp2_trig)
         _place("tp3", f"opt_tp3_{script_name.lower()}", q3, tp3_trig)
-        opt["gtt_ids"] = gtt_ids
-        opt["sl_option_price"] = float(sl_trig)
-        opt["tp_triggers"] = {"tp1": tp1_trig, "tp2": tp2_trig, "tp3": tp3_trig}
         opt["ladder_manual_exit"] = bool(failed_buckets)
         if failed_buckets:
             self._bot_logger.warning(
@@ -2286,6 +2318,8 @@ class TradingBot:
 
     def _refresh_ladder_sl_gtt_from_futures(self, script_name: str, opt: dict) -> None:
         """Cancel/replace SL GTT when futures trailing stop tightens (hybrid premium mapping)."""
+        if bool(self.config.get("options_force_market_exits", False)):
+            return
         if not bool(self.config.get("options_gtt_enabled", True)):
             return
         pos = self.positions.get(script_name)
@@ -2345,6 +2379,8 @@ class TradingBot:
         self, script_name: str, opt: dict, lots_open: int, reason: str
     ) -> None:
         """After TP fills, cancel/replace protective SL GTT at ~entry premium for remaining lots."""
+        if bool(self.config.get("options_force_market_exits", False)):
+            return
         if not bool(self.config.get("options_gtt_enabled", True)):
             return
         lot_size = max(1, int(opt.get("lot_size", 1)))
@@ -2425,10 +2461,26 @@ class TradingBot:
         ikey = str(opt.get("instrument_key") or "")
         if not ikey:
             return False
-        ltp = self.client.get_ltp(ikey)
+        ltp = None
+        if self._market_data_is_kite():
+            ltp = self._kite_option_stream_price(script_name)
+        else:
+            ltp = self.client.get_ltp(ikey)
         if ltp is None or float(ltp) <= 0:
+            miss = int(opt.get("fallback_ltp_miss_count", 0)) + 1
+            opt["fallback_ltp_miss_count"] = miss
+            if miss == 1 or miss % 30 == 0:
+                src = "kite_stream" if self._market_data_is_kite() else "broker_ltp"
+                self._bot_logger.warning(
+                    "OPTIONS LADDER FALLBACK: %s waiting for option LTP (miss_count=%d, ikey=%s, source=%s)",
+                    script_name,
+                    miss,
+                    ikey,
+                    src,
+                )
             return False
         opt_ltp = float(ltp)
+        opt["fallback_ltp_miss_count"] = 0
         opt["last_price_option"] = opt_ltp
         rem = max(0, int(opt.get("remaining_lots", 0)))
         if rem <= 0:
@@ -2490,6 +2542,98 @@ class TradingBot:
             )
             self._close_all_option_for_script(script_name, "OPT_TP3_MARKET", force_remove=True)
             return True
+        return False
+
+    def _option_current_price(self, script_name: str, opt: dict) -> float | None:
+        if self._market_data_is_kite():
+            px = self._kite_option_stream_price(script_name)
+            if px is not None and float(px) > 0:
+                return float(px)
+        ikey = str(opt.get("instrument_key") or "")
+        if not ikey:
+            return None
+        ltp = self.client.get_ltp(ikey)
+        if ltp is None or float(ltp) <= 0:
+            return None
+        return float(ltp)
+
+    def _apply_option_profit_protection(self, script_name: str, opt: dict, opt_ltp: float) -> bool:
+        """Rupee-PnL based partial exits for option ladder positions."""
+        cfg = self.config.get("options_profit_protect") or {}
+        if not bool(cfg.get("enabled", True)):
+            return False
+        rem_lots = max(0, int(opt.get("remaining_lots", 0)))
+        lot_size = max(1, int(opt.get("lot_size", 1)))
+        entry_opt = self._safe_float(opt.get("entry_price_option"), 0.0)
+        if rem_lots <= 0 or entry_opt <= 0 or float(opt_ltp) <= 0:
+            return False
+        # Long options only; PnL in INR for open quantity.
+        open_pnl = (float(opt_ltp) - entry_opt) * float(rem_lots * lot_size)
+        first_trigger = float(cfg.get("first_trigger_pnl", 5000.0))
+        second_trigger = float(cfg.get("second_trigger_pnl", 10000.0))
+        first_lots = max(1, int(cfg.get("first_book_lots", 2)))
+        second_lots = max(1, int(cfg.get("second_book_lots", 1)))
+
+        if bool(opt.get("ladder_tp1_done")):
+            opt["profit_lock_5k_done"] = True
+        if bool(opt.get("ladder_tp2_done")):
+            opt["profit_lock_10k_done"] = True
+
+        if (
+            not bool(opt.get("profit_lock_5k_done"))
+            and not bool(opt.get("ladder_tp1_done"))
+            and open_pnl >= first_trigger
+            and rem_lots > 0
+        ):
+            # Switch remaining management to stream/manual path to avoid stale TP GTTs.
+            self._cancel_all_option_gtts(opt)
+            opt["ladder_manual_exit"] = True
+            lots = max(1, min(rem_lots, first_lots))
+            if self._close_option_lots(script_name, opt, lots, "OPT_PROTECT_5K"):
+                opt["ladder_tp1_done"] = True
+                opt["profit_lock_5k_done"] = True
+                rem_after = max(0, int(opt.get("remaining_lots", 0)))
+                be = self._round_to_tick(entry_opt * 0.999)
+                if be > 0:
+                    opt["sl_option_price"] = max(self._safe_float(opt.get("sl_option_price"), 0.0), be)
+                self._bot_logger.info(
+                    "OPTIONS PROFIT PROTECT: %s pnl=%.2f booked=%d lots, SL->cost %.2f, remaining=%d",
+                    script_name,
+                    open_pnl,
+                    lots,
+                    self._safe_float(opt.get("sl_option_price"), 0.0),
+                    rem_after,
+                )
+                if rem_after <= 0:
+                    self._close_all_option_for_script(script_name, "OPT_PROTECT_5K_DONE", force_remove=True)
+                    return True
+                return True
+
+        rem_lots = max(0, int(opt.get("remaining_lots", 0)))
+        if (
+            not bool(opt.get("profit_lock_10k_done"))
+            and not bool(opt.get("ladder_tp2_done"))
+            and open_pnl >= second_trigger
+            and rem_lots > 0
+        ):
+            self._cancel_all_option_gtts(opt)
+            opt["ladder_manual_exit"] = True
+            lots = max(1, min(rem_lots, second_lots))
+            if self._close_option_lots(script_name, opt, lots, "OPT_PROTECT_10K"):
+                opt["ladder_tp2_done"] = True
+                opt["profit_lock_10k_done"] = True
+                rem_after = max(0, int(opt.get("remaining_lots", 0)))
+                self._bot_logger.info(
+                    "OPTIONS PROFIT PROTECT: %s pnl=%.2f booked=%d lots at 10k gate, remaining=%d",
+                    script_name,
+                    open_pnl,
+                    lots,
+                    rem_after,
+                )
+                if rem_after <= 0:
+                    self._close_all_option_for_script(script_name, "OPT_PROTECT_10K_DONE", force_remove=True)
+                    return True
+                return True
         return False
 
     def _maybe_telegram_option_entry(
@@ -2559,6 +2703,7 @@ class TradingBot:
         *,
         paper_parent: bool = False,
         standalone: bool = False,
+        standalone_option_setup: dict | None = None,
     ):
         """Open ATM option companion trade with staged lot-management metadata.
 
@@ -2606,14 +2751,42 @@ class TradingBot:
         r1 = float(entry_price) + side_mult * risk_pts
         r2 = float(entry_price) + side_mult * (2.0 * risk_pts)
         r3 = float(entry_price) + side_mult * (float(self.config.get("options_target3_r", 3.0)) * risk_pts)
+        opt_chart_entry = self._safe_float((standalone_option_setup or {}).get("entry_option"), 0.0)
+        opt_chart_sl = self._safe_float((standalone_option_setup or {}).get("sl_option"), 0.0)
+        opt_chart_target = self._safe_float((standalone_option_setup or {}).get("target_option"), 0.0)
+        opt_chart_r = max(1.0, abs(opt_chart_entry - opt_chart_sl)) if opt_chart_entry > 0 and opt_chart_sl > 0 else 0.0
+        standalone_note_suffix = ""
+        if bool(standalone) and isinstance(standalone_option_setup, dict):
+            parts: list[str] = []
+            opt_rsi = self._safe_float(standalone_option_setup.get("option_rsi"), 0.0)
+            if opt_rsi > 0:
+                parts.append(f"opt_rsi={opt_rsi:.2f}")
+            opt_adx = self._safe_float(standalone_option_setup.get("option_adx"), 0.0)
+            if opt_adx > 0:
+                parts.append(f"opt_adx={opt_adx:.2f}")
+            if opt_chart_sl > 0:
+                parts.append(f"opt_sl={opt_chart_sl:.2f}")
+            opt_tp1 = self._safe_float(standalone_option_setup.get("tp1_option"), 0.0)
+            if opt_tp1 > 0:
+                parts.append(f"opt_tp1={opt_tp1:.2f}")
+            opt_tp2 = self._safe_float(standalone_option_setup.get("tp2_option"), 0.0)
+            if opt_tp2 > 0:
+                parts.append(f"opt_tp2={opt_tp2:.2f}")
+            if opt_chart_target > 0:
+                parts.append(f"opt_tp3={opt_chart_target:.2f}")
+            if parts:
+                standalone_note_suffix = "; " + "; ".join(parts)
 
         if paper_parent:
             opt_entry_price = float(
                 self.client.get_ltp(str(atm.get("instrument_key") or "")) or 0.0
             )
-            sl_opt = self._option_hybrid_sl_premium(
-                float(entry_price), float(initial_sl), float(opt_entry_price or 0.0)
-            )
+            if bool(standalone) and opt_chart_sl > 0:
+                sl_opt = float(opt_chart_sl)
+            else:
+                sl_opt = self._option_hybrid_sl_premium(
+                    float(entry_price), float(initial_sl), float(opt_entry_price or 0.0)
+                )
             if float(opt_entry_price) <= 0:
                 sl_opt = 0.0
             self.option_positions[script_name] = {
@@ -2689,6 +2862,7 @@ class TradingBot:
                         atm.get("trading_symbol"),
                         qty,
                     )
+            self._ensure_kite_tick_feed_for_cycle()
             self.save_state()
             return
 
@@ -2716,14 +2890,17 @@ class TradingBot:
 
         exit_mode = str(self.config.get("options_exit_mode") or "ladder_gtt").strip().lower()
         if exit_mode == "ladder_gtt" and float(opt_entry_price) > 0:
-            premium_r = self._compute_option_premium_r(
-                float(entry_price),
-                float(initial_sl),
-                float(atm.get("strike") or 0.0),
-                int(atm.get("expiry_ms") or 0),
-                opt_type,
-                float(opt_entry_price),
-            )
+            if bool(standalone) and opt_chart_r > 0:
+                premium_r = float(opt_chart_r)
+            else:
+                premium_r = self._compute_option_premium_r(
+                    float(entry_price),
+                    float(initial_sl),
+                    float(atm.get("strike") or 0.0),
+                    int(atm.get("expiry_ms") or 0),
+                    opt_type,
+                    float(opt_entry_price),
+                )
             self.option_positions[script_name] = {
                 "standalone": bool(standalone),
                 "parent_trade_id": futures_position.get("trade_id"),
@@ -2755,10 +2932,16 @@ class TradingBot:
                 "sl_option_price": 0.0,
                 "active_sl_gtt_id": "",
             }
-            sl_t = self._round_to_tick(float(opt_entry_price) - float(premium_r))
+            if bool(standalone) and opt_chart_sl > 0:
+                sl_t = self._round_to_tick(float(opt_chart_sl))
+            else:
+                sl_t = self._round_to_tick(float(opt_entry_price) - float(premium_r))
             tp1_t = self._round_to_tick(float(opt_entry_price) + float(premium_r))
             tp2_t = self._round_to_tick(float(opt_entry_price) + 2.0 * float(premium_r))
-            tp3_t = self._round_to_tick(float(opt_entry_price) + 3.0 * float(premium_r))
+            if bool(standalone) and opt_chart_target > 0:
+                tp3_t = self._round_to_tick(float(opt_chart_target))
+            else:
+                tp3_t = self._round_to_tick(float(opt_entry_price) + 3.0 * float(premium_r))
             self._bot_logger.info(
                 "OPTIONS LADDER ENTRY: %s %s key=%s qty=%s entry_opt=%.2f premium_R=%.2f "
                 "SL_trig=%.2f TP1=%.2f TP2=%.2f TP3=%.2f fut_r1=%.2f",
@@ -2800,7 +2983,10 @@ class TradingBot:
                 opt_entry_reason,
                 stop_loss=float(sl_t),
                 target_price=float(tp3_t),
-                note=f"{opt_type} ladder; idx={script_name}; order_id={order_id}",
+                note=(
+                    f"{opt_type} ladder; idx={script_name}; order_id={order_id}"
+                    f"{standalone_note_suffix}"
+                ),
             )
             self._notify_dashboard_option_open(
                 script_name,
@@ -2810,6 +2996,7 @@ class TradingBot:
                 stop_loss=float(sl_t),
                 target_price=float(tp3_t),
             )
+            self._ensure_kite_tick_feed_for_cycle()
             self._place_option_gtt_ladder(script_name, self.option_positions[script_name])
             return
 
@@ -2818,9 +3005,12 @@ class TradingBot:
                 "OPTIONS: %s LTP unavailable at entry — hybrid SL deferred until manage loop",
                 script_name,
             )
-        sl_opt = self._option_hybrid_sl_premium(
-            float(entry_price), float(initial_sl), float(opt_entry_price or 0.0)
-        )
+        if bool(standalone) and opt_chart_sl > 0:
+            sl_opt = float(opt_chart_sl)
+        else:
+            sl_opt = self._option_hybrid_sl_premium(
+                float(entry_price), float(initial_sl), float(opt_entry_price or 0.0)
+            )
         if float(opt_entry_price) <= 0:
             sl_opt = 0.0
         self.option_positions[script_name] = {
@@ -2882,10 +3072,15 @@ class TradingBot:
             opt_entry_reason,
             stop_loss=float(sl_opt) if float(sl_opt or 0) > 0 else None,
             target_price=float(r3),
-            note=f"{opt_type} hybrid SL GTT; underlying 3R≈{r3:.2f}; idx={script_name}",
+            note=(
+                f"{opt_type} hybrid SL GTT; underlying 3R≈{r3:.2f}; idx={script_name}"
+                f"{standalone_note_suffix}"
+            ),
         )
-        tp_opt_disp = float(opt_entry_price) + 3.0 * max(
-            0.01, abs(float(opt_entry_price) - float(sl_opt or 0))
+        tp_opt_disp = (
+            float(opt_chart_target)
+            if bool(standalone) and opt_chart_target > 0
+            else float(opt_entry_price) + 3.0 * max(0.01, abs(float(opt_entry_price) - float(sl_opt or 0)))
         )
         self._notify_dashboard_option_open(
             script_name,
@@ -2895,12 +3090,13 @@ class TradingBot:
             stop_loss=float(sl_opt) if float(sl_opt or 0) > 0 else float(opt_entry_price),
             target_price=float(tp_opt_disp),
         )
+        self._ensure_kite_tick_feed_for_cycle()
         self._place_or_replace_option_sl_gtt(script_name, self.option_positions[script_name])
 
     def _evaluate_standalone_option_entries(
         self, *, allow_new_entries: bool, now_ist: datetime
     ) -> None:
-        """Index options from futures 5m chart: VWAP, crossover, ADX, volume vs prior two bars; no futures fill."""
+        """Use index only for ATM selection; validate entry/SL/TP on ATM option chart."""
         if not bool(self.config.get("options_enabled", False)):
             return
         if not bool(self.config.get("options_standalone_enabled", True)):
@@ -2989,100 +3185,136 @@ class TradingBot:
                 self.last_standalone_option_bar_ts[script_name] = self._bar_ts_key(cts)
                 continue
 
-            adx_c = float(adx_series.iloc[ci])
-            if adx_c < min_adx:
-                self._bot_logger.info(
-                    "OPTIONS STANDALONE SKIP: %s ADX %.2f < min %.2f (bar=%s)",
-                    script_name,
-                    adx_c,
-                    min_adx,
-                    cts,
-                )
-                self.last_standalone_option_bar_ts[script_name] = self._bar_ts_key(cts)
-                continue
-
-            v_c = float(df.iloc[ci]["volume"])
-            v_p1 = float(df.iloc[ci - 1]["volume"])
-            v_p2 = float(df.iloc[ci - 2]["volume"])
-            if v_c <= max(v_p1, v_p2):
-                self._bot_logger.info(
-                    "OPTIONS STANDALONE SKIP: %s volume spike fail (v=%.0f vs prev2 max=%.0f) bar=%s",
-                    script_name,
-                    v_c,
-                    max(v_p1, v_p2),
-                    cts,
-                )
-                self.last_standalone_option_bar_ts[script_name] = self._bar_ts_key(cts)
-                continue
-
-            vw = closed_row.get("vwap")
+            # Underlying index chart is only for direction and ATM strike selection.
+            # Entry-quality filters (ADX/volume/VWAP/RSI) are evaluated on the option chart below.
             cl = float(closed_row["close"])
+            side = "BUY" if entry_signal == 1 else "SELL"
+            opt_type = self._option_type_for_futures_side(side)
+            atm = self._resolve_atm_option_for_script(script_name, float(cl), opt_type)
+            if not atm:
+                self.last_standalone_option_bar_ts[script_name] = self._bar_ts_key(cts)
+                continue
+            opt_df = self.client.get_intraday_candles(
+                str(atm.get("instrument_key") or ""),
+                self._signal_interval_for_script(script_name),
+            )
+            if opt_df is None or len(opt_df) < max(self.config.get("ema_long", 18), 5):
+                self._bot_logger.info(
+                    "OPTIONS STANDALONE SKIP: %s %s option chart unavailable",
+                    script_name,
+                    opt_type,
+                )
+                self.last_standalone_option_bar_ts[script_name] = self._bar_ts_key(cts)
+                continue
+            opt_df = opt_df.copy()
+            opt_df["vwap"] = TechnicalAnalyzer.calculate_session_vwap_series(opt_df)
+            opt_df = self.analyzer.calculate_signals(
+                opt_df,
+                self.config["ema_short"],
+                self.config["ema_long"],
+            )
+            if opt_df is None or "vwap" not in opt_df.columns:
+                self.last_standalone_option_bar_ts[script_name] = self._bar_ts_key(cts)
+                continue
+            opt_df["rsi"] = TechnicalAnalyzer.calculate_rsi_series(opt_df["close"], rsi_period)
+            opt_closed = self._get_last_closed_candle_row(opt_df, script_name)
+            if opt_closed is None:
+                self.last_standalone_option_bar_ts[script_name] = self._bar_ts_key(cts)
+                continue
+            opt_cts = opt_closed["timestamp"]
+            opt_idx_matches = opt_df.index[opt_df["timestamp"] == opt_cts]
+            if len(opt_idx_matches) == 0:
+                opt_le = opt_df[opt_df["timestamp"] <= opt_cts]
+                if opt_le.empty:
+                    self.last_standalone_option_bar_ts[script_name] = self._bar_ts_key(cts)
+                    continue
+                oi = int(opt_le.index[-1])
+            else:
+                oi = int(opt_idx_matches[0])
+            if oi < 2:
+                self.last_standalone_option_bar_ts[script_name] = self._bar_ts_key(cts)
+                continue
+            opt_adx, _, _ = self._calculate_adx_values(opt_df, adx_period)
+            opt_adx_c = float(opt_adx.iloc[oi])
+            if opt_adx_c < min_adx:
+                self._bot_logger.info(
+                    "OPTIONS STANDALONE SKIP: %s %s option ADX %.2f < min %.2f (bar=%s)",
+                    script_name,
+                    opt_type,
+                    opt_adx_c,
+                    min_adx,
+                    opt_cts,
+                )
+                self.last_standalone_option_bar_ts[script_name] = self._bar_ts_key(cts)
+                continue
+            opt_v_c = float(opt_df.iloc[oi]["volume"])
+            opt_v_p1 = float(opt_df.iloc[oi - 1]["volume"])
+            opt_v_p2 = float(opt_df.iloc[oi - 2]["volume"])
+            if opt_v_c <= max(opt_v_p1, opt_v_p2):
+                self._bot_logger.info(
+                    "OPTIONS STANDALONE SKIP: %s %s option volume spike fail (v=%.0f vs prev2 max=%.0f) bar=%s",
+                    script_name,
+                    opt_type,
+                    opt_v_c,
+                    max(opt_v_p1, opt_v_p2),
+                    opt_cts,
+                )
+                self.last_standalone_option_bar_ts[script_name] = self._bar_ts_key(cts)
+                continue
+            opt_sig = int(opt_closed.get("signal", 0))
+            opt_cross = bool(opt_closed.get("crossover", False))
+            if not opt_cross or opt_sig != 1:
+                self._bot_logger.info(
+                    "OPTIONS STANDALONE SKIP: %s %s needs bullish option crossover (sig=%s cross=%s) bar=%s",
+                    script_name,
+                    opt_type,
+                    opt_sig,
+                    opt_cross,
+                    opt_cts,
+                )
+                self.last_standalone_option_bar_ts[script_name] = self._bar_ts_key(cts)
+                continue
+            opt_cl = float(opt_closed["close"])
             try:
-                vw_f = float(vw)
+                opt_vw = float(opt_closed.get("vwap"))
             except (TypeError, ValueError):
                 self.last_standalone_option_bar_ts[script_name] = self._bar_ts_key(cts)
                 continue
-            if not np.isfinite(vw_f):
-                self.last_standalone_option_bar_ts[script_name] = self._bar_ts_key(cts)
-                continue
-            if entry_signal == 1 and not (cl > vw_f):
+            if not np.isfinite(opt_vw) or not (opt_cl > opt_vw):
                 self._bot_logger.info(
-                    "OPTIONS STANDALONE SKIP: %s BUY needs close>VWAP (close=%.2f vwap=%.2f) bar=%s",
+                    "OPTIONS STANDALONE SKIP: %s %s BUY needs close>VWAP on option chart (close=%.2f vwap=%.2f) bar=%s",
                     script_name,
-                    cl,
-                    vw_f,
-                    cts,
+                    opt_type,
+                    opt_cl,
+                    opt_vw,
+                    opt_cts,
                 )
                 self.last_standalone_option_bar_ts[script_name] = self._bar_ts_key(cts)
                 continue
-            if entry_signal == -1 and not (cl < vw_f):
+            opt_rsi = float(opt_df.iloc[oi]["rsi"])
+            if not np.isfinite(opt_rsi) or opt_rsi <= rsi_min_call:
                 self._bot_logger.info(
-                    "OPTIONS STANDALONE SKIP: %s SELL needs close<VWAP (close=%.2f vwap=%.2f) bar=%s",
+                    "OPTIONS STANDALONE SKIP: %s %s needs option RSI>%.1f (rsi=%.2f) bar=%s",
                     script_name,
-                    cl,
-                    vw_f,
-                    cts,
-                )
-                self.last_standalone_option_bar_ts[script_name] = self._bar_ts_key(cts)
-                continue
-
-            rsi_c = float(df.iloc[ci]["rsi"])
-            if not np.isfinite(rsi_c):
-                self.last_standalone_option_bar_ts[script_name] = self._bar_ts_key(cts)
-                continue
-            if entry_signal == 1 and rsi_c <= rsi_min_call:
-                self._bot_logger.info(
-                    "OPTIONS STANDALONE SKIP: %s CALL needs RSI>%.1f (rsi=%.2f) bar=%s",
-                    script_name,
+                    opt_type,
                     rsi_min_call,
-                    rsi_c,
-                    cts,
+                    opt_rsi,
+                    opt_cts,
                 )
                 self.last_standalone_option_bar_ts[script_name] = self._bar_ts_key(cts)
                 continue
-            if entry_signal == -1 and rsi_c >= rsi_max_put:
-                self._bot_logger.info(
-                    "OPTIONS STANDALONE SKIP: %s PUT needs RSI<%.1f (rsi=%.2f) bar=%s",
-                    script_name,
-                    rsi_max_put,
-                    rsi_c,
-                    cts,
-                )
+            opt_initial_sl = self._get_entry_swing_sl(opt_df, opt_cts, "BUY")
+            opt_entry = opt_cl
+            if opt_initial_sl is None:
                 self.last_standalone_option_bar_ts[script_name] = self._bar_ts_key(cts)
                 continue
-
-            side = "BUY" if entry_signal == 1 else "SELL"
-            initial_sl = self._get_entry_swing_sl(df, cts, side)
-            entry_price = cl
-            if initial_sl is None:
+            if not (opt_initial_sl < opt_entry):
                 self.last_standalone_option_bar_ts[script_name] = self._bar_ts_key(cts)
                 continue
-            if side == "BUY" and not (initial_sl < entry_price):
-                self.last_standalone_option_bar_ts[script_name] = self._bar_ts_key(cts)
-                continue
-            if side == "SELL" and not (initial_sl > entry_price):
-                self.last_standalone_option_bar_ts[script_name] = self._bar_ts_key(cts)
-                continue
+            opt_risk = abs(float(opt_entry) - float(opt_initial_sl))
+            opt_tp1 = float(opt_entry) + (1.0 * opt_risk)
+            opt_tp2 = float(opt_entry) + (2.0 * opt_risk)
+            opt_target = float(opt_entry) + (3.0 * opt_risk)
 
             fut_pos = {
                 "type": side,
@@ -3091,22 +3323,36 @@ class TradingBot:
             }
             paper = is_paper_script(script_name)
             self._bot_logger.info(
-                "OPTIONS STANDALONE SIGNAL: %s %s close=%.2f vwap=%.2f adx=%.2f rsi=%.2f bar=%s — entering ATM",
+                "OPTIONS STANDALONE SIGNAL: %s idx=%s %s opt=%s close=%.2f vwap=%.2f adx=%.2f rsi=%.2f sl=%.2f tp3=%.2f idx_bar=%s opt_bar=%s — entering ATM",
                 script_name,
                 side,
-                cl,
-                vw_f,
-                adx_c,
-                rsi_c,
+                opt_type,
+                str(atm.get("trading_symbol") or ""),
+                opt_cl,
+                opt_vw,
+                opt_adx_c,
+                opt_rsi,
+                float(opt_initial_sl),
+                float(opt_target),
                 cts,
+                opt_cts,
             )
             self._start_options_companion(
                 script_name=script_name,
                 futures_position=fut_pos,
-                entry_price=float(entry_price),
-                initial_sl=float(initial_sl),
+                entry_price=float(cl),
+                initial_sl=float(self._get_entry_swing_sl(df, cts, side) or cl),
                 paper_parent=paper,
                 standalone=True,
+                standalone_option_setup={
+                    "entry_option": float(opt_entry),
+                    "sl_option": float(opt_initial_sl),
+                    "tp1_option": float(opt_tp1),
+                    "tp2_option": float(opt_tp2),
+                    "target_option": float(opt_target),
+                    "option_rsi": float(opt_rsi),
+                    "option_adx": float(opt_adx_c),
+                },
             )
             self.last_standalone_option_bar_ts[script_name] = self._bar_ts_key(cts)
             if script_name in self.option_positions:
@@ -3221,6 +3467,11 @@ class TradingBot:
                         script_name, "OPT_CHART_CROSSOVER", force_remove=True
                     )
                     continue
+                opt_ltp_live = self._option_current_price(script_name, opt)
+                if opt_ltp_live is not None and float(opt_ltp_live) > 0:
+                    opt["last_price_option"] = float(opt_ltp_live)
+                    if self._apply_option_profit_protection(script_name, opt, float(opt_ltp_live)):
+                        continue
                 self._refresh_ladder_sl_gtt_from_futures(script_name, opt)
                 self._reconcile_ladder_partial_fills(script_name, opt)
                 if self._execute_ladder_market_fallback(script_name, opt):
@@ -4169,9 +4420,19 @@ class TradingBot:
                 del self.positions[script_name]
                 any_closed = True
 
+            # Also square-off standalone / companion options tied to this segment's scripts.
+            for script_name in list(self.option_positions.keys()):
+                if script_name not in scripts:
+                    continue
+                if script_name not in self.option_positions:
+                    continue
+                self._close_all_option_for_script(script_name, "EOD_SQUAREOFF", force_remove=True)
+                if script_name not in self.option_positions:
+                    any_closed = True
+
             remaining = [
                 s for s in scripts
-                if s in self.positions or s in self.paper_positions
+                if s in self.positions or s in self.paper_positions or s in self.option_positions
             ]
             if not remaining:
                 self.eod_squareoff_done[segment] = today_text
@@ -4682,12 +4943,13 @@ class TradingBot:
         if now_m - self._last_stream_exit_mono < self._stream_exit_min_interval:
             return
         self._last_stream_exit_mono = now_m
-        if not self.positions and not self.paper_positions:
+        if not self.positions and not self.paper_positions and not self.option_positions:
             return
         if not self._strategy_lock.acquire(blocking=False):
             return
         try:
             self._do_stream_exit_pass()
+            self._do_stream_option_exit_pass()
         finally:
             self._strategy_lock.release()
 
@@ -4725,6 +4987,49 @@ class TradingBot:
             now_ist=self._now_ist(),
             stream_exit_only=True,
         )
+
+    @staticmethod
+    def _option_stream_symbol(script_name: str) -> str:
+        return f"{str(script_name or '').strip().upper()}_OPT"
+
+    @staticmethod
+    def _instrument_token_from_key(instrument_key: str) -> int | None:
+        key = str(instrument_key or "").strip()
+        if not key:
+            return None
+        if "|" in key:
+            key = key.split("|")[-1].strip()
+        try:
+            tok = int(key)
+        except (TypeError, ValueError):
+            return None
+        return tok if tok > 0 else None
+
+    def _kite_option_stream_price(self, script_name: str) -> float | None:
+        if self._kite_tick_stream is None:
+            return None
+        return self._kite_tick_stream.last_price(self._option_stream_symbol(script_name))
+
+    def _do_stream_option_exit_pass(self) -> None:
+        """Drive option management from stream LTP snapshots (including option-contract ticks)."""
+        if self._kite_tick_stream is None or not self.option_positions:
+            return
+        latest_prices: dict[str, float] = {}
+        for script_name in list(self.option_positions.keys()):
+            sn = str(script_name or "").strip().upper()
+            if not sn:
+                continue
+            px = self._kite_tick_stream.last_price(sn)
+            if px is None or float(px) <= 0:
+                cache = self._script_data_cache.get(sn) or {}
+                px = cache.get("current_price")
+            try:
+                px_f = float(px)
+            except (TypeError, ValueError):
+                continue
+            if px_f > 0:
+                latest_prices[sn] = px_f
+        self._manage_option_positions(latest_prices)
 
     def _get_kite_credentials(self) -> tuple[str, str] | None:
         z = load_zerodha_credentials_for_user(self.username)
@@ -4776,6 +5081,17 @@ class TradingBot:
             tok = self._resolve_kite_futures_token(s)
             if tok and tok > 0:
                 mp[s] = int(tok)
+        self._kite_option_tokens = {}
+        for script_name, opt in list(self.option_positions.items()):
+            if not isinstance(opt, dict):
+                continue
+            key = str(opt.get("instrument_key") or "").strip()
+            tok = self._instrument_token_from_key(key)
+            if not tok:
+                continue
+            osym = self._option_stream_symbol(script_name)
+            self._kite_option_tokens[osym] = int(tok)
+            mp[osym] = int(tok)
         if not mp:
             return
         if self._kite_tick_stream is None:
@@ -4791,6 +5107,15 @@ class TradingBot:
             self._kite_tick_stream.on_after_ticks = (
                 self._on_kite_stream_after_ticks if self._kite_stream_drive_exits() else None
             )
+
+    def _ensure_kite_tick_feed_for_cycle(self) -> None:
+        if not self._market_data_is_kite():
+            return
+        try:
+            cycle_items = list(self._scripts_for_cycle())
+        except Exception:
+            cycle_items = []
+        self._ensure_kite_tick_feed([n for n, _ in cycle_items])
 
     def _fetch_market_data_kite(self, script_name: str, instrument_key: str):
         """Candles from Kite REST (continuous futures where applicable); LTP from tick stream in process_script."""
