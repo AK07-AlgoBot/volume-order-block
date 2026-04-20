@@ -12,6 +12,7 @@ RUN pip install --no-cache-dir -r src/server/requirements.txt -r requirements.tx
 
 COPY src/server/ src/server/
 COPY src/bot/ src/bot/
+COPY src/strategy/ src/strategy/
 COPY src/lib/ src/lib/
 COPY scripts/ scripts/
 
