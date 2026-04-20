@@ -924,8 +924,11 @@ class TradeUserContext:
         monthly_points = self._compute_monthly_pnl_from_orders(month_offset=0)
         live_from_ws = list(self.live_trades.values())
         live_from_state = self.manual_live_trades_from_state()
+        live_options_from_state = self.option_live_trades_from_state()
         return {
-            "live_trades": self._dedupe_live_trades(live_from_ws + live_from_state),
+            "live_trades": self._dedupe_live_trades(
+                live_from_ws + live_from_state + live_options_from_state
+            ),
             "closed_trades": date_filtered_closed,
             "closed_trade_dates": available_dates,
             "closed_trade_selected_date": selected_date,
@@ -1053,6 +1056,67 @@ class TradeUserContext:
                     "opened_at": str(pos.get("entry_time") or ""),
                     "closed_at": None,
                     "manual_execution": True,
+                }
+            )
+        out.sort(key=lambda t: str(t.get("opened_at") or ""), reverse=True)
+        return out
+
+    def option_live_trades_from_state(self) -> list[dict]:
+        """Open option companion legs from bot `trading_state.json` as dashboard fallback."""
+        path = self.paths.user_root / "trading_state.json"
+        if not path.is_file():
+            return []
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError, TypeError):
+            return []
+        options = raw.get("option_positions") or {}
+        if not isinstance(options, dict):
+            return []
+        out: list[dict] = []
+        for script_name, opt in options.items():
+            if not isinstance(opt, dict):
+                continue
+            if bool(opt.get("paper_simulated")):
+                continue
+            sym = str(script_name or "").strip().upper()
+            if not sym:
+                continue
+            oid = str(opt.get("entry_order_id") or "").strip()
+            if not oid:
+                continue
+            entry_opt = float(opt.get("entry_price_option") or 0.0)
+            lot_size = int(opt.get("lot_size") or 1)
+            rem_lots = int(opt.get("remaining_lots", opt.get("total_lots", 0)) or 0)
+            total_lots = int(opt.get("total_lots") or 0)
+            if rem_lots <= 0 and total_lots <= 0:
+                continue
+            qty = float(max(1, rem_lots * lot_size if rem_lots > 0 else total_lots * lot_size))
+            side = "BUY"
+            trade_id = f"{sym}_OPT_{oid}"
+            opened_at = str(opt.get("entry_time") or "")
+            stop_loss = float(opt.get("sl_option_price") or entry_opt)
+            tp_triggers = opt.get("tp_triggers") or {}
+            target_price = float(tp_triggers.get("tp3") or opt.get("target_option_price") or entry_opt)
+            last_price = float(opt.get("last_price_option") or entry_opt)
+            unrealized = self._calc_unrealized(side, entry_opt, last_price, qty)
+            out.append(
+                {
+                    "id": trade_id,
+                    "symbol": f"{sym}_OPT",
+                    "side": side,
+                    "quantity": qty,
+                    "entry_price": entry_opt,
+                    "stop_loss": stop_loss,
+                    "target_price": target_price,
+                    "chart_percent": None,
+                    "chart_volume": None,
+                    "win_percent": None,
+                    "last_price": last_price,
+                    "unrealized_pnl": round(unrealized, 2),
+                    "opened_at": opened_at,
+                    "closed_at": None,
+                    "manual_execution": False,
                 }
             )
         out.sort(key=lambda t: str(t.get("opened_at") or ""), reverse=True)

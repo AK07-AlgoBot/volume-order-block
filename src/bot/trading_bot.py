@@ -1505,6 +1505,34 @@ class TradingBot:
         payload = self._build_dashboard_trade_payload(script_name, position, last_price=last_price)
         self.pending_live_updates[payload["id"]] = payload
 
+    def _queue_dashboard_option_update(self, script_name: str, opt: dict, option_ltp: float) -> None:
+        oid = str(opt.get("entry_order_id") or "").strip()
+        if not oid:
+            return
+        sym = f"{script_name}_OPT"
+        tid = self._option_dashboard_trade_id(script_name, oid)
+        entry_opt = float(opt.get("entry_price_option") or 0.0)
+        if entry_opt <= 0:
+            return
+        lot_sz = int(opt.get("lot_size") or 1)
+        rem_lots = int(opt.get("remaining_lots", opt.get("total_lots", 0)) or 0)
+        qty = float(max(1, rem_lots * lot_sz))
+        tp_triggers = opt.get("tp_triggers") or {}
+        position = {
+            "type": "BUY",
+            "entry_price": entry_opt,
+            "quantity": qty,
+            "entry_time": str(opt.get("entry_time") or datetime.now().isoformat()),
+            "trade_id": tid,
+            "stop_loss": float(opt.get("sl_option_price") or entry_opt),
+            "target_price": float(tp_triggers.get("tp3") or opt.get("target_option_price") or entry_opt),
+            "initial_sl": float(opt.get("sl_option_price") or entry_opt),
+            "manual_execution": False,
+        }
+        px = float(option_ltp) if option_ltp and float(option_ltp) > 0 else entry_opt
+        payload = self._build_dashboard_trade_payload(sym, position, last_price=px)
+        self.pending_live_updates[payload["id"]] = payload
+
     def _flush_dashboard_trade_updates(self):
         if not self.pending_live_updates:
             return
@@ -2177,6 +2205,7 @@ class TradingBot:
         qty_sl = total_lots * lot_size
         q1, q2, q3 = [max(1, int(s) * lot_size) for s in splits]
         gtt_ids: dict[str, str] = {"sl": "", "tp1": "", "tp2": "", "tp3": ""}
+        failed_buckets: list[str] = []
 
         def _place(bucket: str, tag: str, qty: int, trig: float) -> None:
             if qty <= 0 or trig <= 0:
@@ -2200,6 +2229,7 @@ class TradingBot:
                     gtt_ids[bucket],
                 )
             else:
+                failed_buckets.append(bucket)
                 self._bot_logger.error(
                     "OPTIONS LADDER GTT FAILED: %s %s err=%s",
                     script_name,
@@ -2214,6 +2244,13 @@ class TradingBot:
         opt["gtt_ids"] = gtt_ids
         opt["sl_option_price"] = float(sl_trig)
         opt["tp_triggers"] = {"tp1": tp1_trig, "tp2": tp2_trig, "tp3": tp3_trig}
+        opt["ladder_manual_exit"] = bool(failed_buckets)
+        if failed_buckets:
+            self._bot_logger.warning(
+                "OPTIONS LADDER FALLBACK: %s will use market exits on trigger hits (failed=%s)",
+                script_name,
+                ",".join(failed_buckets),
+            )
 
     def _net_option_units_for_instrument(self, instrument_key: str) -> int | None:
         for row in self.client.get_short_term_positions():
@@ -2363,6 +2400,80 @@ class TradingBot:
         ):
             opt["ladder_tp2_done"] = True
             self._ladder_replace_sl_breakeven(script_name, opt, lots_open, "POST_TP2")
+
+    def _execute_ladder_market_fallback(self, script_name: str, opt: dict) -> bool:
+        """Fallback ladder exits using regular market orders when GTT placement is unavailable."""
+        if not bool(opt.get("ladder_manual_exit")):
+            return False
+        ikey = str(opt.get("instrument_key") or "")
+        if not ikey:
+            return False
+        ltp = self.client.get_ltp(ikey)
+        if ltp is None or float(ltp) <= 0:
+            return False
+        opt_ltp = float(ltp)
+        opt["last_price_option"] = opt_ltp
+        rem = max(0, int(opt.get("remaining_lots", 0)))
+        if rem <= 0:
+            return False
+        total_lots = max(1, int(opt.get("total_lots", 4)))
+        splits = list(self.config.get("options_tp_lot_splits") or [2, 1, 1])
+        if len(splits) != 3 or sum(splits) != total_lots:
+            splits = [2, 1, 1]
+        tp = opt.get("tp_triggers") or {}
+        sl_trig = self._safe_float(opt.get("sl_option_price"), 0.0)
+        tp1 = self._safe_float(tp.get("tp1"), 0.0)
+        tp2 = self._safe_float(tp.get("tp2"), 0.0)
+        tp3 = self._safe_float(tp.get("tp3"), 0.0)
+
+        if sl_trig > 0 and opt_ltp <= sl_trig:
+            self._bot_logger.warning(
+                "OPTIONS LADDER FALLBACK SL: %s ltp=%.2f trigger=%.2f -> market exit",
+                script_name,
+                opt_ltp,
+                sl_trig,
+            )
+            self._close_all_option_for_script(script_name, "OPT_LADDER_SL_MARKET", force_remove=True)
+            return True
+
+        if (not bool(opt.get("ladder_tp1_done"))) and tp1 > 0 and opt_ltp >= tp1 and rem > 0:
+            lots = max(1, min(rem, int(splits[0])))
+            if self._close_option_lots(script_name, opt, lots, "OPT_TP1_MARKET"):
+                opt["ladder_tp1_done"] = True
+                rem = max(0, int(opt.get("remaining_lots", 0)))
+                be = self._round_to_tick(self._safe_float(opt.get("entry_price_option"), 0.0) * 0.999)
+                if be > 0:
+                    opt["sl_option_price"] = max(self._safe_float(opt.get("sl_option_price"), 0.0), be)
+                if rem <= 0:
+                    self._close_all_option_for_script(script_name, "OPT_CYCLE_DONE", force_remove=True)
+                    return True
+
+        if (
+            bool(opt.get("ladder_tp1_done"))
+            and not bool(opt.get("ladder_tp2_done"))
+            and tp2 > 0
+            and opt_ltp >= tp2
+            and int(opt.get("remaining_lots", 0)) > 0
+        ):
+            rem = max(0, int(opt.get("remaining_lots", 0)))
+            lots = max(1, min(rem, int(splits[1])))
+            if self._close_option_lots(script_name, opt, lots, "OPT_TP2_MARKET"):
+                opt["ladder_tp2_done"] = True
+                rem = max(0, int(opt.get("remaining_lots", 0)))
+                if rem <= 0:
+                    self._close_all_option_for_script(script_name, "OPT_CYCLE_DONE", force_remove=True)
+                    return True
+
+        if tp3 > 0 and opt_ltp >= tp3 and int(opt.get("remaining_lots", 0)) > 0:
+            self._bot_logger.info(
+                "OPTIONS LADDER FALLBACK TP3: %s ltp=%.2f trigger=%.2f -> market exit",
+                script_name,
+                opt_ltp,
+                tp3,
+            )
+            self._close_all_option_for_script(script_name, "OPT_TP3_MARKET", force_remove=True)
+            return True
+        return False
 
     def _maybe_telegram_option_entry(
         self,
@@ -3095,6 +3206,8 @@ class TradingBot:
                     continue
                 self._refresh_ladder_sl_gtt_from_futures(script_name, opt)
                 self._reconcile_ladder_partial_fills(script_name, opt)
+                if self._execute_ladder_market_fallback(script_name, opt):
+                    continue
                 ikey = str(opt.get("instrument_key") or "")
                 netu = self._net_option_units_for_instrument(ikey)
                 if netu is not None and netu <= 0:
@@ -6380,6 +6493,18 @@ class TradingBot:
             if current_price is None:
                 continue
             self._queue_dashboard_trade_update(script_name, position, current_price)
+        for script_name, opt in self.option_positions.items():
+            if not isinstance(opt, dict) or bool(opt.get("paper_simulated")):
+                continue
+            ikey = str(opt.get("instrument_key") or "")
+            if not ikey:
+                continue
+            opt_ltp = self.client.get_ltp(ikey)
+            if opt_ltp is not None and float(opt_ltp) > 0:
+                opt["last_price_option"] = float(opt_ltp)
+            else:
+                opt_ltp = float(opt.get("last_price_option") or opt.get("entry_price_option") or 0.0)
+            self._queue_dashboard_option_update(script_name, opt, float(opt_ltp or 0.0))
         self._flush_dashboard_trade_updates()
 
         if self.total_pnl < -self.config["portfolio_stop_loss"]:
