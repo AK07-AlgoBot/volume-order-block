@@ -714,9 +714,11 @@ TRADING_CONFIG = {
         "NSE": "09:15",
         "MCX": "09:00"
     },
-    # Ignore first signal candle after segment entry start (gap-open protection).
-    # Example: MCX 09:00 + 5m signal candle => first eligible entry after 09:05.
+    # Legacy: treated as 1 bar if ignore_first_signal_bars_by_segment is absent.
     "ignore_first_candle_after_entry_start": True,
+    # Skip this many full signal-interval candles after segment open (gap / opening range).
+    # NSE=2 skips 09:15–09:20 and 09:20–09:25 on 5m charts so first entry is not the immediate post-gap bar.
+    "ignore_first_signal_bars_by_segment": {"NSE": 2, "MCX": 1},
     "eod_squareoff_times": {
         "NSE": "15:20",
         "MCX": "23:20"
@@ -1296,6 +1298,15 @@ class TradingBot:
                     self.last_standalone_option_bar_ts = state.get(
                         "last_standalone_option_bar_ts", {}
                     )
+                    lep = state.get("last_entry_candle_processed") or {}
+                    self.last_entry_candle_processed = {}
+                    for _sn, _tv in lep.items():
+                        nk = str(_sn or "").strip().upper()
+                        if not nk:
+                            continue
+                        nt = self._normalize_entry_timestamp(_tv)
+                        if nt is not None:
+                            self.last_entry_candle_processed[nk] = nt
                     for _sn, _pos in list(self.paper_positions.items()):
                         self._ensure_position_fields(_pos, _sn)
                     self._bot_logger.info(
@@ -1316,6 +1327,13 @@ class TradingBot:
                 "total_pnl": self.total_pnl,
                 "eod_squareoff_done": self.eod_squareoff_done,
                 "last_standalone_option_bar_ts": self.last_standalone_option_bar_ts,
+                "last_entry_candle_processed": {
+                    str(k or "").strip().upper(): (
+                        v.isoformat() if hasattr(v, "isoformat") else str(v)
+                    )
+                    for k, v in (self.last_entry_candle_processed or {}).items()
+                    if str(k or "").strip().upper()
+                },
                 "timestamp": datetime.now().isoformat(),
             }
             with open(self.state_file, "w", encoding="utf-8") as f:
@@ -4311,6 +4329,31 @@ class TradingBot:
             else:
                 os.environ["TRADING_USER"] = old
 
+    def _ignore_first_signal_bars_for_segment(self, segment: str | None) -> int:
+        raw = self.config.get("ignore_first_signal_bars_by_segment")
+        if isinstance(raw, dict) and segment:
+            v = raw.get(segment)
+            if v is not None:
+                return max(0, int(v))
+        if bool(self.config.get("ignore_first_candle_after_entry_start", True)):
+            return 1
+        return 0
+
+    def _normalize_entry_timestamp(self, ts) -> pd.Timestamp | None:
+        if ts is None:
+            return None
+        try:
+            t = pd.Timestamp(ts)
+        except Exception:
+            return None
+        if pd.isna(t):
+            return None
+        if t.tzinfo is None:
+            t = t.tz_localize("Asia/Kolkata")
+        else:
+            t = t.tz_convert("Asia/Kolkata")
+        return t
+
     def _is_before_segment_entry_start(self, script_name, now_ist):
         segment = self._script_segment(script_name)
         if not segment:
@@ -4319,12 +4362,13 @@ class TradingBot:
         start_dt = self._segment_entry_start_dt(segment, now_ist)
         if start_dt is None:
             return False
-        if bool(self.config.get("ignore_first_candle_after_entry_start", True)):
-            warmup_min = max(
+        bars = self._ignore_first_signal_bars_for_segment(segment)
+        if bars > 0:
+            bar_m = max(
                 1,
                 int(self._interval_to_minutes(self._signal_interval_for_script(script_name))),
             )
-            start_dt = start_dt + timedelta(minutes=warmup_min)
+            start_dt = start_dt + timedelta(minutes=bar_m * bars)
 
         return now_ist < start_dt
 
@@ -6016,7 +6060,13 @@ class TradingBot:
                     continue
 
                 last_processed = self.last_entry_candle_processed.get(script_name)
-                if last_processed is not None and entry_candle_timestamp <= last_processed:
+                ec_n = self._normalize_entry_timestamp(entry_candle_timestamp)
+                lp_n = self._normalize_entry_timestamp(last_processed)
+                if (
+                    lp_n is not None
+                    and ec_n is not None
+                    and ec_n <= lp_n
+                ):
                     continue
 
                 signal_reason = str(data.get("entry_reason") or "EMA_CROSSOVER")
@@ -6376,6 +6426,7 @@ class TradingBot:
                                 )
                                 self.save_state()
                             self.last_entry_candle_processed[script_name] = entry_candle_timestamp
+                            self.save_state()
                             continue
                         signal_timestamp = entry_candle_timestamp
                         signal_timestamp_str = signal_timestamp.isoformat() if signal_timestamp is not None else datetime.now().isoformat()
@@ -6627,6 +6678,7 @@ class TradingBot:
                                 )
                                 self.save_state()
                             self.last_entry_candle_processed[script_name] = entry_candle_timestamp
+                            self.save_state()
                             continue
                         signal_timestamp = entry_candle_timestamp
                         signal_timestamp_str = signal_timestamp.isoformat() if signal_timestamp is not None else datetime.now().isoformat()
