@@ -1852,12 +1852,19 @@ class TradingBot:
         t = str(error_text or "").strip().lower()
         return "mcx orders via api are temporarily disabled" in t
 
+    @staticmethod
+    def _invalid_instrument_key_error(error_text: str) -> bool:
+        t = str(error_text or "").strip().lower()
+        return "invalid instrument key" in t
+
     def _is_mcx_manual_track_candidate(self, script_name: str, order_result: dict | None) -> bool:
         token = str(self._get_order_token(script_name) or "").strip()
         if not token.startswith("MCX_FO|"):
             return False
         error_text = str((order_result or {}).get("error", "")).strip()
-        return self._mcx_api_disabled_error(error_text)
+        return self._mcx_api_disabled_error(error_text) or self._invalid_instrument_key_error(
+            error_text
+        )
 
     def _notify_manual_close_needed(self, script_name, position, exit_side, current_price, reason):
         qty = float(position.get("quantity", self._get_order_quantity(script_name)))
