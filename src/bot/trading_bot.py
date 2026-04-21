@@ -709,9 +709,14 @@ TRADING_CONFIG = {
         "MCX": ["CRUDE", "GOLDMINI", "SILVERMINI"]
     },
     "entry_start_times": {
-        "NSE": "09:25",
-        "MCX": "09:10"
+        # Base market-open time per segment; first-candle skip is applied via
+        # ignore_first_candle_after_entry_start below.
+        "NSE": "09:15",
+        "MCX": "09:00"
     },
+    # Ignore first signal candle after segment entry start (gap-open protection).
+    # Example: MCX 09:00 + 5m signal candle => first eligible entry after 09:05.
+    "ignore_first_candle_after_entry_start": True,
     "eod_squareoff_times": {
         "NSE": "15:20",
         "MCX": "23:20"
@@ -4314,6 +4319,12 @@ class TradingBot:
         start_dt = self._segment_entry_start_dt(segment, now_ist)
         if start_dt is None:
             return False
+        if bool(self.config.get("ignore_first_candle_after_entry_start", True)):
+            warmup_min = max(
+                1,
+                int(self._interval_to_minutes(self._signal_interval_for_script(script_name))),
+            )
+            start_dt = start_dt + timedelta(minutes=warmup_min)
 
         return now_ist < start_dt
 
