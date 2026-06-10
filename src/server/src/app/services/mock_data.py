@@ -97,6 +97,7 @@ def seed() -> None:
                 "max_trades": 2,
                 "position": position,
                 "entries_blocked": kill_engaged,
+                "monitoring_active": False,
                 "paper_trading": True,
                 "updated_at": now.isoformat(),
             },

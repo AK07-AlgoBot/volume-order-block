@@ -70,8 +70,14 @@ ARCHIVE_TIME: Final[dtime] = dtime(15, 30)      # post-market performance archiv
 WALL_REFRESH_SECONDS: Final[int] = 300
 POLL_SECONDS: Final[float] = float(os.environ.get("AK07_POLL_SECONDS", "15"))
 PAPER_TRADING: Final[bool] = os.environ.get("AK07_PAPER_TRADING", "1") != "0"
+MOCK_MODE: Final[bool] = os.environ.get("AK07_MOCK") == "1"
 
 CANDLE_MINUTES: Final[int] = 5
+
+# Legacy historical-candle metadata keys — never merge with live V3 intraday rows.
+_HISTORICAL_PAYLOAD_KEYS: Final[frozenset[str]] = frozenset(
+    {"interval", "continuous", "to_date", "from_date", "intraday", "candle_type"}
+)
 
 # repo/src/server/src/app/archive/
 ARCHIVE_DIR: Final[Path] = Path(__file__).resolve().parents[1] / "archive"
@@ -129,6 +135,81 @@ INDEX_CONFIGS: Final[dict[str, IndexConfig]] = {
         strike_step=100,
     ),
 }
+
+
+# ---------------------------------------------------------------------------
+# V3 intraday parsing (no legacy historical key overlap)
+# ---------------------------------------------------------------------------
+def parse_v3_intraday_candles(
+    data: Any,
+    now: datetime,
+) -> list[dict[str, float]] | None:
+    """Parse V3 intraday candle payload. Returns None if legacy/historical keys detected."""
+    if not isinstance(data, dict):
+        return None
+    if _HISTORICAL_PAYLOAD_KEYS.intersection(data.keys()):
+        logger.warning("Rejected candle payload with historical metadata keys: %s", sorted(data.keys())[:6])
+        return None
+
+    raw = data.get("candles")
+    if raw is None:
+        return []
+    if not isinstance(raw, list):
+        logger.warning("Rejected non-list V3 candles container (%s)", type(raw).__name__)
+        return None
+
+    candles: list[dict[str, float]] = []
+    for row in raw:
+        candle = _parse_v3_candle_row(row)
+        if candle is None:
+            continue
+        ts = datetime.fromisoformat(candle["timestamp"])
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=IST)
+        if ts + timedelta(minutes=CANDLE_MINUTES) <= now.astimezone(ts.tzinfo):
+            candles.append(candle)
+    candles.sort(key=lambda c: c["timestamp"])
+    return candles
+
+
+def _parse_v3_candle_row(row: Any) -> dict[str, float] | None:
+    """Accept modern V3 array rows or object rows; reject legacy parameter dicts."""
+    if isinstance(row, dict):
+        if _HISTORICAL_PAYLOAD_KEYS.intersection(row.keys()):
+            return None
+        ts_raw = row.get("timestamp") or row.get("time") or row.get("start_time")
+        try:
+            return {
+                "timestamp": datetime.fromisoformat(str(ts_raw)).isoformat(),
+                "open": float(row["open"]),
+                "high": float(row["high"]),
+                "low": float(row["low"]),
+                "close": float(row["close"]),
+                "volume": int(row.get("volume") or 0),
+            }
+        except (KeyError, TypeError, ValueError):
+            return None
+
+    if isinstance(row, (list, tuple)) and len(row) >= 6:
+        try:
+            return {
+                "timestamp": datetime.fromisoformat(str(row[0])).isoformat(),
+                "open": float(row[1]),
+                "high": float(row[2]),
+                "low": float(row[3]),
+                "close": float(row[4]),
+                "volume": int(row[5] or 0),
+            }
+        except (ValueError, TypeError, IndexError):
+            return None
+    return None
+
+
+def in_execution_boundary(spot: float, call_wall: int, put_floor: int) -> bool:
+    """True when spot is inside the 30-pt support or resistance pocket."""
+    in_support = put_floor <= spot <= put_floor + SUPPORT_POCKET_POINTS
+    in_resistance = call_wall - RESISTANCE_POCKET_POINTS <= spot <= call_wall
+    return in_support or in_resistance
 
 
 # ---------------------------------------------------------------------------
@@ -257,38 +338,13 @@ class UpstoxClient:
                 out[key] = {"ltp": float(ltp), "open": float(day_open)}
         return out
 
-    def get_closed_5min_candles(self, instrument_key: str) -> list[dict[str, float]]:
-        """Today's completed 5-minute candles, oldest -> newest.
-
-        Uses the V3 intraday endpoint; any candle whose window has not fully
-        elapsed is discarded so setups only fire on candle closure.
-        """
+    def get_closed_5min_candles(self, instrument_key: str) -> list[dict[str, float]] | None:
+        """Today's completed 5-min candles from V3 intraday. None = legacy payload rejected."""
         v3_base = self.base_url.replace("/v2", "/v3")
         data = self._get(
             f"{v3_base}/historical-candle/intraday/{instrument_key}/minutes/{CANDLE_MINUTES}"
         )
-        if not isinstance(data, dict):
-            return []
-        raw = data.get("candles") or []
-        now = datetime.now(IST)
-        candles: list[dict[str, float]] = []
-        for row in raw:
-            try:
-                ts = datetime.fromisoformat(str(row[0]))
-                candle = {
-                    "timestamp": ts.isoformat(),
-                    "open": float(row[1]),
-                    "high": float(row[2]),
-                    "low": float(row[3]),
-                    "close": float(row[4]),
-                    "volume": int(row[5] or 0),
-                }
-            except (ValueError, TypeError, IndexError):
-                continue
-            if ts + timedelta(minutes=CANDLE_MINUTES) <= now:
-                candles.append(candle)
-        candles.sort(key=lambda c: c["timestamp"])
-        return candles
+        return parse_v3_intraday_candles(data, datetime.now(IST))
 
     def _nearest_expiry(self, instrument_key: str) -> str | None:
         data = self._get(f"{self.base_url}/option/contract", {"instrument_key": instrument_key})
@@ -394,6 +450,109 @@ class UpstoxClient:
                 logger.warning("Order error at %s: %s", url, exc)
         logger.error("Order FAILED on all endpoints: %s %d x %s", transaction_type, quantity, instrument_key)
         return False
+
+
+class MockUpstoxClient(UpstoxClient):
+    """Simulated V3 feed for AK07_MOCK cockpit/engine verification (no broker I/O)."""
+
+    def __init__(self) -> None:
+        self.username = "AK07"
+        self.base_url = "https://api.upstox.com/v2"
+        self.session = requests.Session()
+        self._tick = 0
+        self._walls: dict[str, tuple[int, int]] = {
+            "NIFTY": (24_000, 21_200),
+            "BANKNIFTY": (52_500, 50_800),
+            "SENSEX": (79_800, 77_900),
+        }
+
+    def refresh_access_token_from_disk(self) -> bool:
+        return True
+
+    def request_daily_access_token(self) -> bool:
+        return True
+
+    def get_ltp(self, instrument_key: str) -> float | None:
+        code = _index_code_for_spot_key(instrument_key)
+        if code is None:
+            return None
+        call_wall, put_floor = self._walls[code]
+        # Drift spot into the support pocket after a few ticks (mock verification path).
+        if self._tick >= 3:
+            return float(put_floor + 10)
+        return float((call_wall + put_floor) / 2)
+
+    def get_ohlc_quotes(self, instrument_keys: list[str]) -> dict[str, dict[str, float]]:
+        out: dict[str, dict[str, float]] = {}
+        for key in instrument_keys:
+            ltp = 100.0 + (self._tick % 5)
+            out[key] = {"ltp": ltp, "open": 99.0}
+        return out
+
+    def get_closed_5min_candles(self, instrument_key: str) -> list[dict[str, float]] | None:
+        code = _index_code_for_spot_key(instrument_key)
+        if code is None:
+            return []
+        call_wall, put_floor = self._walls[code]
+        now = datetime.now(IST)
+        if self._tick < 3:
+            close = float((call_wall + put_floor) / 2)
+            low = close - 5
+            high = close + 5
+        else:
+            close = float(put_floor + 10)
+            low = put_floor + 2
+            high = close + 8
+        return [
+            {
+                "timestamp": (now - timedelta(minutes=CANDLE_MINUTES)).isoformat(),
+                "open": close - 2,
+                "high": high,
+                "low": low,
+                "close": close,
+                "volume": 120_000,
+            }
+        ]
+
+    def get_oi_walls(self, instrument_key: str) -> tuple[int, int] | None:
+        code = _index_code_for_spot_key(instrument_key)
+        if code is None:
+            return None
+        return self._walls[code]
+
+    def get_itm_option_contract(
+        self, instrument_key: str, spot: float, direction: str
+    ) -> dict[str, Any] | None:
+        code = _index_code_for_spot_key(instrument_key)
+        step = INDEX_CONFIGS[code].strike_step if code else 50
+        desired = spot - ITM_OFFSET_POINTS if direction == "LONG" else spot + ITM_OFFSET_POINTS
+        strike = int(round(desired / step) * step)
+        return {
+            "instrument_key": "",
+            "strike": strike,
+            "option_type": "CE" if direction == "LONG" else "PE",
+        }
+
+    def place_market_order(self, instrument_key: str, quantity: int, transaction_type: str) -> bool:
+        logger.info("MOCK order: %s %d x %s", transaction_type, quantity, instrument_key or "paper")
+        return True
+
+    def advance_tick(self) -> None:
+        self._tick += 1
+
+
+def _index_code_for_spot_key(instrument_key: str) -> str | None:
+    for code, cfg in INDEX_CONFIGS.items():
+        if cfg.spot_instrument_key == instrument_key:
+            return code
+    return None
+
+
+def build_upstox_client() -> UpstoxClient:
+    if MOCK_MODE:
+        logger.info("AK07_MOCK=1 -> using MockUpstoxClient (simulated V3 feed)")
+        return MockUpstoxClient()
+    return UpstoxClient()
 
 
 # ---------------------------------------------------------------------------
@@ -516,16 +675,27 @@ class IndexState:
     day_volume: int = 0
 
 
+def reset_index_live_cache(state: IndexState) -> None:
+    """Drop stale in-memory fields for one index; OI walls repopulate on next chain pull."""
+    state.spot = None
+    state.call_wall = None
+    state.put_floor = None
+    state.walls_refreshed_at = 0.0
+    state.changes = {}
+    state.comp_bias = "NEUTRAL"
+    state.last_candle_ts = ""
+
+
 # ---------------------------------------------------------------------------
 # Engine
 # ---------------------------------------------------------------------------
 class AK07Engine:
     def __init__(self) -> None:
-        self.client = UpstoxClient()
+        self.client = build_upstox_client()
         self.states: dict[str, IndexState] = {
             code: IndexState(config=cfg) for code, cfg in INDEX_CONFIGS.items()
         }
-        self.entries_blocked = False
+        self.session_entries_blocked = False
         # Session buffers, archived at 15:30 IST and reset on day roll.
         self.trade_log: list[dict[str, Any]] = []
         self.spot_track: dict[str, list[dict[str, Any]]] = {c: [] for c in INDEX_CONFIGS}
@@ -550,19 +720,7 @@ class AK07Engine:
         now = datetime.now(IST)
         self._roll_trade_day(now)
         self._daily_session_init(now)
-
-        if self._kill_switch_engaged():
-            self.square_off_all("KILL_SWITCH")
-            self.entries_blocked = True
-        elif now.time() >= SQUARE_OFF_TIME:
-            if any(s.position for s in self.states.values()):
-                telegram_notifier.notify_system_event(
-                    "TIME GATE 14:55 IST", "Entry logic halted; squaring off all active positions."
-                )
-            self.square_off_all("TIME_GATE_1455")
-            self.entries_blocked = True
-        else:
-            self.entries_blocked = now.time() < ENTRY_OPEN_TIME
+        self._refresh_session_entry_gate(now)
 
         system_bias = cache_manager.get_system_bias()
         for state in self.states.values():
@@ -570,6 +728,38 @@ class AK07Engine:
 
         self._publish_global_state(now)
         self._maybe_archive_day(now)
+
+        if isinstance(self.client, MockUpstoxClient):
+            self.client.advance_tick()
+
+    def _refresh_session_entry_gate(self, now: datetime) -> None:
+        """Session-level entry halt: kill switch, 14:55 square-off, pre-9:20 open skip."""
+        if MOCK_MODE:
+            if self._kill_switch_engaged():
+                self.square_off_all("KILL_SWITCH")
+                self.session_entries_blocked = True
+                logger.info("entries blocked (kill switch engaged)")
+            else:
+                self.session_entries_blocked = False
+            return
+
+        if self._kill_switch_engaged():
+            self.square_off_all("KILL_SWITCH")
+            self.session_entries_blocked = True
+            logger.info("entries blocked (kill switch engaged)")
+        elif now.time() >= SQUARE_OFF_TIME:
+            if any(s.position for s in self.states.values()):
+                telegram_notifier.notify_system_event(
+                    "TIME GATE 14:55 IST", "Entry logic halted; squaring off all active positions."
+                )
+            self.square_off_all("TIME_GATE_1455")
+            self.session_entries_blocked = True
+            logger.info("entries blocked (14:55 IST time gate)")
+        elif now.time() < ENTRY_OPEN_TIME:
+            self.session_entries_blocked = True
+            logger.debug("entries blocked (pre-9:20 opening rotation skip)")
+        else:
+            self.session_entries_blocked = False
 
     def _daily_session_init(self, now: datetime) -> None:
         """09:15 IST automation: V3 token refresh + Redis pool warm-up, once a day."""
@@ -594,23 +784,30 @@ class AK07Engine:
     def _process_index(self, state: IndexState, system_bias: str, now: datetime) -> None:
         cfg = state.config
 
-        spot = self.client.get_ltp(cfg.spot_instrument_key)
-        if spot is not None:
-            state.spot = spot
+        try:
+            spot = self.client.get_ltp(cfg.spot_instrument_key)
+            if spot is not None:
+                state.spot = spot
 
-        keys = [HEAVYWEIGHT_INSTRUMENT_KEYS[s] for s in cfg.heavyweights]
-        quotes = self.client.get_ohlc_quotes(keys)
-        if quotes:
-            state.changes = component_changes(cfg.heavyweights, quotes)
-            state.comp_bias = component_bias(state.changes)
+            keys = [HEAVYWEIGHT_INSTRUMENT_KEYS[s] for s in cfg.heavyweights]
+            quotes = self.client.get_ohlc_quotes(keys)
+            if quotes:
+                state.changes = component_changes(cfg.heavyweights, quotes)
+                state.comp_bias = component_bias(state.changes)
 
-        if time.monotonic() - state.walls_refreshed_at > WALL_REFRESH_SECONDS:
+            if time.monotonic() - state.walls_refreshed_at > WALL_REFRESH_SECONDS:
+                walls = self.client.get_oi_walls(cfg.spot_instrument_key)
+                if walls:
+                    state.call_wall, state.put_floor = walls
+                state.walls_refreshed_at = time.monotonic()
+        except Exception:
+            logger.exception("[%s] live V3 feed read failed; resetting index cache", cfg.code)
+            reset_index_live_cache(state)
             walls = self.client.get_oi_walls(cfg.spot_instrument_key)
             if walls:
                 state.call_wall, state.put_floor = walls
-            state.walls_refreshed_at = time.monotonic()
+                state.walls_refreshed_at = time.monotonic()
 
-        # Session tracking for the 15:30 performance archive.
         if state.spot is not None:
             self.spot_track[cfg.code].append({"at": now.isoformat(), "spot": state.spot})
         self.sentiment_track[cfg.code].append(
@@ -620,11 +817,30 @@ class AK07Engine:
         self._manage_position(state, system_bias, now)
 
         if (
-            not self.entries_blocked
+            state.spot is not None
+            and state.call_wall is not None
+            and state.put_floor is not None
+            and not self.session_entries_blocked
+            and in_execution_boundary(state.spot, state.call_wall, state.put_floor)
+        ):
+            logger.info(
+                "[%s] monitoring active execution boundaries "
+                "(spot=%.2f put=%d call=%d comp_bias=%s ai_bias=%s)",
+                cfg.code,
+                state.spot,
+                state.put_floor,
+                state.call_wall,
+                state.comp_bias,
+                system_bias,
+            )
+
+        if (
+            not self.session_entries_blocked
             and state.position is None
             and state.trades_today < MAX_TRADES_PER_INDEX_PER_DAY
             and state.call_wall is not None
             and state.put_floor is not None
+            and state.spot is not None
         ):
             self._check_entry(state, system_bias, now)
 
@@ -632,16 +848,30 @@ class AK07Engine:
 
     def _check_entry(self, state: IndexState, system_bias: str, now: datetime) -> None:
         candles = self.client.get_closed_5min_candles(state.config.spot_instrument_key)
+        if candles is None:
+            logger.warning(
+                "[%s] legacy/historical candle keys detected; clearing index cache",
+                state.config.code,
+            )
+            reset_index_live_cache(state)
+            walls = self.client.get_oi_walls(state.config.spot_instrument_key)
+            if walls:
+                state.call_wall, state.put_floor = walls
+            return
         if not candles:
             return
         state.day_volume = sum(c["volume"] for c in candles)
         candle = candles[-1]
         if candle["timestamp"] == state.last_candle_ts:
-            return  # already evaluated this closure
+            return
         state.last_candle_ts = candle["timestamp"]
 
         direction = detect_setup(
-            candle, state.call_wall, state.put_floor, state.comp_bias, system_bias  # type: ignore[arg-type]
+            candle,
+            state.call_wall,  # type: ignore[arg-type]
+            state.put_floor,  # type: ignore[arg-type]
+            state.comp_bias,
+            system_bias,
         )
         if direction is None:
             return
@@ -933,7 +1163,14 @@ class AK07Engine:
                 "trades_today": state.trades_today,
                 "max_trades": MAX_TRADES_PER_INDEX_PER_DAY,
                 "position": state.position.as_dict() if state.position else None,
-                "entries_blocked": self.entries_blocked,
+                "entries_blocked": self.session_entries_blocked,
+                "monitoring_active": (
+                    not self.session_entries_blocked
+                    and state.spot is not None
+                    and state.call_wall is not None
+                    and state.put_floor is not None
+                    and in_execution_boundary(state.spot, state.call_wall, state.put_floor)
+                ),
                 "paper_trading": PAPER_TRADING,
                 "updated_at": now.isoformat(),
             },

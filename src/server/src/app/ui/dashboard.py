@@ -217,6 +217,8 @@ for tab, (code, cfg) in zip(tabs, INDEX_CONFIGS.items()):
         flags = []
         if state.get("entries_blocked"):
             flags.append("entries blocked")
+        elif state.get("monitoring_active"):
+            flags.append("monitoring active execution boundaries")
         if state.get("paper_trading"):
             flags.append("paper mode")
         st.caption(f"Engine state updated {updated}" + (f" · {' · '.join(flags)}" if flags else ""))
