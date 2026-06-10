@@ -8,6 +8,11 @@ Usage (from repo root):
   python scripts/reset_dashboard_password.py -p "YourNewPassword"
   set AK07_NEW_PASSWORD=YourNewPassword && python scripts/reset_dashboard_password.py
 
+Usage on EC2/Docker:
+
+  docker compose -p ak07 -f configs/docker-compose.yml exec api \
+    python scripts/reset_dashboard_password.py -p "YourNewPassword"
+
 After reset, restart the FastAPI server so in-memory state is not stale (if any).
 
 Alternative without this script: delete users_auth.json, set AK07_PASSWORD in src/server/.env,

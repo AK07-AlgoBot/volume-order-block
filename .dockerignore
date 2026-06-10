@@ -5,11 +5,10 @@ env
 **/__pycache__
 *.py[cod]
 *.log
-src/client/node_modules
-src/client/dist
 src/server/data
-archive
 .tools
 .secrets
 *.md
 !README.md
+**/.pytest_cache
+tmp

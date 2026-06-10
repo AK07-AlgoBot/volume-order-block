@@ -12,15 +12,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.config.settings import get_settings
 from app.routes import (
     auth,
-    auth_kite,
-    dashboard,
-    log_files,
-    order_block,
     settings_credentials,
-    settings_trading,
     settings_upstox,
-    trades,
-    websocket,
 )
 
 app = FastAPI(title="AK07 Dashboard API", version="2.0.0")
@@ -35,16 +28,8 @@ app.add_middleware(
 )
 
 app.include_router(auth.router)
-app.include_router(auth_kite.router_api)
-app.include_router(auth_kite.router_public)
-app.include_router(dashboard.router)
-app.include_router(trades.router)
 app.include_router(settings_upstox.router)
 app.include_router(settings_credentials.router)
-app.include_router(order_block.router)
-app.include_router(settings_trading.router)
-app.include_router(log_files.router)
-app.include_router(websocket.router)
 
 
 @app.get("/api/health")

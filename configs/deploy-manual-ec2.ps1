@@ -1,8 +1,6 @@
 <#
 .SYNOPSIS
-  Option B: deploy from your Windows PC over SSH (no GitHub Actions).
-
-  NEVER commit private keys (.pem, id_rsa) to git. Keep them only on your machine.
+  Deploy AK07 to EC2 from Windows over SSH.
 
 .EXAMPLE
   .\configs\deploy-manual-ec2.ps1 -Ec2Host "203.0.113.10" -KeyPath "C:\Users\pavan\arun\id_rsa"
@@ -24,12 +22,23 @@ if (-not (Test-Path -LiteralPath $KeyPath)) {
     throw "SSH private key not found: $KeyPath"
 }
 
-# Restrict key file permissions (OpenSSH on Windows warns otherwise)
+# Restrict key file permissions (OpenSSH on Windows warns otherwise).
 icacls $KeyPath /inheritance:r /grant:r "$($env:USERNAME):(R)" 2>$null | Out-Null
 
-# One remote shell line (avoids newline issues with Windows OpenSSH).
-$remote = "set -e; cd '$RemotePath'; git fetch origin; git checkout '$Branch'; git pull origin '$Branch'; docker compose -f configs/docker-compose.yml build --pull; docker compose -f configs/docker-compose.yml up -d; docker compose -f configs/docker-compose.yml ps"
+$remote = @"
+set -e
+cd '$RemotePath'
+git fetch origin
+git checkout '$Branch'
+git pull --ff-only origin '$Branch'
+chmod +x configs/deploy-ec2.sh
+DEPLOY_BRANCH='$Branch' configs/deploy-ec2.sh '$RemotePath'
+"@
 
-Write-Host "Connecting to ${Ec2User}@${Ec2Host} ..."
-# BatchMode=yes fails fast if the key needs a passphrase (run from an interactive terminal instead).
-ssh -i "$KeyPath" -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=accept-new "${Ec2User}@${Ec2Host}" $remote
+Write-Host "Deploying AK07 to ${Ec2User}@${Ec2Host}:${RemotePath} (branch ${Branch}) ..."
+ssh -i "$KeyPath" `
+    -o IdentitiesOnly=yes `
+    -o BatchMode=yes `
+    -o StrictHostKeyChecking=accept-new `
+    "${Ec2User}@${Ec2Host}" `
+    $remote

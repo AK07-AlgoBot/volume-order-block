@@ -124,7 +124,7 @@ async def post_upstox_settings(
     actor: UserClaims = Depends(require_user),
 ):
     _ensure_repo_on_path()
-    from bot_process_control import restart_trading_bot_after_credential_save  # noqa: PLC0415
+    from bot_process_control import restart_engine_after_credential_save  # noqa: PLC0415
     from upstox_credentials_store import (  # noqa: PLC0415
         credentials_file_for_user,
         normalize_access_token,
@@ -151,7 +151,7 @@ async def post_upstox_settings(
     persist_credentials_for_user(safe, current)
     restart_result = None
     if updated:
-        restart_result = await asyncio.to_thread(restart_trading_bot_after_credential_save)
+        restart_result = await asyncio.to_thread(restart_engine_after_credential_save)
     log_action(
         actor.username,
         "upstox_settings_saved",

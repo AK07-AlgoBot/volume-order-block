@@ -1,24 +1,18 @@
 param(
     [switch]$Force,
-    [switch]$UsePreviewUI = $true,
-    [switch]$BotOnly
+    [switch]$Mock,
+    [switch]$EngineOnly,
+    [switch]$DashboardOnly,
+    [switch]$McpOnly,
+    [switch]$ApiOnly,
+    [int]$DashboardPort = 8501,
+    [int]$McpPort = 8765,
+    [int]$ApiPort = 8080
 )
 
 $ErrorActionPreference = "Stop"
-
-function Test-HttpEndpoint {
-    param(
-        [Parameter(Mandatory = $true)][string]$Url
-    )
-
-    try {
-        $response = Invoke-WebRequest -Uri $Url -UseBasicParsing -TimeoutSec 3
-        return $response.StatusCode -ge 200 -and $response.StatusCode -lt 400
-    }
-    catch {
-        return $false
-    }
-}
+$repoRoot = $PSScriptRoot
+$serverSrc = Join-Path $repoRoot "src\server\src"
 
 function Start-ManagedProcess {
     param(
@@ -26,7 +20,6 @@ function Start-ManagedProcess {
         [Parameter(Mandatory = $true)][string]$WorkingDirectory,
         [Parameter(Mandatory = $true)][string]$Command
     )
-
     $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($Command))
     Start-Process powershell -ArgumentList @(
         "-NoExit",
@@ -37,171 +30,77 @@ function Start-ManagedProcess {
 }
 
 function Test-CommandLineProcess {
-    param(
-        [Parameter(Mandatory = $true)][string]$Pattern
-    )
-
+    param([Parameter(Mandatory = $true)][string]$Pattern)
     try {
         $procs = Get-CimInstance Win32_Process -Filter "Name = 'python.exe' OR Name = 'pythonw.exe' OR Name = 'powershell.exe'"
         foreach ($proc in $procs) {
-            if ($proc.CommandLine -and $proc.CommandLine -like "*$Pattern*") {
-                return $true
-            }
+            if ($proc.CommandLine -and $proc.CommandLine -like "*$Pattern*") { return $true }
         }
-        return $false
+    } catch {}
+    return $false
+}
+
+function Start-IfNeeded {
+    param(
+        [string]$Name,
+        [string]$Pattern,
+        [string]$Command
+    )
+    if ((Test-CommandLineProcess -Pattern $Pattern) -and -not $Force) {
+        Write-Host "$Name appears to be already running (use -Force to start another)."
+        return
     }
-    catch {
-        return $false
-    }
+    Start-ManagedProcess -Name $Name -WorkingDirectory $repoRoot -Command $Command
 }
 
-$repoRoot = $PSScriptRoot
-
-if ($BotOnly) {
-    $botRunning = Test-CommandLineProcess -Pattern "trading_bot.py"
-    if ($botRunning -and -not $Force) {
-        Write-Host "Trading bot appears to be already running (use -Force to start another)."
-    }
-    else {
-        Start-ManagedProcess -Name "Trading Bot" -WorkingDirectory $repoRoot -Command @"
-Set-Location '$repoRoot'
-python src\bot\trading_bot.py
-"@
-    }
-    Write-Host ""
-    Write-Host "Bot-only mode (no dashboard API/UI)."
-    exit 0
+if ($Mock) {
+    $envLine = "`$env:AK07_MOCK = '1'"
+    Write-Host "AK07 mock mode enabled (fakeredis + simulated market data)."
+} else {
+    $envLine = "`$env:AK07_MOCK = `$null"
 }
 
-$uiPath = Join-Path $repoRoot "src\client"
-
-if (-not (Test-Path $uiPath)) {
-    throw "client folder not found at $uiPath"
-}
-
-# Resolve Node/npm (system first, fallback to local portable Node)
-$nodeCmd = "node"
-$npmCmd = "npm"
-$nodeVersionOk = $false
-$portableNodeDir = $null
-
-try {
-    node -v | Out-Null
-    npm -v | Out-Null
-    $nodeVersionOk = $true
-}
-catch {
-    $nodeDir = Get-ChildItem (Join-Path $repoRoot ".tools\node") -Directory -ErrorAction SilentlyContinue |
-        Where-Object { $_.Name -like "node-v*-win-x64" } |
-        Sort-Object Name -Descending |
-        Select-Object -First 1
-
-    if ($null -eq $nodeDir) {
-        throw "Node.js not found. Install Node.js or keep portable Node under .tools\node."
-    }
-
-    $nodeCmd = Join-Path $nodeDir.FullName "node.exe"
-    $npmCmd = Join-Path $nodeDir.FullName "npm.cmd"
-    $portableNodeDir = $nodeDir.FullName
-
-    & $nodeCmd -v | Out-Null
-    & $npmCmd -v | Out-Null
-    $nodeVersionOk = $true
-}
-
-if (-not $nodeVersionOk) {
-    throw "Node.js/npm unavailable."
-}
-
-# If using portable Node, ensure npm script subprocesses can resolve node.exe.
-if ($portableNodeDir) {
-    $env:Path = "$portableNodeDir;$env:Path"
-}
-
-# Ensure UI dependencies are installed
-if (-not (Test-Path (Join-Path $uiPath "node_modules"))) {
-    Write-Host "Installing dashboard UI dependencies..."
-    if ($npmCmd -eq "npm") {
-        & npm install --prefix $uiPath
-    }
-    else {
-        & $npmCmd install --prefix $uiPath
-    }
-}
-
-$apiUp = Test-HttpEndpoint -Url "http://127.0.0.1:8080/api/health"
-$uiUp = Test-HttpEndpoint -Url "http://127.0.0.1:5173"
-$serverSrc = Join-Path $repoRoot "src\server\src"
-
-if ($apiUp -and -not $Force) {
-    Write-Host "API already running on http://localhost:8080 (use -Force to start another)."
-}
-else {
-    Start-ManagedProcess -Name "Dashboard API" -WorkingDirectory $repoRoot -Command @"
+$common = @"
 Set-Location '$repoRoot'
 `$env:PYTHONPATH = '$serverSrc'
-python -m uvicorn app.main:app --host 0.0.0.0 --port 8080 --reload
+$envLine
+"@
+
+if (-not $DashboardOnly -and -not $McpOnly -and -not $ApiOnly) {
+    Start-IfNeeded -Name "AK07 Engine" -Pattern "upstox_engine.py" -Command @"
+$common
+python src\server\src\app\services\upstox_engine.py
 "@
 }
 
-if ($uiUp -and -not $Force) {
-    Write-Host "UI already running on http://localhost:5173 (use -Force to start another)."
-}
-else {
-    if ($UsePreviewUI) {
-        if ($npmCmd -eq "npm") {
-            & npm run build --prefix $uiPath
-            $uiCommand = @"
-Set-Location '$uiPath'
-npm run preview -- --host 0.0.0.0 --port 5173
+if (-not $EngineOnly -and -not $DashboardOnly -and -not $ApiOnly) {
+    Start-IfNeeded -Name "AK07 MCP Server" -Pattern "mcp_server.py" -Command @"
+$common
+python src\server\src\mcp_server.py --host 127.0.0.1 --port $McpPort
 "@
-        }
-        else {
-            $escapedNodeDir = Split-Path $npmCmd -Parent
-            & $npmCmd run build --prefix $uiPath
-            $uiCommand = @"
-Set-Location '$uiPath'
-\$env:Path = '$escapedNodeDir;' + \$env:Path
-& '$npmCmd' run preview -- --host 0.0.0.0 --port 5173
-"@
-        }
-    }
-    else {
-        if ($npmCmd -eq "npm") {
-            $uiCommand = @"
-Set-Location '$uiPath'
-npm run dev -- --host 0.0.0.0 --port 5173
-"@
-        }
-        else {
-            $escapedNodeDir = Split-Path $npmCmd -Parent
-            $uiCommand = @"
-Set-Location '$uiPath'
-\$env:Path = '$escapedNodeDir;' + \$env:Path
-& '$npmCmd' run dev -- --host 0.0.0.0 --port 5173
-"@
-        }
-    }
-
-    Start-ManagedProcess -Name "Dashboard UI" -WorkingDirectory $uiPath -Command $uiCommand
 }
 
-$botRunning = Test-CommandLineProcess -Pattern "trading_bot.py"
-if ($botRunning -and -not $Force) {
-    Write-Host "Trading bot appears to be already running (use -Force to start another)."
+if (-not $EngineOnly -and -not $McpOnly -and -not $ApiOnly) {
+    Start-IfNeeded -Name "AK07 Streamlit Cockpit" -Pattern "dashboard.py" -Command @"
+$common
+python -m streamlit run src\server\src\app\ui\dashboard.py --server.port $DashboardPort
+"@
 }
-else {
-    Start-ManagedProcess -Name "Trading Bot" -WorkingDirectory $repoRoot -Command @"
-Set-Location '$repoRoot'
-python src\bot\trading_bot.py
+
+if (-not $EngineOnly -and -not $McpOnly -and -not $DashboardOnly) {
+    Start-IfNeeded -Name "AK07 Minimal API" -Pattern "uvicorn app.main:app" -Command @"
+$common
+python -m uvicorn app.main:app --host 127.0.0.1 --port $ApiPort
 "@
 }
 
 Write-Host ""
-Write-Host "All launch commands sent."
-Write-Host "Dashboard UI: http://localhost:5173"
-Write-Host "Dashboard API: http://localhost:8080"
+Write-Host "AK07 launch commands sent."
+Write-Host "Cockpit : http://localhost:$DashboardPort"
+Write-Host "MCP     : http://127.0.0.1:$McpPort/mcp"
+Write-Host "API     : http://127.0.0.1:$ApiPort/api/health"
 Write-Host ""
-Write-Host "Tip: Use .\start.ps1 -Force to start new API/UI instances even if ports are already active."
-Write-Host "Tip: Use .\start.ps1 -UsePreviewUI:`$false for Vite dev server."
-Write-Host "Tip: Use .\start.ps1 -BotOnly for headless trading bot only."
+Write-Host "Useful modes:"
+Write-Host "  .\start.ps1 -Mock              # visual cockpit with fake data, no Redis/broker"
+Write-Host "  .\start.ps1 -EngineOnly        # engine only"
+Write-Host "  .\start.ps1 -DashboardOnly -Mock"

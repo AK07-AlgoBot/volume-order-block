@@ -1,12 +1,8 @@
-"""Unified broker credential read/save/test for Upstox and Zerodha (Kite)."""
+"""Upstox broker credential read/save/test."""
 
 from __future__ import annotations
 
 import asyncio
-import os
-import re
-from pathlib import Path
-from typing import Literal
 
 import requests
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -17,8 +13,6 @@ from app.services.audit_log import log_action
 
 router = APIRouter(prefix="/api/settings", tags=["settings"])
 
-BrokerName = Literal["upstox", "zerodha"]
-
 
 def _ensure_repo_on_path() -> None:
     from app.config.paths import ensure_repo_and_lib_on_path
@@ -26,83 +20,22 @@ def _ensure_repo_on_path() -> None:
     ensure_repo_and_lib_on_path()
 
 
-def _normalize_broker(b: str) -> BrokerName:
-    x = (b or "upstox").strip().lower()
-    if x not in ("upstox", "zerodha"):
-        raise HTTPException(status_code=400, detail="broker must be upstox or zerodha")
-    return x  # type: ignore[return-value]
+def _require_upstox(broker: str) -> str:
+    x = (broker or "upstox").strip().lower()
+    if x != "upstox":
+        raise HTTPException(status_code=400, detail="Only the upstox broker is supported.")
+    return x
 
 
-def _upsert_env_var(path: Path, key: str, value: str) -> bool:
-    line = f"{key}={value}"
-    if path.is_file():
-        txt = path.read_text(encoding="utf-8")
-        lines = txt.splitlines()
-    else:
-        lines = []
-    pat = re.compile(rf"^\s*#?\s*{re.escape(key)}\s*=")
-    replaced = False
-    out: list[str] = []
-    for ln in lines:
-        if pat.match(ln):
-            if not replaced:
-                out.append(line)
-                replaced = True
-            continue
-        out.append(ln)
-    if not replaced:
-        if out and out[-1].strip() != "":
-            out.append("")
-        out.append(line)
-    new_txt = "\n".join(out) + "\n"
-    old_txt = "\n".join(lines) + ("\n" if lines else "")
-    if new_txt == old_txt:
-        return False
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(new_txt, encoding="utf-8")
-    return True
-
-
-def _persist_kite_env(api_key: str | None, api_secret: str | None) -> dict:
-    from app.config.paths import repo_root, server_root
-
-    changed_paths: list[str] = []
-    candidates: list[Path] = [repo_root() / ".env", server_root() / ".env"]
-    for env_path in candidates:
-        changed = False
-        if api_key:
-            changed = _upsert_env_var(env_path, "KITE_API_KEY", api_key) or changed
-            os.environ["KITE_API_KEY"] = api_key
-        if api_secret:
-            changed = _upsert_env_var(env_path, "KITE_API_SECRET", api_secret) or changed
-            os.environ["KITE_API_SECRET"] = api_secret
-        if changed:
-            changed_paths.append(str(env_path.resolve()))
-
-    try:
-        from app.config.settings import get_settings
-
-        get_settings.cache_clear()
-    except Exception:
-        pass
-
-    return {"updated": bool(changed_paths), "paths": changed_paths}
-
-
-def _credential_helpers(broker: BrokerName):
-    if broker == "zerodha":
-        from zerodha_credentials_store import (  # noqa: PLC0415
-            credentials_file_for_user,
-            persist_credentials_for_user,
-            read_credentials_file_for_user,
-        )
-    else:
-        from upstox_credentials_store import (  # noqa: PLC0415
-            credentials_file_for_user,
-            persist_credentials_for_user,
-            read_credentials_file_for_user,
-        )
-    from upstox_credentials_store import mask_tail, normalize_access_token, sanitize_username  # noqa: PLC0415
+def _credential_helpers():
+    from upstox_credentials_store import (  # noqa: PLC0415
+        credentials_file_for_user,
+        mask_tail,
+        normalize_access_token,
+        persist_credentials_for_user,
+        read_credentials_file_for_user,
+        sanitize_username,
+    )
 
     return (
         credentials_file_for_user,
@@ -120,7 +53,7 @@ async def get_broker_credentials(
     user: UserClaims = Depends(require_user),
 ):
     _ensure_repo_on_path()
-    b = _normalize_broker(broker)
+    b = _require_upstox(broker)
     (
         credentials_file_for_user,
         mask_tail,
@@ -128,7 +61,7 @@ async def get_broker_credentials(
         _persist,
         read_credentials_file_for_user,
         sanitize_username,
-    ) = _credential_helpers(b)
+    ) = _credential_helpers()
 
     safe = sanitize_username(user.username)
     data = read_credentials_file_for_user(safe)
@@ -154,7 +87,7 @@ async def test_broker_credentials(
     actor: UserClaims = Depends(require_user),
 ):
     _ensure_repo_on_path()
-    b = _normalize_broker(broker)
+    b = _require_upstox(broker)
     (
         _cf,
         _mask_tail,
@@ -162,96 +95,45 @@ async def test_broker_credentials(
         _persist,
         read_credentials_file_for_user,
         sanitize_username,
-    ) = _credential_helpers(b)
+    ) = _credential_helpers()
 
     safe = sanitize_username(actor.username)
     creds = read_credentials_file_for_user(safe)
     access_token = (creds.get("access_token") or "").strip()
     base_url = (creds.get("base_url") or "").strip()
-    api_key = (creds.get("api_key") or "").strip()
 
-    if b == "upstox":
-        if not access_token:
-            raise HTTPException(status_code=400, detail=f"No Upstox access token saved for {safe}.")
-        if not base_url:
-            raise HTTPException(status_code=400, detail=f"No Upstox base URL saved for {safe}.")
-        url = f"{base_url.rstrip('/')}/user/profile"
-        headers = {
-            "Authorization": f"Bearer {access_token}",
-            "Accept": "application/json",
-        }
-        try:
-            response = await asyncio.to_thread(requests.get, url, headers=headers, timeout=30)
-        except requests.RequestException as exc:
-            raise HTTPException(status_code=502, detail=f"Upstox connectivity test failed: {exc}") from exc
-        payload: dict = {}
-        try:
-            payload = response.json() if response.text else {}
-        except ValueError:
-            payload = {}
-        if response.status_code != 200:
-            broker_message = ""
-            if isinstance(payload, dict):
-                errors = payload.get("errors") or []
-                if errors and isinstance(errors, list):
-                    first = errors[0] if isinstance(errors[0], dict) else {"message": str(errors[0])}
-                    broker_message = first.get("message") or str(first)
-                broker_message = broker_message or payload.get("message", "")
-            detail = broker_message or (response.text or "").strip()[:250] or "Unknown Upstox error"
-            raise HTTPException(
-                status_code=502,
-                detail=f"Upstox test failed for {safe}: HTTP {response.status_code} - {detail}",
-            )
-        profile = payload.get("data", {}) if isinstance(payload, dict) else {}
-        log_action(
-            actor.username,
-            "broker_credentials_tested",
-            {"credential_subject": safe, "broker": b, "ok": True},
-            target_user=safe,
-        )
-        return {
-            "ok": True,
-            "broker": b,
-            "credential_subject": safe,
-            "base_url": base_url,
-            "tested_endpoint": url,
-            "profile": {
-                "user_name": profile.get("user_name"),
-                "email": profile.get("email"),
-                "user_id": profile.get("user_id"),
-                "broker": profile.get("broker"),
-            },
-            "message": f"Upstox auth check succeeded for {safe}.",
-        }
-
-    if not api_key:
-        raise HTTPException(status_code=400, detail=f"No Zerodha API key saved for {safe}.")
     if not access_token:
-        raise HTTPException(status_code=400, detail=f"No Zerodha access token saved for {safe}.")
-    kite_base = base_url or "https://api.kite.trade"
-    url = f"{kite_base.rstrip('/')}/user/profile"
+        raise HTTPException(status_code=400, detail=f"No Upstox access token saved for {safe}.")
+    if not base_url:
+        raise HTTPException(status_code=400, detail=f"No Upstox base URL saved for {safe}.")
+    url = f"{base_url.rstrip('/')}/user/profile"
     headers = {
-        "X-Kite-Version": "3",
-        "Authorization": f"token {api_key}:{access_token}",
+        "Authorization": f"Bearer {access_token}",
+        "Accept": "application/json",
     }
     try:
         response = await asyncio.to_thread(requests.get, url, headers=headers, timeout=30)
     except requests.RequestException as exc:
-        raise HTTPException(status_code=502, detail=f"Zerodha connectivity test failed: {exc}") from exc
+        raise HTTPException(status_code=502, detail=f"Upstox connectivity test failed: {exc}") from exc
+    payload: dict = {}
     try:
         payload = response.json() if response.text else {}
     except ValueError:
         payload = {}
     if response.status_code != 200:
-        err = ""
+        broker_message = ""
         if isinstance(payload, dict):
-            err = str(payload.get("message") or payload.get("error_type") or "")
-        detail = err or (response.text or "").strip()[:250] or "Unknown Kite error"
+            errors = payload.get("errors") or []
+            if errors and isinstance(errors, list):
+                first = errors[0] if isinstance(errors[0], dict) else {"message": str(errors[0])}
+                broker_message = first.get("message") or str(first)
+            broker_message = broker_message or payload.get("message", "")
+        detail = broker_message or (response.text or "").strip()[:250] or "Unknown Upstox error"
         raise HTTPException(
             status_code=502,
-            detail=f"Zerodha (Kite) test failed for {safe}: HTTP {response.status_code} - {detail}",
+            detail=f"Upstox test failed for {safe}: HTTP {response.status_code} - {detail}",
         )
-    data = payload.get("data", {}) if isinstance(payload, dict) else {}
+    profile = payload.get("data", {}) if isinstance(payload, dict) else {}
     log_action(
         actor.username,
         "broker_credentials_tested",
@@ -262,15 +144,15 @@ async def test_broker_credentials(
         "ok": True,
         "broker": b,
         "credential_subject": safe,
-        "base_url": kite_base,
+        "base_url": base_url,
         "tested_endpoint": url,
         "profile": {
-            "user_name": data.get("user_name"),
-            "email": data.get("email"),
-            "user_id": data.get("user_id"),
-            "broker": "zerodha",
+            "user_name": profile.get("user_name"),
+            "email": profile.get("email"),
+            "user_id": profile.get("user_id"),
+            "broker": profile.get("broker"),
         },
-        "message": f"Kite auth check succeeded for {safe}.",
+        "message": f"Upstox auth check succeeded for {safe}.",
     }
 
 
@@ -280,7 +162,7 @@ async def post_broker_credentials(
     actor: UserClaims = Depends(require_user),
 ):
     _ensure_repo_on_path()
-    b = _normalize_broker(body.broker)
+    b = _require_upstox(body.broker)
     (
         credentials_file_for_user,
         _mask_tail,
@@ -288,7 +170,7 @@ async def post_broker_credentials(
         persist_credentials_for_user,
         read_credentials_file_for_user,
         sanitize_username,
-    ) = _credential_helpers(b)
+    ) = _credential_helpers()
 
     safe = sanitize_username(actor.username)
     current = read_credentials_file_for_user(safe)
@@ -306,18 +188,12 @@ async def post_broker_credentials(
         current["base_url"] = body.base_url.strip()
         updated = True
     persist_credentials_for_user(safe, current)
-    env_update = {"updated": False, "paths": []}
-    if b == "zerodha":
-        env_update = _persist_kite_env(
-            body.api_key.strip() or None,
-            body.api_secret.strip() or None,
-        )
 
     restart_result = None
-    if updated and b == "upstox":
-        from bot_process_control import restart_trading_bot_after_credential_save  # noqa: PLC0415
+    if updated:
+        from bot_process_control import restart_engine_after_credential_save  # noqa: PLC0415
 
-        restart_result = await asyncio.to_thread(restart_trading_bot_after_credential_save)
+        restart_result = await asyncio.to_thread(restart_engine_after_credential_save)
 
     log_action(
         actor.username,
@@ -326,17 +202,15 @@ async def post_broker_credentials(
         target_user=safe,
     )
     cred_path = credentials_file_for_user(safe)
-    if updated and b == "upstox":
-        bot_restart = restart_result or {"restarted": False, "skipped": "no credential fields changed"}
-    elif updated and b == "zerodha":
-        bot_restart = {"restarted": False, "skipped": "Zerodha saved; live bot still uses Upstox API only"}
-    else:
-        bot_restart = {"restarted": False, "skipped": "no credential fields changed"}
+    bot_restart = (
+        restart_result
+        if updated and restart_result is not None
+        else {"restarted": False, "skipped": "no credential fields changed"}
+    )
     return {
         "ok": True,
         "broker": b,
         "saved": cred_path.name,
         "credential_subject": safe,
-        "env_update": env_update,
         "bot_restart": bot_restart,
     }

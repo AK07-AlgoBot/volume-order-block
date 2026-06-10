@@ -1,0 +1,227 @@
+"""AK07 Execution Cockpit - dark-themed Streamlit dashboard.
+
+Reads everything from Redis (published by `upstox_engine`), so the dashboard
+never blocks or couples to the engine process. The sidebar kill switch both
+engages the Redis kill flag (which the engine honors on its next tick) and
+transmits emergency market square-offs directly to the Upstox API.
+
+Run:  streamlit run src/server/src/app/ui/dashboard.py
+"""
+
+from __future__ import annotations
+
+import os
+import sys
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+
+import streamlit as st
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
+from app.services import cache_manager
+from app.services.upstox_engine import (
+    INDEX_CONFIGS,
+    emergency_square_off_all,
+    release_kill_switch,
+)
+
+REFRESH_SECONDS = 5
+MOCK_MODE = os.environ.get("AK07_MOCK") == "1"
+PRODUCTION_DOMAIN = (os.environ.get("PRODUCTION_DOMAIN") or "").strip() or "ak07.in"
+
+if MOCK_MODE:
+    from app.services import mock_data
+
+    mock_data.seed()
+
+st.set_page_config(
+    page_title="AK07 Execution Cockpit",
+    page_icon="\U0001f3af",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
+
+st.markdown(
+    """
+    <style>
+      .stApp { background-color: #0c0f14; color: #e6e9ef; }
+      section[data-testid="stSidebar"] { background-color: #11151c; }
+      div[data-testid="stMetric"] {
+        background-color: #161b24; border: 1px solid #232b38;
+        border-radius: 10px; padding: 14px 16px;
+      }
+      div[data-testid="stMetric"] label { color: #8b96a8 !important; }
+      div[data-testid="stMetricValue"] { color: #e6e9ef !important; }
+      .ak07-block {
+        border-radius: 8px; padding: 10px 6px; text-align: center;
+        font-weight: 600; font-size: 0.85rem; color: #ffffff;
+        margin-bottom: 6px;
+      }
+      .ak07-green { background-color: #14532d; border: 1px solid #22c55e; }
+      .ak07-red { background-color: #7f1d1d; border: 1px solid #ef4444; }
+      .ak07-gray { background-color: #1f2937; border: 1px solid #4b5563; }
+      .ak07-badge {
+        display: inline-block; border-radius: 6px; padding: 4px 12px;
+        font-weight: 700; letter-spacing: 0.05em;
+      }
+      .ak07-bull { background: #14532d; color: #4ade80; }
+      .ak07-bear { background: #7f1d1d; color: #f87171; }
+      .ak07-neutral { background: #1f2937; color: #9ca3af; }
+      button[kind="primary"] {
+        background-color: #b91c1c !important; border: 2px solid #ef4444 !important;
+        color: #fff !important; font-weight: 800 !important; font-size: 1.05rem !important;
+        padding: 0.9rem 0.5rem !important; width: 100%;
+      }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+
+def bias_badge(bias: str) -> str:
+    css = {"BULLISH": "ak07-bull", "BEARISH": "ak07-bear"}.get(bias, "ak07-neutral")
+    return f'<span class="ak07-badge {css}">{bias}</span>'
+
+
+def component_block(symbol: str, pct: float | None) -> str:
+    if pct is None:
+        return f'<div class="ak07-block ak07-gray">{symbol}<br>n/a</div>'
+    css = "ak07-green" if pct > 0 else ("ak07-red" if pct < 0 else "ak07-gray")
+    return f'<div class="ak07-block {css}">{symbol}<br>{pct:+.2f}%</div>'
+
+
+def fmt(value: float | int | None, decimals: int = 2) -> str:
+    if value is None:
+        return "—"
+    return f"{value:,.{decimals}f}" if isinstance(value, float) else f"{value:,}"
+
+
+# ---------------------------------------------------------------------------
+# Sidebar: engine status + emergency controls
+# ---------------------------------------------------------------------------
+with st.sidebar:
+    st.markdown("## \U0001f3af AK07 Cockpit")
+    if MOCK_MODE:
+        st.info("MOCK DATA MODE — simulated feed, broker APIs disabled")
+
+    heartbeat = cache_manager.get_json(cache_manager.ENGINE_HEARTBEAT_KEY)
+    if heartbeat:
+        mode = "PAPER" if heartbeat.get("paper_trading") else "LIVE"
+        st.success(f"Engine ONLINE ({mode}) — {heartbeat.get('at', '')[:19]}")
+    else:
+        st.error("Engine OFFLINE — no heartbeat in Redis")
+
+    system_bias = cache_manager.get_system_bias()
+    st.markdown(f"**AI System Bias:** {bias_badge(system_bias)}", unsafe_allow_html=True)
+
+    kill_flag = cache_manager.get_json(cache_manager.KILL_SWITCH_KEY)
+    kill_engaged = bool(kill_flag and kill_flag.get("engaged"))
+
+    st.markdown("---")
+    st.markdown("### \u26a0\ufe0f Emergency Controls")
+
+    if kill_engaged:
+        st.error(f"KILL SWITCH ENGAGED\nsince {str(kill_flag.get('at', ''))[:19]}")
+        if st.button("Release kill switch (re-arm engine)"):
+            release_kill_switch()
+            st.rerun()
+    else:
+        if st.button("\U0001f6d1 EMERGENCY COCKPIT KILL-SWITCH", type="primary"):
+            with st.spinner("Engaging kill switch and squaring off via Upstox..."):
+                results = emergency_square_off_all()
+            for scope, outcome in results.items():
+                st.warning(f"{scope}: {outcome}")
+
+    st.markdown("---")
+    auto_refresh = st.toggle("Auto-refresh", value=True, key="auto_refresh")
+    st.caption(f"Refreshes every {REFRESH_SECONDS}s while enabled.")
+    st.caption(f"Production endpoint: https://{PRODUCTION_DOMAIN}")
+
+
+# ---------------------------------------------------------------------------
+# Main: one tab per index
+# ---------------------------------------------------------------------------
+st.markdown("# AK07 Multi-Index Execution Cockpit")
+st.caption(f"Rendered {datetime.now(timezone.utc).astimezone().strftime('%H:%M:%S')} local")
+
+tabs = st.tabs([cfg.display for cfg in INDEX_CONFIGS.values()])
+
+for tab, (code, cfg) in zip(tabs, INDEX_CONFIGS.items()):
+    with tab:
+        state = cache_manager.get_json(cache_manager.INDEX_STATE_KEY_TEMPLATE.format(index=code))
+        if not state:
+            st.info(f"No live state for {cfg.display} yet — is the engine running?")
+            continue
+
+        spot = state.get("spot")
+        call_wall = state.get("call_wall")
+        put_floor = state.get("put_floor")
+
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Live Spot Price", fmt(float(spot)) if spot is not None else "—")
+        c2.metric(
+            "Institutional Call Wall \u2191",
+            fmt(call_wall, 0),
+            delta=(f"{call_wall - spot:+,.0f} pts away" if call_wall and spot else None),
+            delta_color="off",
+        )
+        c3.metric(
+            "Institutional Put Floor \u2193",
+            fmt(put_floor, 0),
+            delta=(f"{spot - put_floor:+,.0f} pts above" if put_floor and spot else None),
+            delta_color="off",
+        )
+        with c4:
+            st.markdown("**Component Bias**")
+            st.markdown(bias_badge(state.get("component_bias", "NEUTRAL")), unsafe_allow_html=True)
+            st.caption(f"Trades today: {state.get('trades_today', 0)}/{state.get('max_trades', 2)}")
+
+        st.markdown("#### Institutional Component Health")
+        components: dict[str, float | None] = state.get("components") or {}
+        if components:
+            cols = st.columns(len(components))
+            for col, (symbol, pct) in zip(cols, components.items()):
+                col.markdown(component_block(symbol, pct), unsafe_allow_html=True)
+        else:
+            st.caption("Component quotes unavailable.")
+
+        position = state.get("position")
+        st.markdown("#### Active Position")
+        if position:
+            p1, p2, p3, p4, p5, p6 = st.columns(6)
+            option = f"{position.get('option_strike', '')}{position.get('option_type', '')}"
+            p1.metric("Direction", position.get("direction", "—"), delta=option or None, delta_color="off")
+            p2.metric("Entry (spot)", fmt(float(position.get("entry_price", 0))))
+            p3.metric("Target", fmt(float(position.get("target_price", 0))))
+            p4.metric("Stop-Loss", fmt(float(position.get("sl_price", 0))))
+            lots = int(position.get("lots_remaining", 1))
+            p5.metric(
+                "Lots Running",
+                f"{lots}/2",
+                delta="1 lot booked" if position.get("partial_booked") else "awaiting +60 book",
+                delta_color="off",
+            )
+            if spot is not None:
+                live_pnl = (
+                    spot - position["entry_price"]
+                    if position.get("direction") == "LONG"
+                    else position["entry_price"] - spot
+                )
+                p6.metric("Live P&L (pts)", f"{live_pnl:+.2f}")
+        else:
+            st.caption("Flat — no open position.")
+
+        updated = str(state.get("updated_at", ""))[:19].replace("T", " ")
+        flags = []
+        if state.get("entries_blocked"):
+            flags.append("entries blocked")
+        if state.get("paper_trading"):
+            flags.append("paper mode")
+        st.caption(f"Engine state updated {updated}" + (f" · {' · '.join(flags)}" if flags else ""))
+
+
+if auto_refresh:
+    time.sleep(REFRESH_SECONDS)
+    st.rerun()

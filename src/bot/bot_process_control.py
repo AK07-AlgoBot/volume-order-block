@@ -1,8 +1,8 @@
 """
-Stop and start trading_bot.py using trading_bot.lock (under src/bot/).
+Stop and start the AK07 engine (app/services/upstox_engine.py) via a lock file.
 
 Used by the dashboard API after Upstox credentials are saved so EC2 users do not need
-SSH to recycle the bot. Disable with DASHBOARD_RESTART_BOT_ON_SAVE=0.
+SSH to recycle the engine. Disable with DASHBOARD_RESTART_BOT_ON_SAVE=0.
 """
 
 from __future__ import annotations
@@ -17,8 +17,8 @@ from pathlib import Path
 
 # repo/src/bot/this_file.py
 REPO_ROOT = Path(__file__).resolve().parents[2]
-LOCK_FILE = REPO_ROOT / "src" / "bot" / "trading_bot.lock"
-BOT_SCRIPT = REPO_ROOT / "src" / "bot" / "trading_bot.py"
+LOCK_FILE = REPO_ROOT / "src" / "server" / "data" / "ak07_engine.lock"
+BOT_SCRIPT = REPO_ROOT / "src" / "server" / "src" / "app" / "services" / "upstox_engine.py"
 
 
 def _lock_pid() -> int | None:
@@ -46,18 +46,18 @@ def _pid_alive(pid: int) -> bool:
         return False
 
 
-def _looks_like_trading_bot(pid: int) -> bool:
+def _looks_like_engine(pid: int) -> bool:
     if os.name == "nt":
         return True
     try:
         raw = Path(f"/proc/{pid}/cmdline").read_bytes()
         joined = raw.replace(b"\x00", b" ")
-        return b"trading_bot.py" in joined
+        return b"upstox_engine" in joined
     except OSError:
         return False
 
 
-def terminate_trading_bot(timeout_sec: float = 20.0) -> dict:
+def terminate_engine(timeout_sec: float = 20.0) -> dict:
     pid = _lock_pid()
     if pid is None:
         return {"stopped": False, "pid": None, "note": "no lock file"}
@@ -67,8 +67,8 @@ def terminate_trading_bot(timeout_sec: float = 20.0) -> dict:
         except OSError:
             pass
         return {"stopped": False, "pid": pid, "note": "pid not running"}
-    if not _looks_like_trading_bot(pid):
-        return {"stopped": False, "pid": pid, "note": "lock pid does not look like trading_bot.py"}
+    if not _looks_like_engine(pid):
+        return {"stopped": False, "pid": pid, "note": "lock pid does not look like upstox_engine"}
 
     if os.name == "nt":
         subprocess.run(
@@ -110,10 +110,10 @@ def terminate_trading_bot(timeout_sec: float = 20.0) -> dict:
     return {"stopped": True, "pid": pid}
 
 
-def start_trading_bot_detached() -> dict:
+def start_engine_detached() -> dict:
     if not BOT_SCRIPT.is_file():
         return {"started": False, "error": f"Missing {BOT_SCRIPT}"}
-    exe = os.environ.get("TRADING_BOT_PYTHON", "").strip() or sys.executable
+    exe = os.environ.get("AK07_ENGINE_PYTHON", "").strip() or sys.executable
     kwargs: dict = {
         "cwd": str(REPO_ROOT),
         "stdin": subprocess.DEVNULL,
@@ -134,10 +134,19 @@ def start_trading_bot_detached() -> dict:
         proc = subprocess.Popen([exe, str(BOT_SCRIPT)], **kwargs)
     except OSError as e:
         return {"started": False, "error": str(e)}
+
+    # The engine does not maintain its own lock file; record the pid here so
+    # terminate_engine() can find it on the next credential save.
+    try:
+        LOCK_FILE.parent.mkdir(parents=True, exist_ok=True)
+        LOCK_FILE.write_text(json.dumps({"pid": proc.pid}), encoding="utf-8")
+    except OSError:
+        pass
     return {"started": True, "child_pid": proc.pid}
 
 
-def restart_trading_bot_after_credential_save() -> dict:
+def restart_engine_after_credential_save() -> dict:
+    """Restart the AK07 engine after Upstox credentials change."""
     flag = os.environ.get("DASHBOARD_RESTART_BOT_ON_SAVE", "1").strip().lower()
     if flag in ("0", "false", "no", "off"):
         return {"restarted": False, "skipped": "DASHBOARD_RESTART_BOT_ON_SAVE disabled"}
@@ -162,12 +171,17 @@ def restart_trading_bot_after_credential_save() -> dict:
         except Exception as e:
             return {"restarted": False, "mode": "systemd", "unit": unit, "error": str(e)}
 
-    stop = terminate_trading_bot()
+    stop = terminate_engine()
     time.sleep(0.75)
-    start = start_trading_bot_detached()
+    start = start_engine_detached()
     return {
         "restarted": bool(start.get("started")),
         "mode": "process",
         "terminate": stop,
         "spawn": start,
     }
+
+
+def restart_trading_bot_after_credential_save() -> dict:
+    """Compatibility alias for older callers."""
+    return restart_engine_after_credential_save()

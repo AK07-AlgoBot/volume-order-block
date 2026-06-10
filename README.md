@@ -1,142 +1,127 @@
-# AK07 Trading stack
+# AK07 Multi-Index Trading Stack
 
-EMA / Upstox trading bot, FastAPI backend, and React dashboard. **Single user: AK07.**
+AK07 is a Python-only, Redis-backed trading cockpit for Nifty 50, BankNifty, and Sensex.
 
-## Project layout
+## Production Modules
 
 ```text
-volume-order-block/
-├── src/
-│   ├── client/          # React + Vite UI
-│   ├── server/          # FastAPI app + runtime data (src/server/data/)
-│   ├── bot/               # trading_bot.py, archive_day.py, bot_process_control.py
-│   ├── lib/               # Shared Python: credentials, preferences, script constants
-│   └── scripts/           # Analysis & snapshot helpers
-├── configs/               # Docker, compose, env template, nginx examples
-├── docs/                  # QUICKSTART, setup, changelog, strategy notes
-├── .github/workflows/     # CI / deploy (must stay at repo root for GitHub)
-├── requirements.txt       # Bot + scripts (pandas, …)
-├── README.md
-└── start.ps1 / start.bat  # Local Windows launcher
+src/server/src/app/services/cache_manager.py       Redis cache + system bias
+src/server/src/mcp_server.py                       FastMCP context bridge
+src/server/src/app/services/upstox_engine.py       Upstox strategy/execution engine
+src/server/src/app/services/telegram_notifier.py   async Telegram alerts
+src/server/src/app/ui/dashboard.py                 Streamlit cockpit
+scripts/run_mock_cockpit.py                        local mock launcher
 ```
 
-`.github/` cannot be moved under `src/` — GitHub only runs workflows from the repository root.
+Legacy UI, broker, strategy sandbox, and backtest code has been removed.
 
-If you still have an old **`server/data/`** tree from before this layout, move it to **`src/server/data/`** so auth and logs keep working.
+## Quick Start: Mock Cockpit
 
-## Quick commands
+No Redis. No broker credentials. No Telegram.
 
-**Python / API**
-
-```bash
+```powershell
 pip install -r requirements.txt
-pip install -r src/server/requirements.txt
-set PYTHONPATH=src\server\src
-python -m uvicorn app.main:app --reload --host 127.0.0.1 --port 8080
+python scripts/run_mock_cockpit.py
 ```
 
-Use port **8080** so it matches a typical Kite Connect redirect (`http://127.0.0.1:8080/kite/callback`). Use another port only if your `.env` and Kite app redirect match it.
+Open `http://localhost:8501`.
 
-**UI**
+## Quick Start: Local Paper Stack
 
-```bash
-cd src/client && npm install && npm run dev
+```powershell
+pip install -r requirements.txt
+docker run -d --name ak07-redis -p 6379:6379 redis:7-alpine
+.\start.ps1
 ```
 
-Open **http://localhost:5173** (Vite proxies `/api` to the API on **8080** — start the API first).
+Endpoints:
 
-### Kite (Zerodha) credentials from the dashboard
+- Streamlit cockpit: `http://localhost:8501`
+- MCP bridge: `http://127.0.0.1:8765/mcp`
+- Minimal API: `http://127.0.0.1:8080/api/health`
 
-1. Start the API on **8080** and the client (`npm run dev` in `src/client`).
-2. Sign in at `/login` as **AK07** (password from `AK07_PASSWORD` / `users_auth.json`; reset with `python scripts/reset_dashboard_password.py` if needed).
-3. On the dashboard, scroll to **Broker credentials**.
-4. Choose **Zerodha (Kite)**.
-5. **Manual update (works without OAuth):** paste **Access token**, **API key**, and **API secret**, set base URL to `https://api.kite.trade` if empty, then **Save** and **Test connection**.
-6. **OAuth instead:** set `KITE_API_KEY`, `KITE_API_SECRET`, and `KITE_REDIRECT_URL` (must be exactly `http://127.0.0.1:8080/kite/callback` for local API) in repo root **`.env`**, restart uvicorn, then use **Connect with Zerodha**.
+Useful launch modes:
 
-If the UI will not load, save credentials from the shell: `python scripts/save_kite_credentials.py --help`.
-
-**Bot**
-
-```bash
-python src/bot/trading_bot.py
+```powershell
+.\start.ps1 -Mock
+.\start.ps1 -EngineOnly
+.\start.ps1 -DashboardOnly -Mock
+.\restart-api.ps1
 ```
 
-**Docker** (from repo root)
+## Runtime Data
+
+Upstox credentials:
+
+```text
+src/server/data/users/AK07/upstox_credentials.json
+```
+
+Template:
+
+```text
+src/server/templates/upstox_credentials.example.json
+```
+
+Performance archives:
+
+```text
+src/server/src/app/archive/performance_review_<YYYY-MM-DD>.json
+```
+
+## Docker
 
 ```bash
-copy configs\.env.example .env   # then edit .env
+cp configs/.env.example .env
 docker compose -f configs/docker-compose.yml up -d --build
 ```
 
-- **API** image: `src/server`, `src/lib`, `src/bot` under `/app`; data volume → `/app/src/server/data`.
-- **Web** image: static UI + nginx proxy to the API (`web` publishes **8080**).
-- TLS for **https://ak07.in**: use host nginx → `127.0.0.1:8080`; see `configs/host-nginx-ak07.conf.example`.
+Services:
 
-## Auth & secrets
+- `redis`
+- `api`
+- `engine`
+- `mcp`
+- `cockpit`
 
-- Dashboard login: **AK07**; password seed **`AK07_PASSWORD`** only applies when **`src/server/data/users_auth.json`** is first created (see `users_store.py`). To **reset a forgotten password** locally, run **`python scripts/reset_dashboard_password.py`** or see **`docs/DASHBOARD_SETUP.md`**.
-- **`JWT_SECRET`**, **`BOT_API_TOKEN`**: set in `src/server/.env` (local API) or repo root **`.env`** (Docker).
+The cockpit is exposed on port `8501`; the host nginx example in `configs/host-nginx-ak07.conf.example` proxies `https://ak07.in` to that port.
 
-## Deploy (GitHub Actions)
+## EC2 Deploy
 
-Push branch **`AK07`** runs `.github/workflows/deploy-ec2.yml`. Secrets: `EC2_HOST`, `EC2_USER`, `EC2_SSH_KEY`, `DEPLOY_PATH`. On the server, use repo root **`.env`** and:
+First-time server setup:
 
-`docker compose -f configs/docker-compose.yml up -d`
+```bash
+sudo apt-get update
+sudo apt-get install -y git docker.io docker-compose-plugin
+sudo usermod -aG docker "$USER"
+```
 
-## Deploy (Option B — SSH from your PC)
+Log out/in, then:
 
-**Do not commit private keys** (`.pem`, `id_rsa`, etc.) to git.
+```bash
+git clone <repo-url> ~/volume-order-block
+cd ~/volume-order-block
+cp configs/.env.example .env
+nano .env
+chmod +x configs/deploy-ec2.sh
+./configs/deploy-ec2.sh
+```
 
-1. On EC2 (once): install Docker + Compose + Git; clone this repo to e.g. `/home/ubuntu/volume-order-block`; checkout **`AK07`**; copy **`configs/.env.example`** to repo root **`.env`** and set secrets.
-2. From Windows (repo root), after pushing your latest commits to `origin`:
+Deploy later from Windows:
 
 ```powershell
-.\configs\deploy-manual-ec2.ps1 -Ec2Host "YOUR_PUBLIC_IP_OR_DNS" -KeyPath "C:\Users\pavan\arun\id_rsa"
+.\configs\deploy-manual-ec2.ps1 -Ec2Host "ak07.in" -KeyPath "C:\Users\pavan\arun\id_rsa"
 ```
 
-Adjust **`-Ec2User`** and **`-RemotePath`** if your server layout differs.
-
-## Runtime data persistence (EC2 + Docker)
-
-- Runtime trading data (`orders.log`, `paper_orders.log`, archives, state) is stored in the Docker volume mounted at `/app/src/server/data` inside containers.
-- On this server, that volume maps to host path: `/var/lib/docker/volumes/configs_ak07_server_data/_data`.
-- Data written there is persistent across container restarts/rebuilds (it is not lost unless the volume is deleted).
-
-### Sync old archive data into the live Docker volume
-
-If you have old archive folders in `/root/AK07-archive`, sync them into the active API data volume:
+Reset AK07 password on EC2:
 
 ```bash
-mkdir -p /var/lib/docker/volumes/configs_ak07_server_data/_data/users/AK07/archive
-rsync -a /root/AK07-archive/ /var/lib/docker/volumes/configs_ak07_server_data/_data/users/AK07/archive/
-chmod -R a+rX /var/lib/docker/volumes/configs_ak07_server_data/_data/users/AK07/archive
+docker compose -p ak07 -f configs/docker-compose.yml exec api \
+  python scripts/reset_dashboard_password.py -p "NewPassword"
 ```
 
-### Restart commands
+## More
 
-Quick restart (pick up new runtime data/log files):
+See `docs/AK07_OPERATIONS.md` for day-to-day operation and scheduling.
 
-`cl``bash
-cd /root/volume-order-block
-docker compose -f configs/docker-compose.yml restart api bot
-```
-
-Rebuild and restart after code changes:
-
-```bash
-cd /root/volume-order-block
-git checkout AK07
-git pull origin AK07
-docker compose -f configs/docker-compose.yml up -d --build web api bot
-```
-
-## More docs
-
-- `docs/QUICKSTART.md` — short checklist  
-- `docs/DASHBOARD_SETUP.md` — local dashboard setup  
-- `docs/STRATEGY_LOGIC.md`, `docs/CHANGELOG.md`
-
-## License
-
-MIT — use at your own risk. Trading involves financial risk.
+Trading involves financial risk. Use paper mode until live behavior is verified during market hours.

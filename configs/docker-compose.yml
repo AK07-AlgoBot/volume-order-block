@@ -1,9 +1,21 @@
 # Run from repository root:
 #   docker compose -f configs/docker-compose.yml up -d --build
-#
-# Copy configs/.env.example to the repo root as `.env` (compose loads ../.env from this file location).
+# Copy configs/.env.example to repo root as `.env` before first deploy.
 
 services:
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    volumes:
+      - ak07_redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    networks:
+      - ak07
+
   api:
     build:
       context: ..
@@ -12,45 +24,91 @@ services:
     env_file:
       - ../.env
     environment:
+      PYTHONUNBUFFERED: "1"
       PYTHONPATH: /app/src/server/src
       DASHBOARD_RESTART_BOT_ON_SAVE: ${DASHBOARD_RESTART_BOT_ON_SAVE:-0}
+      REDIS_HOST: redis
     volumes:
       - ak07_server_data:/app/src/server/data
     expose:
       - "8000"
+    ports:
+      - "8080:8000"
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=3).read()"]
+      interval: 20s
+      timeout: 5s
+      retries: 5
     networks:
       - ak07
 
-  # Shares ak07_server_data with api so orders.log and credentials live in one place.
-  bot:
+  engine:
     build:
       context: ..
       dockerfile: configs/docker/Dockerfile.api
-    # Bot exits cleanly at configured daily shutdown; avoid auto-restart loops.
-    restart: "no"
-    command: ["python", "-u", "src/bot/trading_bot.py"]
+    restart: unless-stopped
+    command: ["python", "-u", "src/server/src/app/services/upstox_engine.py"]
     env_file:
       - ../.env
     environment:
-      DASHBOARD_API_BASE: http://api:8000
+      PYTHONUNBUFFERED: "1"
+      PYTHONPATH: /app/src/server/src
+      REDIS_HOST: redis
     volumes:
       - ak07_server_data:/app/src/server/data
     depends_on:
-      - api
+      redis:
+        condition: service_healthy
     networks:
       - ak07
 
-  web:
+  mcp:
     build:
       context: ..
-      dockerfile: configs/docker/Dockerfile.ui
-      args:
-        VITE_DASHBOARD_API_BASE: ""
+      dockerfile: configs/docker/Dockerfile.api
     restart: unless-stopped
+    command: ["python", "-u", "src/server/src/mcp_server.py", "--host", "0.0.0.0", "--port", "8765"]
+    env_file:
+      - ../.env
+    environment:
+      PYTHONUNBUFFERED: "1"
+      PYTHONPATH: /app/src/server/src
+      REDIS_HOST: redis
     ports:
-      - "8080:80"
+      - "8765:8765"
     depends_on:
-      - api
+      redis:
+        condition: service_healthy
+    networks:
+      - ak07
+
+  cockpit:
+    build:
+      context: ..
+      dockerfile: configs/docker/Dockerfile.api
+    restart: unless-stopped
+    command: ["python", "-m", "streamlit", "run", "src/server/src/app/ui/dashboard.py", "--server.address", "0.0.0.0", "--server.port", "8501", "--server.headless", "true", "--browser.gatherUsageStats", "false"]
+    env_file:
+      - ../.env
+    environment:
+      PYTHONUNBUFFERED: "1"
+      PYTHONPATH: /app/src/server/src
+      REDIS_HOST: redis
+    ports:
+      - "8501:8501"
+    depends_on:
+      redis:
+        condition: service_healthy
+      engine:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8501/healthz', timeout=3).read()"]
+      interval: 20s
+      timeout: 5s
+      retries: 5
     networks:
       - ak07
 
@@ -60,3 +118,4 @@ networks:
 
 volumes:
   ak07_server_data:
+  ak07_redis_data:

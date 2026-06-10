@@ -1,5 +1,6 @@
 # Required secrets: EC2_HOST, EC2_USER, EC2_SSH_KEY, DEPLOY_PATH
-# On the server: copy configs/.env.example to repo root `.env` before first deploy.
+# First server setup: clone repo to DEPLOY_PATH, copy configs/.env.example to `.env`,
+# edit secrets, then run configs/deploy-ec2.sh once to verify Docker.
 
 name: Deploy to EC2
 
@@ -10,6 +11,10 @@ on:
 
 permissions:
   contents: read
+
+concurrency:
+  group: ak07-ec2-deploy
+  cancel-in-progress: true
 
 jobs:
   deploy:
@@ -30,6 +35,6 @@ jobs:
             cd "${{ secrets.DEPLOY_PATH }}"
             git fetch origin
             git checkout AK07
-            git pull origin AK07
-            docker compose -f configs/docker-compose.yml build --pull
-            docker compose -f configs/docker-compose.yml up -d
+            git pull --ff-only origin AK07
+            chmod +x configs/deploy-ec2.sh
+            DEPLOY_BRANCH=AK07 configs/deploy-ec2.sh "${{ secrets.DEPLOY_PATH }}"

@@ -1,5 +1,6 @@
-# Stop whatever is listening on port 8000, then start the dashboard API with --reload.
+# Stop whatever is listening on the minimal AK07 API port, then start FastAPI.
 # Run from repo root:  .\restart-api.ps1
+param([int]$Port = 8080)
 
 $ErrorActionPreference = "Continue"
 $repoRoot = $PSScriptRoot
@@ -32,14 +33,14 @@ function Stop-ListenerOnPort {
     }
 }
 
-Stop-ListenerOnPort -Port 8000
+Stop-ListenerOnPort -Port $Port
 Start-Sleep -Seconds 2
 
-Write-Host "Starting uvicorn on http://0.0.0.0:8000 (reload enabled)..."
+Write-Host "Starting AK07 minimal API on http://127.0.0.1:$Port ..."
 $cmd = @"
 Set-Location '$repoRoot'
 `$env:PYTHONPATH = '$serverSrc'
-python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+python -m uvicorn app.main:app --host 127.0.0.1 --port $Port
 "@
 $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($cmd))
 Start-Process powershell -ArgumentList @(
@@ -48,4 +49,4 @@ Start-Process powershell -ArgumentList @(
     "-EncodedCommand", $encoded
 ) -WorkingDirectory $repoRoot
 
-Write-Host "New API window opened. Health: http://127.0.0.1:8000/api/health"
+Write-Host "New API window opened. Health: http://127.0.0.1:$Port/api/health"

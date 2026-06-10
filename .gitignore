@@ -11,10 +11,10 @@ ENV/
 dist/
 build/
 
-# Trading bot / runtime logs (anywhere)
+# AK07 runtime logs/state (anywhere)
 trading_state.json
-trading_bot.lock
-trading_bot.log
+ak07_engine.lock
+engine-scheduler.log
 trading_log.txt
 live_status.log
 orders.log
@@ -23,24 +23,17 @@ market_status.log
 
 # Server runtime data (under src/server/)
 src/server/data/users/
-src/server/data/kite_oauth_pending/
 src/server/data/cache/
 src/server/data/logs/
 src/server/data/users_auth.json
 src/server/.env
-src/client/.env
 
 # Old paths (pre-restructure)
 server/data/
-client/node_modules/
-client/dist/
 
-# Old files
+# Old files / local backups
 old/
 backup/
-archive/*
-!archive/unused/
-!archive/unused/**
 
 # IDE
 .vscode/
@@ -55,8 +48,6 @@ Thumbs.db
 
 # Local tooling/build
 .tools/
-src/client/node_modules/
-src/client/dist/
 
 # Sensitive
 config.json
