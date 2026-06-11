@@ -814,7 +814,7 @@ class AK07Engine:
             {"at": now.isoformat(), "bias": state.comp_bias, "components": dict(state.changes)}
         )
 
-        self._manage_position(state, system_bias, now)
+        self._manage_position(cfg.code, state, system_bias, now)
 
         if (
             state.spot is not None
@@ -958,55 +958,62 @@ class AK07Engine:
             timestamp=now.strftime("%Y-%m-%d %H:%M:%S IST"),
         )
 
-    def _manage_position(self, state: IndexState, system_bias: str, now: datetime) -> None:
+    def _manage_position(
+        self,
+        index_name: str,
+        state: IndexState,
+        system_bias: str,
+        now: datetime,
+    ) -> None:
+        """Manage open position for one index (partial book, target, stop-loss)."""
         pos = state.position
         if pos is None or state.spot is None:
             return
         spot = state.spot
         favorable = (spot - pos.entry_price) if pos.direction == "LONG" else (pos.entry_price - spot)
 
-        # 2-lots rule: book 1 lot at half target, or earlier if a backend
-        # blocker fires while the trade is in profit (kill switch handled by
-        # tick(); here the blocker is the AI bias flipping against us).
+        # 2-lots rule: book 1 lot at half target, or earlier if AI bias flips against us.
         if not pos.partial_booked and pos.lots_remaining == INITIAL_LOTS:
             bias_opposed = (pos.direction == "LONG" and system_bias == "SHORT_ONLY") or (
                 pos.direction == "SHORT" and system_bias == "LONG_ONLY"
             )
             if favorable >= PARTIAL_BOOK_POINTS:
-                self._book_partial(state, spot, "HALF_TARGET_+60", now)
+                self._book_partial(index_name, state, spot, "HALF_TARGET_+60", now)
             elif bias_opposed and favorable > 0:
-                self._book_partial(state, spot, f"BACKEND_BLOCKER_{system_bias}", now)
+                self._book_partial(index_name, state, spot, f"BACKEND_BLOCKER_{system_bias}", now)
             pos = state.position
             if pos is None:
                 return
 
         if pos.direction == "LONG":
             if spot >= pos.target_price:
-                self._exit_position(state, spot, "TARGET", now)
+                self._exit_position(index_name, state, spot, "TARGET", now)
             elif spot <= pos.sl_price:
-                self._exit_position(state, spot, "STOP_LOSS", now)
+                self._exit_position(index_name, state, spot, "STOP_LOSS", now)
         else:
             if spot <= pos.target_price:
-                self._exit_position(state, spot, "TARGET", now)
+                self._exit_position(index_name, state, spot, "TARGET", now)
             elif spot >= pos.sl_price:
-                self._exit_position(state, spot, "STOP_LOSS", now)
+                self._exit_position(index_name, state, spot, "STOP_LOSS", now)
 
-    def _book_partial(self, state: IndexState, spot: float, reason: str, now: datetime) -> None:
+    def _book_partial(
+        self, index_name: str, state: IndexState, spot: float, reason: str, now: datetime
+    ) -> None:
         """Fire a market order for 1 lot, leaving 1 lot to run to target/SL."""
         pos = state.position
         if pos is None or pos.partial_booked:
             return
         if pos.instrument_key:  # options are held long; partial book is a SELL
             if not self.client.place_market_order(pos.instrument_key, pos.lot_size, "SELL"):
-                logger.error("[%s] partial book order FAILED; will retry next tick", pos.index_code)
+                logger.error("[%s] partial book order FAILED; will retry next tick", index_name)
                 return
         pnl = (spot - pos.entry_price) if pos.direction == "LONG" else (pos.entry_price - spot)
         pos.lots_remaining -= 1
         pos.partial_booked = True
-        self.realized_pnl_points[pos.index_code] += pnl  # 1 lot booked at this many points
+        self.realized_pnl_points[index_name] += pnl  # 1 lot booked at this many points
         self._record_event(
             now,
-            pos.index_code,
+            index_name,
             "PARTIAL_BOOK",
             {
                 "direction": pos.direction,
@@ -1019,7 +1026,7 @@ class AK07Engine:
         )
         logger.info(
             "[%s] PARTIAL BOOK 1 lot @ %.2f (%s, %+.2f pts); 1 lot runs to target/SL",
-            pos.index_code, spot, reason, pnl,
+            index_name, spot, reason, pnl,
         )
         telegram_notifier.notify_trade_exit(
             index_name=f"{state.config.display} (1 of 2 lots)",
@@ -1030,17 +1037,19 @@ class AK07Engine:
             timestamp=now.strftime("%Y-%m-%d %H:%M:%S IST"),
         )
 
-    def _exit_position(self, state: IndexState, exit_price: float, reason: str, now: datetime) -> None:
+    def _exit_position(
+        self, index_name: str, state: IndexState, exit_price: float, reason: str, now: datetime
+    ) -> None:
         pos = state.position
         if pos is None:
             return
         if pos.instrument_key:  # close out whatever is left (options held long -> SELL)
             self.client.place_market_order(pos.instrument_key, pos.quantity, "SELL")
         pnl = (exit_price - pos.entry_price) if pos.direction == "LONG" else (pos.entry_price - exit_price)
-        self.realized_pnl_points[pos.index_code] += pnl * pos.lots_remaining
+        self.realized_pnl_points[index_name] += pnl * pos.lots_remaining
         self._record_event(
             now,
-            pos.index_code,
+            index_name,
             "EXIT",
             {
                 "direction": pos.direction,
@@ -1054,7 +1063,7 @@ class AK07Engine:
         )
         logger.info(
             "[%s] %s EXIT @ %.2f (%s, %+.2f pts, %d lot(s))",
-            state.config.code, pos.direction, exit_price, reason, pnl, pos.lots_remaining,
+            index_name, pos.direction, exit_price, reason, pnl, pos.lots_remaining,
         )
         telegram_notifier.notify_trade_exit(
             index_name=f"{state.config.display} ({pos.lots_remaining} lot(s))",
@@ -1071,7 +1080,7 @@ class AK07Engine:
         for state in self.states.values():
             if state.position is not None:
                 exit_price = state.spot if state.spot is not None else state.position.entry_price
-                self._exit_position(state, exit_price, reason, now)
+                self._exit_position(state.config.code, state, exit_price, reason, now)
 
     # -- session log + archival ------------------------------------------------
     def _record_event(self, now: datetime, index_code: str, event: str, detail: dict[str, Any]) -> None:
