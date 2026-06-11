@@ -242,15 +242,7 @@ class UpstoxClient:
         return bool(token)
 
     def request_daily_access_token(self) -> bool:
-        """Request a fresh V3 access token using the stored App Client ID/Secret.
-
-        Uses the Upstox 'Access Token Request' API for API-only (indie) apps:
-        POST /v3/login/auth/token/request/{client_id} with the client secret -
-        no browser interaction. If Upstox returns the token inline it is
-        persisted to the credentials store immediately; otherwise Upstox pushes
-        it to the app's notifier webhook, which writes the same store, so we
-        re-read from disk either way. Fail-safe: never raises.
-        """
+        """Request a fresh V3 access token using the stored App Client ID/Secret."""
         try:
             from upstox_credentials_store import persist_credentials_for_user  # noqa: PLC0415
 
@@ -289,11 +281,11 @@ class UpstoxClient:
                 logger.error(
                     "Upstox V3 token request failed: HTTP %d %s",
                     response.status_code,
-                    (response.text or "")[:300],
+                    str(response.text or "")[:300],
                 )
             return self.refresh_access_token_from_disk()
-        except Exception:  # noqa: BLE001 - token automation must never kill the engine
-            logger.exception("Unexpected failure during daily token refresh")
+        except Exception as exc:  # Bound exception explicitly for debugging safely
+            logger.exception("Unexpected failure during daily token refresh: %s", exc)
             return False
 
     def _get(self, url: str, params: dict[str, Any] | None = None) -> dict[str, Any] | None:
@@ -368,11 +360,7 @@ class UpstoxClient:
     def get_itm_option_contract(
         self, instrument_key: str, spot: float, direction: str
     ) -> dict[str, Any] | None:
-        """Exact instrument for the closest ITM contract from the weekly chain.
-
-        LONG -> CE with strike closest to (spot - 50); SHORT -> PE with strike
-        closest to (spot + 50). Returns {instrument_key, strike, option_type}.
-        """
+        """Exact instrument for the closest ITM contract from the weekly chain."""
         rows = self._fetch_nearest_expiry_chain(instrument_key)
         if not rows:
             return None
@@ -422,7 +410,7 @@ class UpstoxClient:
         return best_call[1], best_put[1]
 
     def place_market_order(self, instrument_key: str, quantity: int, transaction_type: str) -> bool:
-        """Market order via the standard then HFT endpoint (pattern from Upstox order API)."""
+        """Market order via the standard then HFT endpoint."""
         payload = {
             "quantity": quantity,
             "product": "I",
@@ -477,7 +465,6 @@ class MockUpstoxClient(UpstoxClient):
         if code is None:
             return None
         call_wall, put_floor = self._walls[code]
-        # Drift spot into the support pocket after a few ticks (mock verification path).
         if self._tick >= 3:
             return float(put_floor + 10)
         return float((call_wall + put_floor) / 2)
@@ -604,12 +591,7 @@ def detect_setup(
     comp_bias: str,
     system_bias: str,
 ) -> str | None:
-    """Evaluate SETUP 1 (LONG) and SETUP 2 (SHORT) on a closed 5-min candle.
-
-    Returns "LONG", "SHORT", or None. Confluence: a LONG is aborted when the
-    heavyweights are melting down (BEARISH) and a SHORT when they are ripping
-    (BULLISH). The AI system bias (Redis, via MCP) gates direction on top.
-    """
+    """Evaluate SETUP 1 (LONG) and SETUP 2 (SHORT) on a closed 5-min candle."""
     spot = candle["close"]
 
     in_support_pocket = put_floor <= spot <= put_floor + SUPPORT_POCKET_POINTS
@@ -639,14 +621,14 @@ def detect_setup(
 @dataclass
 class Position:
     index_code: str
-    direction: str          # LONG | SHORT (index view; the holding is a bought option)
-    entry_price: float      # index spot at entry; targets/SL are spot-based
+    direction: str          # LONG | SHORT
+    entry_price: float      # index spot at entry
     target_price: float
     sl_price: float
     lot_size: int
-    lots_remaining: int     # starts at INITIAL_LOTS, drops to 1 after the partial book
+    lots_remaining: int     # starts at INITIAL_LOTS, drops to 1 after partial book
     partial_booked: bool
-    instrument_key: str     # ITM option contract ("" in paper mode)
+    instrument_key: str     # ITM option contract
     option_strike: int
     option_type: str        # CE | PE
     opened_at: str
@@ -676,7 +658,7 @@ class IndexState:
 
 
 def reset_index_live_cache(state: IndexState) -> None:
-    """Drop stale in-memory fields for one index; OI walls repopulate on next chain pull."""
+    """Drop stale in-memory fields for one index."""
     state.spot = None
     state.call_wall = None
     state.put_floor = None
@@ -696,7 +678,6 @@ class AK07Engine:
             code: IndexState(config=cfg) for code, cfg in INDEX_CONFIGS.items()
         }
         self.session_entries_blocked = False
-        # Session buffers, archived at 15:30 IST and reset on day roll.
         self.trade_log: list[dict[str, Any]] = []
         self.spot_track: dict[str, list[dict[str, Any]]] = {c: [] for c in INDEX_CONFIGS}
         self.sentiment_track: dict[str, list[dict[str, Any]]] = {c: [] for c in INDEX_CONFIGS}
@@ -705,15 +686,14 @@ class AK07Engine:
         self.archived_day = ""
         logger.info("AK07 engine initialized (paper_trading=%s)", PAPER_TRADING)
 
-    # -- lifecycle ----------------------------------------------------------
     def run(self) -> None:
         logger.info("AK07 engine loop starting (poll every %.0fs)", POLL_SECONDS)
         while True:
             started = time.monotonic()
             try:
                 self.tick()
-            except Exception:  # noqa: BLE001 - the loop must survive anything
-                logger.exception("Engine tick failed; continuing")
+            except Exception as exc:  # Bound for diagnostic safety
+                logger.exception("Engine tick failed; continuing: %s", exc)
             time.sleep(max(1.0, POLL_SECONDS - (time.monotonic() - started)))
 
     def tick(self) -> None:
@@ -762,7 +742,7 @@ class AK07Engine:
             self.session_entries_blocked = False
 
     def _daily_session_init(self, now: datetime) -> None:
-        """09:15 IST automation: V3 token refresh + Redis pool warm-up, once a day."""
+        """09:15 IST automation: V3 token refresh + Redis pool warm-up."""
         today = now.date().isoformat()
         if self.token_refresh_day == today or now.time() < TOKEN_REFRESH_TIME:
             return
@@ -780,7 +760,6 @@ class AK07Engine:
             f"Redis pool {'warm' if redis_ok else 'UNREACHABLE'}.",
         )
 
-    # -- per-index pipeline --------------------------------------------------
     def _process_index(self, state: IndexState, system_bias: str, now: datetime) -> None:
         cfg = state.config
 
@@ -800,8 +779,8 @@ class AK07Engine:
                 if walls:
                     state.call_wall, state.put_floor = walls
                 state.walls_refreshed_at = time.monotonic()
-        except Exception:
-            logger.exception("[%s] live V3 feed read failed; resetting index cache", cfg.code)
+        except Exception as exc:
+            logger.exception("[%s] live V3 feed read failed; resetting index cache: %s", cfg.code, exc)
             reset_index_live_cache(state)
             walls = self.client.get_oi_walls(cfg.spot_instrument_key)
             if walls:
@@ -866,16 +845,16 @@ class AK07Engine:
             return
         state.last_candle_ts = candle["timestamp"]
 
-        direction = detect_setup(
-            candle,
-            state.call_wall,  # type: ignore[arg-type]
-            state.put_floor,  # type: ignore[arg-type]
-            state.comp_bias,
-            system_bias,
-        )
-        if direction is None:
-            return
-        self._enter_trade(state, direction, candle["close"], now)
+        if state.call_wall is not None and state.put_floor is not None:
+            direction = detect_setup(
+                candle,
+                state.call_wall,
+                state.put_floor,
+                state.comp_bias,
+                system_bias,
+            )
+            if direction is not None:
+                self._enter_trade(state, direction, candle["close"], now)
 
     def _enter_trade(self, state: IndexState, direction: str, entry: float, now: datetime) -> None:
         cfg = state.config
@@ -884,13 +863,11 @@ class AK07Engine:
         else:
             target, sl = entry - TARGET_POINTS, entry + STOP_LOSS_POINTS
 
-        # Resolve the closest ITM weekly contract from the live chain.
         contract = self.client.get_itm_option_contract(cfg.spot_instrument_key, entry, direction)
         if contract is None:
             if not PAPER_TRADING:
                 logger.error("[%s] could not resolve ITM contract; entry aborted", cfg.code)
                 return
-            # Paper fallback: synthesize the ITM strike so dry runs still work.
             desired = entry - ITM_OFFSET_POINTS if direction == "LONG" else entry + ITM_OFFSET_POINTS
             strike = int(round(desired / cfg.strike_step) * cfg.strike_step)
             contract = {
@@ -908,7 +885,7 @@ class AK07Engine:
             logger.info(
                 "[%s] PAPER %s entry @ %.2f via %d %s%s (2 lots)",
                 cfg.code, direction, entry, contract["strike"], contract["option_type"],
-                f" [{contract['instrument_key']}]" if contract["instrument_key"] else "",
+                f" [{contract['instrument_key']}]" if contract['instrument_key'] else "",
             )
 
         state.position = Position(
@@ -960,7 +937,7 @@ class AK07Engine:
 
     def _manage_position(
         self,
-        index_name: str,
+        index_code: str,
         state: IndexState,
         system_bias: str,
         now: datetime,
@@ -972,48 +949,47 @@ class AK07Engine:
         spot = state.spot
         favorable = (spot - pos.entry_price) if pos.direction == "LONG" else (pos.entry_price - spot)
 
-        # 2-lots rule: book 1 lot at half target, or earlier if AI bias flips against us.
         if not pos.partial_booked and pos.lots_remaining == INITIAL_LOTS:
             bias_opposed = (pos.direction == "LONG" and system_bias == "SHORT_ONLY") or (
                 pos.direction == "SHORT" and system_bias == "LONG_ONLY"
             )
             if favorable >= PARTIAL_BOOK_POINTS:
-                self._book_partial(index_name, state, spot, "HALF_TARGET_+60", now)
+                self._book_partial(index_code, state, spot, "HALF_TARGET_+60", now)
             elif bias_opposed and favorable > 0:
-                self._book_partial(index_name, state, spot, f"BACKEND_BLOCKER_{system_bias}", now)
+                self._book_partial(index_code, state, spot, f"BACKEND_BLOCKER_{system_bias}", now)
             pos = state.position
             if pos is None:
                 return
 
         if pos.direction == "LONG":
             if spot >= pos.target_price:
-                self._exit_position(index_name, state, spot, "TARGET", now)
+                self._exit_position(index_code, state, spot, "TARGET", now)
             elif spot <= pos.sl_price:
-                self._exit_position(index_name, state, spot, "STOP_LOSS", now)
+                self._exit_position(index_code, state, spot, "STOP_LOSS", now)
         else:
             if spot <= pos.target_price:
-                self._exit_position(index_name, state, spot, "TARGET", now)
+                self._exit_position(index_code, state, spot, "TARGET", now)
             elif spot >= pos.sl_price:
-                self._exit_position(index_name, state, spot, "STOP_LOSS", now)
+                self._exit_position(index_code, state, spot, "STOP_LOSS", now)
 
     def _book_partial(
-        self, index_name: str, state: IndexState, spot: float, reason: str, now: datetime
+        self, index_code: str, state: IndexState, spot: float, reason: str, now: datetime
     ) -> None:
         """Fire a market order for 1 lot, leaving 1 lot to run to target/SL."""
         pos = state.position
         if pos is None or pos.partial_booked:
             return
-        if pos.instrument_key:  # options are held long; partial book is a SELL
+        if pos.instrument_key:
             if not self.client.place_market_order(pos.instrument_key, pos.lot_size, "SELL"):
-                logger.error("[%s] partial book order FAILED; will retry next tick", index_name)
+                logger.error("[%s] partial book order FAILED; will retry next tick", index_code)
                 return
         pnl = (spot - pos.entry_price) if pos.direction == "LONG" else (pos.entry_price - spot)
         pos.lots_remaining -= 1
         pos.partial_booked = True
-        self.realized_pnl_points[index_name] += pnl  # 1 lot booked at this many points
+        self.realized_pnl_points[index_code] += pnl
         self._record_event(
             now,
-            index_name,
+            index_code,
             "PARTIAL_BOOK",
             {
                 "direction": pos.direction,
@@ -1026,7 +1002,7 @@ class AK07Engine:
         )
         logger.info(
             "[%s] PARTIAL BOOK 1 lot @ %.2f (%s, %+.2f pts); 1 lot runs to target/SL",
-            index_name, spot, reason, pnl,
+            index_code, spot, reason, pnl,
         )
         telegram_notifier.notify_trade_exit(
             index_name=f"{state.config.display} (1 of 2 lots)",
@@ -1038,18 +1014,18 @@ class AK07Engine:
         )
 
     def _exit_position(
-        self, index_name: str, state: IndexState, exit_price: float, reason: str, now: datetime
+        self, index_code: str, state: IndexState, exit_price: float, reason: str, now: datetime
     ) -> None:
         pos = state.position
         if pos is None:
             return
-        if pos.instrument_key:  # close out whatever is left (options held long -> SELL)
+        if pos.instrument_key:
             self.client.place_market_order(pos.instrument_key, pos.quantity, "SELL")
         pnl = (exit_price - pos.entry_price) if pos.direction == "LONG" else (pos.entry_price - exit_price)
-        self.realized_pnl_points[index_name] += pnl * pos.lots_remaining
+        self.realized_pnl_points[index_code] += pnl * pos.lots_remaining
         self._record_event(
             now,
-            index_name,
+            index_code,
             "EXIT",
             {
                 "direction": pos.direction,
@@ -1063,7 +1039,7 @@ class AK07Engine:
         )
         logger.info(
             "[%s] %s EXIT @ %.2f (%s, %+.2f pts, %d lot(s))",
-            index_name, pos.direction, exit_price, reason, pnl, pos.lots_remaining,
+            index_code, pos.direction, exit_price, reason, pnl, pos.lots_remaining,
         )
         telegram_notifier.notify_trade_exit(
             index_name=f"{state.config.display} ({pos.lots_remaining} lot(s))",
@@ -1082,7 +1058,6 @@ class AK07Engine:
                 exit_price = state.spot if state.spot is not None else state.position.entry_price
                 self._exit_position(state.config.code, state, exit_price, reason, now)
 
-    # -- session log + archival ------------------------------------------------
     def _record_event(self, now: datetime, index_code: str, event: str, detail: dict[str, Any]) -> None:
         entry = {"at": now.isoformat(), "index": index_code, "event": event, **detail}
         self.trade_log.append(entry)
@@ -1128,7 +1103,7 @@ class AK07Engine:
                 encoding="utf-8",
             )
             try:
-                os.chmod(out_path, 0o600)  # best-effort on Windows
+                os.chmod(out_path, 0o600)
             except OSError:
                 pass
             logger.info("Performance review archived: %s", out_path)
@@ -1137,10 +1112,9 @@ class AK07Engine:
                 f"Session archived to {out_path.name} "
                 f"(total {payload['pnl_points_total']:+.2f} pts, {len(self.trade_log)} events).",
             )
-        except Exception:  # noqa: BLE001 - archival must never crash the engine
-            logger.exception("Performance archival failed")
+        except Exception as exc:
+            logger.exception("Performance archival failed: %s", exc)
 
-    # -- housekeeping ---------------------------------------------------------
     def _roll_trade_day(self, now: datetime) -> None:
         today = now.date().isoformat()
         for state in self.states.values():
@@ -1196,7 +1170,6 @@ class AK07Engine:
             {"at": now.isoformat(), "paper_trading": PAPER_TRADING},
             ttl_seconds=60,
         )
-        # Keep the Module 1/2 single-snapshot contract alive with the primary index.
         nifty = self.states["NIFTY"]
         if (
             nifty.spot is not None
@@ -1215,15 +1188,10 @@ class AK07Engine:
 
 
 # ---------------------------------------------------------------------------
-# Emergency square-off (callable from the dashboard kill switch, engine-free)
+# Emergency square-off (callable from dashboard kill switch, engine-free)
 # ---------------------------------------------------------------------------
 def emergency_square_off_all() -> dict[str, str]:
-    """Engage the kill switch and fire market square-offs for every open position.
-
-    Reads open positions from Redis (published by the engine) and transmits
-    opposite-side market orders directly to the Upstox API, so it works even
-    if the engine process is wedged. Returns {index_code: outcome}.
-    """
+    """Engage the kill switch and fire market square-offs for every open position."""
     now = datetime.now(IST).isoformat()
     cache_manager.set_json(
         cache_manager.KILL_SWITCH_KEY, {"engaged": True, "at": now, "source": "dashboard"}
@@ -1240,11 +1208,10 @@ def emergency_square_off_all() -> dict[str, str]:
             if not instrument:
                 results[code] = "paper position flagged for engine square-off"
                 continue
-            # Positions are bought option contracts (CE/PE), so square-off is always a SELL.
             ok = client.place_market_order(instrument, int(pos.get("quantity", 0)), "SELL")
             results[code] = "square-off order sent" if ok else "ORDER FAILED - check broker"
-        except Exception:  # noqa: BLE001
-            logger.exception("Emergency square-off failed for %s", code)
+        except Exception as exc:
+            logger.exception("Emergency square-off failed for %s: %s", code, exc)
             results[code] = "ERROR - see engine logs"
     telegram_notifier.notify_system_event(
         "EMERGENCY KILL SWITCH", f"Cockpit kill switch engaged at {now}. Results: {results}"
