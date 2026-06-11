@@ -64,11 +64,11 @@ class SMCCRTInstrument:
     code: str
     display: str
     spot_instrument_key: str
-    mcx_search_query: str
     paper_only: bool
     crt_start: dtime
     baseline_spot: float
     tick_size: float
+    mcx_search_query: str = ""
 
 
 SMC_CRT_INSTRUMENTS: Final[dict[str, SMCCRTInstrument]] = {
@@ -76,7 +76,6 @@ SMC_CRT_INSTRUMENTS: Final[dict[str, SMCCRTInstrument]] = {
         code="NIFTY",
         display="Nifty 50",
         spot_instrument_key="NSE_INDEX|Nifty 50",
-        mcx_search_query="",
         paper_only=False,
         crt_start=CRT_SESSION_START,
         baseline_spot=23_100.0,
@@ -86,31 +85,31 @@ SMC_CRT_INSTRUMENTS: Final[dict[str, SMCCRTInstrument]] = {
         code="CRUDE",
         display="Crude Oil (MCX)",
         spot_instrument_key="",
-        mcx_search_query="CRUDEOIL",
         paper_only=True,
         crt_start=_parse_ist_time("SMC_CRT_CRUDE_CRT_START_IST", 9, 0),
         baseline_spot=6_820.0,
         tick_size=1.0,
+        mcx_search_query="CRUDEOIL",
     ),
     "GOLD": SMCCRTInstrument(
         code="GOLD",
         display="Gold (MCX)",
         spot_instrument_key="",
-        mcx_search_query="GOLD",
         paper_only=True,
         crt_start=_parse_ist_time("SMC_CRT_GOLD_CRT_START_IST", 9, 0),
         baseline_spot=72_450.0,
         tick_size=1.0,
+        mcx_search_query="GOLD",
     ),
     "SILVER": SMCCRTInstrument(
         code="SILVER",
         display="Silver (MCX)",
         spot_instrument_key="",
-        mcx_search_query="SILVER",
         paper_only=True,
         crt_start=_parse_ist_time("SMC_CRT_SILVER_CRT_START_IST", 9, 0),
         baseline_spot=85_200.0,
         tick_size=1.0,
+        mcx_search_query="SILVER",
     ),
 }
 
