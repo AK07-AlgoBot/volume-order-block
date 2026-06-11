@@ -65,6 +65,26 @@ services:
     networks:
       - ak07
 
+  smc_crt_engine:
+    build:
+      context: ..
+      dockerfile: configs/docker/Dockerfile.api
+    restart: unless-stopped
+    command: ["python", "-u", "src/server/src/app/services/smc_crt_engine.py"]
+    env_file:
+      - ../.env
+    environment:
+      PYTHONUNBUFFERED: "1"
+      PYTHONPATH: /app/src/server/src
+      REDIS_HOST: redis
+    volumes:
+      - ak07_server_data:/app/src/server/data
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks:
+      - ak07
+
   mcp:
     build:
       context: ..
@@ -103,6 +123,8 @@ services:
       redis:
         condition: service_healthy
       engine:
+        condition: service_started
+      smc_crt_engine:
         condition: service_started
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8501/healthz', timeout=3).read()"]

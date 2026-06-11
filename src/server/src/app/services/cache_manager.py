@@ -31,6 +31,8 @@ INDEX_STATE_KEY_TEMPLATE: Final[str] = "ak07:index_state:{index}"
 POSITIONS_KEY: Final[str] = "ak07:positions"
 KILL_SWITCH_KEY: Final[str] = "ak07:kill_switch"
 ENGINE_HEARTBEAT_KEY: Final[str] = "ak07:engine_heartbeat"
+SMC_CRT_STATE_KEY_TEMPLATE: Final[str] = "ak07:smc_crt_state:{symbol}"
+SMC_CRT_HEARTBEAT_KEY: Final[str] = "ak07:smc_crt_heartbeat"
 
 LIVE_STATE_TTL_SECONDS: Final[int] = 300
 

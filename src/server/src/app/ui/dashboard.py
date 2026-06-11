@@ -21,6 +21,7 @@ import streamlit as st
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from app.services import cache_manager
+from app.services.smc_crt_engine import SMC_CRT_INSTRUMENTS
 from app.services.upstox_engine import (
     INDEX_CONFIGS,
     emergency_square_off_all,
@@ -98,6 +99,93 @@ def fmt(value: float | int | None, decimals: int = 2) -> str:
     return f"{value:,.{decimals}f}" if isinstance(value, float) else f"{value:,}"
 
 
+def render_smc_crt_strategy_panel(symbol_code: str) -> None:
+    """Strategy Type 2 — SMC+CRT block (below AK07 Active Position)."""
+    st.markdown("---")
+    st.markdown("#### Strategy Type 2 — SMC + CRT")
+
+    smc = cache_manager.get_json(cache_manager.SMC_CRT_STATE_KEY_TEMPLATE.format(symbol=symbol_code))
+    smc_hb = cache_manager.get_json(cache_manager.SMC_CRT_HEARTBEAT_KEY)
+
+    if not smc and not smc_hb:
+        st.caption("SMC+CRT engine offline — start `smc_crt_engine` service or MOCK mode.")
+        return
+
+    if smc_hb:
+        end = smc_hb.get("session_end_ist", "23:30")
+        mode = "PAPER" if smc_hb.get("paper_trading") else "LIVE"
+        st.caption(f"SMC engine heartbeat {str(smc_hb.get('at', ''))[:19]} · session until {end} IST · {mode}")
+
+    if not smc:
+        st.info(f"No SMC state for {symbol_code} yet.")
+        return
+
+    cfg = SMC_CRT_INSTRUMENTS.get(symbol_code)
+    if cfg and cfg.paper_only:
+        st.info(f"Paper-only instrument — simulated feed until live MCX keys are wired.")
+
+    s1, s2, s3, s4, s5 = st.columns(5)
+    s1.metric("CRH (range high)", fmt(smc.get("crh")))
+    s2.metric("CRM (equilibrium)", fmt(smc.get("crm")))
+    s3.metric("CRL (range low)", fmt(smc.get("crl")))
+    s4.metric("Spot", fmt(float(smc["spot"])) if smc.get("spot") is not None else "—")
+    s5.metric("Setup", smc.get("setup_label", "—")[:28])
+
+    flags = []
+    if smc.get("swept_low"):
+        flags.append("CRL swept")
+    if smc.get("swept_high"):
+        flags.append("CRH swept")
+    if smc.get("crt_ready"):
+        flags.append("CRT locked")
+    if smc.get("entries_blocked"):
+        flags.append("entries blocked")
+    if flags:
+        st.caption(" · ".join(flags))
+
+    fvg = smc.get("fvg") or {}
+    if fvg:
+        st.caption(
+            f"Last FVG: {fvg.get('direction', '—')} "
+            f"{fmt(float(fvg.get('low'))) if fvg.get('low') is not None else '—'} – "
+            f"{fmt(float(fvg.get('high'))) if fvg.get('high') is not None else '—'}"
+        )
+
+    st.markdown("##### Strategy Type 2 — Active Position")
+    smc_pos = smc.get("position")
+    if smc_pos:
+        p1, p2, p3, p4, p5 = st.columns(5)
+        p1.metric("Direction", smc_pos.get("direction", "—"))
+        p2.metric("Entry", fmt(float(smc_pos.get("entry_price", 0))))
+        p3.metric("Stop (FVG)", fmt(float(smc_pos.get("sl_price", 0))))
+        p4.metric("TP1 CRM", fmt(float(smc_pos.get("tp1_price", 0))))
+        p5.metric("TP2 liquidity", fmt(float(smc_pos.get("tp2_price", 0))))
+        if smc.get("spot") is not None and smc_pos.get("entry_price") is not None:
+            spot = float(smc["spot"])
+            entry = float(smc_pos["entry_price"])
+            pnl = spot - entry if smc_pos.get("direction") == "LONG" else entry - spot
+            st.metric("Live P&L (pts)", f"{pnl:+.2f}")
+    else:
+        st.caption("Flat — waiting for sweep + FVG + confirmation.")
+
+    signals = smc.get("signals") or []
+    if signals:
+        with st.expander("Recent SMC signals"):
+            for line in signals:
+                st.text(line)
+
+    updated = str(smc.get("updated_at", ""))[:19].replace("T", " ")
+    st.caption(f"SMC state updated {updated} · trades today {smc.get('trades_today', 0)}")
+
+
+def render_smc_only_tab(symbol_code: str) -> None:
+    """Full-tab SMC+CRT view for commodity paper instruments."""
+    cfg = SMC_CRT_INSTRUMENTS[symbol_code]
+    st.markdown(f"### {cfg.display}")
+    st.caption("Strategy Type 2 only · paper simulation · session extended to 23:30 IST")
+    render_smc_crt_strategy_panel(symbol_code)
+
+
 # ---------------------------------------------------------------------------
 # Sidebar: engine status + emergency controls
 # ---------------------------------------------------------------------------
@@ -112,6 +200,12 @@ with st.sidebar:
         st.success(f"Engine ONLINE ({mode}) — {heartbeat.get('at', '')[:19]}")
     else:
         st.error("Engine OFFLINE — no heartbeat in Redis")
+
+    smc_hb = cache_manager.get_json(cache_manager.SMC_CRT_HEARTBEAT_KEY)
+    if smc_hb:
+        st.success(f"SMC+CRT ONLINE — until {smc_hb.get('session_end_ist', '23:30')} IST")
+    else:
+        st.warning("SMC+CRT engine offline")
 
     system_bias = cache_manager.get_system_bias()
     st.markdown(f"**AI System Bias:** {bias_badge(system_bias)}", unsafe_allow_html=True)
@@ -144,11 +238,14 @@ with st.sidebar:
 # Main: one tab per index
 # ---------------------------------------------------------------------------
 st.markdown("# AK07 Multi-Index Execution Cockpit")
-st.caption(f"Rendered {datetime.now(timezone.utc).astimezone().strftime('%H:%M:%S')} local")
+st.caption(f"Rendered {datetime.now(timezone.utc).astimezone().strftime('%H:%M:%S')} local · Strategy 1 (AK07) + Strategy 2 (SMC+CRT)")
 
-tabs = st.tabs([cfg.display for cfg in INDEX_CONFIGS.values()])
+ak07_tabs = [cfg.display for cfg in INDEX_CONFIGS.values()]
+smc_only_codes = ["CRUDE", "GOLD", "SILVER"]
+smc_tab_labels = [SMC_CRT_INSTRUMENTS[c].display for c in smc_only_codes]
+tabs = st.tabs(ak07_tabs + smc_tab_labels)
 
-for tab, (code, cfg) in zip(tabs, INDEX_CONFIGS.items()):
+for tab, (code, cfg) in zip(tabs[: len(ak07_tabs)], INDEX_CONFIGS.items()):
     with tab:
         state = cache_manager.get_json(cache_manager.INDEX_STATE_KEY_TEMPLATE.format(index=code))
         if not state:
@@ -223,6 +320,17 @@ for tab, (code, cfg) in zip(tabs, INDEX_CONFIGS.items()):
             flags.append("paper mode")
         st.caption(f"Engine state updated {updated}" + (f" · {' · '.join(flags)}" if flags else ""))
 
+        smc_symbol = "NIFTY" if code == "NIFTY" else None
+        if smc_symbol:
+            render_smc_crt_strategy_panel(smc_symbol)
+        else:
+            st.markdown("---")
+            st.markdown("#### Strategy Type 2 — SMC + CRT")
+            st.caption("Primary SMC+CRT feed runs on **Nifty 50** tab and commodity tabs (Crude / Gold / Silver).")
+
+for tab, smc_code in zip(tabs[len(ak07_tabs) :], smc_only_codes):
+    with tab:
+        render_smc_only_tab(smc_code)
 
 if auto_refresh:
     time.sleep(REFRESH_SECONDS)

@@ -38,15 +38,18 @@ def run_engine_simulation_frame(ticks: int = 5) -> None:
     )
 
     from app.services import cache_manager  # noqa: PLC0415
+    from app.services.smc_crt_engine import SMCCRTEngine  # noqa: PLC0415
     from app.services.upstox_engine import AK07Engine  # noqa: PLC0415
 
     cache_manager.set_system_bias("NEUTRAL")
     engine = AK07Engine()
+    smc_engine = SMCCRTEngine()
 
     print("--- AK07 mock engine simulation frame ---")
     saw_monitoring = False
     for i in range(ticks):
         engine.tick()
+        smc_engine.tick()
         nifty = cache_manager.get_json(cache_manager.INDEX_STATE_KEY_TEMPLATE.format(index="NIFTY")) or {}
         if nifty.get("monitoring_active"):
             saw_monitoring = True
