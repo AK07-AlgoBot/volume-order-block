@@ -103,6 +103,7 @@ class BreakoutPosition:
     entry_price: float
     sl_price: float
     tp1_price: float
+    tp2_price: float
     lot_size: int
     instrument_key: str
     option_strike: int
@@ -231,19 +232,21 @@ def trade_levels(
     green: float,
     red: float,
     gap_regime: str,
-) -> tuple[float, float]:
-    """Spot SL and TP1 (1R) for a breakout entry."""
+) -> tuple[float, float, float]:
+    """Spot SL, TP1 (1R book), TP2 (2R reference)."""
     if direction == "LONG":
         sl_anchor = mid if gap_regime == "GAP_UP" else red
         sl = sl_anchor - SL_BUFFER
         risk = max(entry - sl, 0.05)
         tp1 = entry + risk * RR1
+        tp2 = entry + risk * 2.0
     else:
         sl_anchor = mid if gap_regime == "GAP_DN" else green
         sl = sl_anchor + SL_BUFFER
         risk = max(sl - entry, 0.05)
         tp1 = entry - risk * RR1
-    return sl, tp1
+        tp2 = entry - risk * 2.0
+    return sl, tp1, tp2
 
 
 def _parse_daily_row(row: Any) -> dict[str, float] | None:
@@ -621,7 +624,7 @@ class BreakoutEngine:
             state.setup_label = f"Review {state.day_review} — watching green/red breakouts"
             return
 
-        sl, tp1 = trade_levels(
+        sl, tp1, tp2 = trade_levels(
             direction,
             close,
             state.mid,
@@ -644,6 +647,7 @@ class BreakoutEngine:
             entry_price=close,
             sl_price=sl,
             tp1_price=tp1,
+            tp2_price=tp2,
             lot_size=state.config.lot_size,
             instrument_key=str(contract.get("instrument_key") or ""),
             option_strike=int(contract["strike"]),
@@ -656,7 +660,7 @@ class BreakoutEngine:
         msg = (
             f"{state.config.display} BREAKOUT {direction} @ {close:.2f} "
             f"via {option_label} x{LOTS_PER_TRADE} lot — {reason} "
-            f"SL {sl:.2f} TP1 {tp1:.2f} ({state.trades_today}/{MAX_TRADES_PER_DAY})"
+            f"SL {sl:.2f} TP1 {tp1:.2f} TP2 {tp2:.2f} (book @ TP1)"
         )
         state.setup_label = f"{direction} entry — {reason}"
         state.signal_log.append(msg)
@@ -667,6 +671,7 @@ class BreakoutEngine:
             entry_price=close,
             target_price=tp1,
             sl_price=sl,
+            tp2_price=tp2,
             component_sentiment=state.day_review,
             timestamp=now.strftime("%Y-%m-%d %H:%M:%S IST"),
         )
@@ -682,12 +687,12 @@ class BreakoutEngine:
             if spot <= pos.sl_price:
                 exit_reason = "SL"
             elif spot >= pos.tp1_price:
-                exit_reason = "TP1"
+                exit_reason = "TP1 booked (1R)"
         else:
             if spot >= pos.sl_price:
                 exit_reason = "SL"
             elif spot <= pos.tp1_price:
-                exit_reason = "TP1"
+                exit_reason = "TP1 booked (1R)"
 
         if not exit_reason:
             return
@@ -798,6 +803,7 @@ class BreakoutEngine:
                 "entry_price": pos.entry_price,
                 "sl_price": pos.sl_price,
                 "tp1_price": pos.tp1_price,
+                "tp2_price": pos.tp2_price,
                 "option_strike": pos.option_strike,
                 "option_type": pos.option_type,
                 "entry_reason": pos.entry_reason,

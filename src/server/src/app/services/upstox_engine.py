@@ -45,6 +45,7 @@ import requests
 # Allow running as a plain script as well as a package module.
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
+from app.config.paths import archive_dir
 from app.services import cache_manager, telegram_notifier
 from app.services import performance_store
 
@@ -95,7 +96,7 @@ ENTRY_OPEN_TIME: Final[dtime] = _parse_ist_time("AK07_ENTRY_OPEN_IST", 9, 20)
 TOKEN_REFRESH_TIME: Final[dtime] = _parse_ist_time("AK07_TOKEN_REFRESH_IST", 8, 45)
 WALL_REFRESH_SECONDS: Final[int] = 300
 POLL_SECONDS: Final[float] = float(os.environ.get("AK07_POLL_SECONDS", "15"))
-PAPER_TRADING: Final[bool] = os.environ.get("AK07_PAPER_TRADING", "1") != "0"
+PAPER_TRADING: Final[bool] = os.environ.get("AK07_PAPER_TRADING", "0") != "0"
 MOCK_MODE: Final[bool] = os.environ.get("AK07_MOCK") == "1"
 OI_BAND_POINTS: Final[float] = float(os.environ.get("AK07_OI_BAND_POINTS", "500"))
 COMPONENT_BIAS_MIN_KNOWN: Final[int] = int(os.environ.get("AK07_COMPONENT_BIAS_MIN_KNOWN", "2"))
@@ -107,8 +108,8 @@ _HISTORICAL_PAYLOAD_KEYS: Final[frozenset[str]] = frozenset(
     {"interval", "continuous", "to_date", "from_date", "intraday", "candle_type"}
 )
 
-# repo/src/server/src/app/archive/
-ARCHIVE_DIR: Final[Path] = Path(__file__).resolve().parents[1] / "archive"
+# Persistent session archives (Docker volume: src/server/data/archive)
+ARCHIVE_DIR: Final[Path] = archive_dir()
 TRADE_LOG_KEY_TEMPLATE: Final[str] = "ak07:trade_log:{day}"
 
 # ---------------------------------------------------------------------------
@@ -1179,6 +1180,11 @@ class AK07Engine:
             except OSError:
                 pass
             logger.info("Performance review archived: %s", out_path)
+            performance_store.ingest_strategy1_trade_log(
+                today,
+                self.trade_log,
+                paper_trading=PAPER_TRADING,
+            )
             telegram_notifier.notify_system_event(
                 "15:30 DATA ARCHIVAL",
                 f"Session archived to {out_path.name} "

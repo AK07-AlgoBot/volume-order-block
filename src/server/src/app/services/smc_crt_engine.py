@@ -2,9 +2,7 @@
 
 Candle Range Theory on the first 1H session candle (CRH / CRM / CRL), then
 5-minute Fair Value Gap setups with 1:2 minimum R:R toward CRM and swing targets.
-
-Paper-only commodities (Crude, Gold, Silver) run until SMC_CRT_SESSION_END_IST
-(default 23:30 IST) for extended-session testing.
+Nifty 50 only — live ITM options, 1 lot per trade.
 
 Run: python -u src/server/src/app/services/smc_crt_engine.py
 """
@@ -27,6 +25,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from app.services import cache_manager, telegram_notifier
 from app.services import performance_store
 from app.services.upstox_engine import (
+    INDEX_CONFIGS,
+    ITM_OFFSET_POINTS,
     MOCK_MODE,
     PAPER_TRADING,
     UpstoxClient,
@@ -41,6 +41,8 @@ CANDLE_5M: Final[int] = 5
 CANDLE_1H: Final[int] = 60
 MIN_RR: Final[float] = 2.0
 CRM_BUFFER_POINTS: Final[float] = 8.0
+LOTS_PER_TRADE: Final[int] = 1
+MAX_TRADES_PER_DAY: Final[int] = 2
 
 
 def _parse_ist_time(env_key: str, default_hour: int, default_minute: int) -> dtime:
@@ -56,8 +58,8 @@ def _parse_ist_time(env_key: str, default_hour: int, default_minute: int) -> dti
 
 
 CRT_SESSION_START: Final[dtime] = _parse_ist_time("SMC_CRT_CRT_START_IST", 9, 15)
-SESSION_END: Final[dtime] = _parse_ist_time("SMC_CRT_SESSION_END_IST", 23, 30)
-SQUARE_OFF_TIME: Final[dtime] = _parse_ist_time("SMC_CRT_SQUARE_OFF_IST", 23, 25)
+SESSION_END: Final[dtime] = _parse_ist_time("SMC_CRT_SESSION_END_IST", 15, 30)
+SQUARE_OFF_TIME: Final[dtime] = _parse_ist_time("SMC_CRT_SQUARE_OFF_IST", 14, 55)
 
 
 @dataclass(frozen=True)
@@ -65,11 +67,8 @@ class SMCCRTInstrument:
     code: str
     display: str
     spot_instrument_key: str
-    paper_only: bool
     crt_start: dtime
     baseline_spot: float
-    tick_size: float
-    mcx_search_query: str = ""
 
 
 SMC_CRT_INSTRUMENTS: Final[dict[str, SMCCRTInstrument]] = {
@@ -77,40 +76,8 @@ SMC_CRT_INSTRUMENTS: Final[dict[str, SMCCRTInstrument]] = {
         code="NIFTY",
         display="Nifty 50",
         spot_instrument_key="NSE_INDEX|Nifty 50",
-        paper_only=False,
         crt_start=CRT_SESSION_START,
         baseline_spot=23_100.0,
-        tick_size=0.05,
-    ),
-    "CRUDE": SMCCRTInstrument(
-        code="CRUDE",
-        display="Crude Oil (MCX)",
-        spot_instrument_key="",
-        paper_only=True,
-        crt_start=_parse_ist_time("SMC_CRT_CRUDE_CRT_START_IST", 9, 0),
-        baseline_spot=6_820.0,
-        tick_size=1.0,
-        mcx_search_query="CRUDEOIL",
-    ),
-    "GOLD": SMCCRTInstrument(
-        code="GOLD",
-        display="Gold (MCX)",
-        spot_instrument_key="",
-        paper_only=True,
-        crt_start=_parse_ist_time("SMC_CRT_GOLD_CRT_START_IST", 9, 0),
-        baseline_spot=72_450.0,
-        tick_size=1.0,
-        mcx_search_query="GOLD",
-    ),
-    "SILVER": SMCCRTInstrument(
-        code="SILVER",
-        display="Silver (MCX)",
-        spot_instrument_key="",
-        paper_only=True,
-        crt_start=_parse_ist_time("SMC_CRT_SILVER_CRT_START_IST", 9, 0),
-        baseline_spot=85_200.0,
-        tick_size=1.0,
-        mcx_search_query="SILVER",
     ),
 }
 
@@ -133,6 +100,11 @@ class SMCCRTPosition:
     opened_at: str
     fvg_low: float
     fvg_high: float
+    instrument_key: str = ""
+    option_strike: int = 0
+    option_type: str = ""
+    lot_size: int = 75
+    quantity: int = 75
 
 
 @dataclass
@@ -185,6 +157,14 @@ def near_crm(price: float, crm: float, band: float = CRM_BUFFER_POINTS) -> bool:
     return abs(price - crm) <= band
 
 
+def rr_book_targets(entry: float, sl: float, direction: str) -> tuple[float, float, float]:
+    """Return (tp1 at 1R, tp2 at 2R, risk points) for spot-based option trades."""
+    risk = max(abs(entry - sl), 0.05)
+    if direction == "LONG":
+        return entry + risk, entry + 2.0 * risk, risk
+    return entry - risk, entry - 2.0 * risk, risk
+
+
 def rr_ok(entry: float, sl: float, target: float, direction: str) -> bool:
     risk = abs(entry - sl)
     reward = abs(target - entry) if direction == "LONG" else abs(entry - target)
@@ -192,7 +172,7 @@ def rr_ok(entry: float, sl: float, target: float, direction: str) -> bool:
 
 
 class SMCCRTMarketClient:
-    """Live Upstox quotes for all symbols; paper-only = no real orders on commodities."""
+    """Upstox quotes + ITM option orders for Nifty SMC+CRT."""
 
     def __init__(self) -> None:
         self._upstox: UpstoxClient | None = None if MOCK_MODE else UpstoxClient()
@@ -200,77 +180,26 @@ class SMCCRTMarketClient:
             code: cfg.baseline_spot for code, cfg in SMC_CRT_INSTRUMENTS.items()
         }
         self._mock_crt: dict[str, tuple[float, float, float]] = {}
-        self._resolved_keys: dict[str, str] = {}
-        self._quote_source: dict[str, str] = {}
         self._tick = 0
 
     def refresh_token(self) -> None:
         if self._upstox:
             self._upstox.refresh_access_token_from_disk()
 
-    def quote_source(self, code: str) -> str:
-        return self._quote_source.get(code, "unknown")
-
-    def resolved_key(self, cfg: SMCCRTInstrument) -> str:
-        return self._resolve_key(cfg)
-
-    def _env_instrument_key(self, code: str) -> str:
-        return (os.environ.get(f"SMC_CRT_{code}_INSTRUMENT_KEY") or "").strip()
-
-    def _resolve_key(self, cfg: SMCCRTInstrument) -> str:
-        override = self._env_instrument_key(cfg.code)
-        if override:
-            self._resolved_keys[cfg.code] = override
-            return override
-        if cfg.code in self._resolved_keys:
-            return self._resolved_keys[cfg.code]
-        if cfg.spot_instrument_key:
-            return cfg.spot_instrument_key
-        if not self._upstox or not cfg.mcx_search_query:
-            return ""
-        rows = self._upstox._get(  # noqa: SLF001
-            f"{self._upstox.base_url}/instruments/search",
-            {
-                "query": cfg.mcx_search_query,
-                "exchanges": "MCX",
-                "segments": "FUT",
-                "expiry": "current_month",
-                "page_number": 1,
-                "records": 20,
-            },
-        )
-        if not isinstance(rows, list):
-            rows = []
-        futures = [
-            row
-            for row in rows
-            if isinstance(row, dict)
-            and str(row.get("segment") or "") == "MCX_FO"
-            and row.get("expiry")
-            and row.get("instrument_key")
-        ]
-        futures.sort(key=lambda row: str(row.get("expiry") or ""))
-        if futures:
-            key = str(futures[0]["instrument_key"])
-            self._resolved_keys[cfg.code] = key
-            logger.info("Resolved %s MCX future -> %s", cfg.code, key)
-            return key
-        logger.warning("Could not resolve MCX instrument for %s (%s)", cfg.code, cfg.mcx_search_query)
-        return ""
+    def instrument_key(self, cfg: SMCCRTInstrument) -> str:
+        override = (os.environ.get(f"SMC_CRT_{cfg.code}_INSTRUMENT_KEY") or "").strip()
+        return override or cfg.spot_instrument_key
 
     def get_spot(self, cfg: SMCCRTInstrument) -> float | None:
         if MOCK_MODE:
             return self._mock_spot(cfg)
         if self._upstox:
-            key = self._resolve_key(cfg)
-            if key:
-                ltp = self._upstox.get_ltp(key)
-                if ltp is not None:
-                    self._quote_source[cfg.code] = "upstox"
-                    self._mock_spots[cfg.code] = ltp
-                    return ltp
-                logger.warning("Upstox LTP failed for %s (%s)", cfg.code, key)
-        self._quote_source[cfg.code] = "simulated"
+            key = self.instrument_key(cfg)
+            ltp = self._upstox.get_ltp(key)
+            if ltp is not None:
+                self._mock_spots[cfg.code] = ltp
+                return ltp
+            logger.warning("Upstox LTP failed for %s (%s)", cfg.code, key)
         return self._mock_spot(cfg)
 
     def _mock_spot(self, cfg: SMCCRTInstrument) -> float:
@@ -284,16 +213,15 @@ class SMCCRTMarketClient:
         if MOCK_MODE:
             return self._mock_candles(cfg, minutes)
         if self._upstox:
-            key = self._resolve_key(cfg)
-            if key:
-                v3_base = self._upstox.base_url.replace("/v2", "/v3")
-                url = f"{v3_base}/historical-candle/intraday/{key}/minutes/{minutes}"
-                data = self._upstox._get(url)  # noqa: SLF001
-                if data is not None:
-                    parsed = parse_v3_intraday_candles(data, datetime.now(IST))
-                    if parsed:
-                        return parsed
-                logger.warning("Upstox candles failed for %s (%s)", cfg.code, key)
+            key = self.instrument_key(cfg)
+            v3_base = self._upstox.base_url.replace("/v2", "/v3")
+            url = f"{v3_base}/historical-candle/intraday/{key}/minutes/{minutes}"
+            data = self._upstox._get(url)  # noqa: SLF001
+            if data is not None:
+                parsed = parse_v3_intraday_candles(data, datetime.now(IST))
+                if parsed:
+                    return parsed
+            logger.warning("Upstox candles failed for %s (%s)", cfg.code, key)
         return self._mock_candles(cfg, minutes)
 
     def _mock_candles(self, cfg: SMCCRTInstrument, minutes: int) -> list[dict[str, float]]:
@@ -333,15 +261,44 @@ class SMCCRTMarketClient:
             }
         ]
 
+    def resolve_option(self, spot: float, direction: str) -> dict[str, Any] | None:
+        cfg = INDEX_CONFIGS["NIFTY"]
+        if self._upstox and not MOCK_MODE:
+            contract = self._upstox.get_itm_option_contract(cfg.spot_instrument_key, spot, direction)
+            if contract:
+                return contract
+        desired = spot - ITM_OFFSET_POINTS if direction == "LONG" else spot + ITM_OFFSET_POINTS
+        strike = int(round(desired / cfg.strike_step) * cfg.strike_step)
+        return {
+            "instrument_key": "",
+            "strike": strike,
+            "option_type": "CE" if direction == "LONG" else "PE",
+        }
+
+    def place_entry(self, instrument_key: str, quantity: int) -> bool:
+        if PAPER_TRADING or not instrument_key:
+            return True
+        if self._upstox:
+            return self._upstox.place_market_order(instrument_key, quantity, "BUY")
+        return False
+
+    def place_exit(self, instrument_key: str, quantity: int) -> bool:
+        if PAPER_TRADING or not instrument_key:
+            return True
+        if self._upstox:
+            return self._upstox.place_market_order(instrument_key, quantity, "SELL")
+        return False
+
 
 class SMCCRTEngine:
     def __init__(self) -> None:
         self.client = SMCCRTMarketClient()
         self.states = {code: InstrumentState(config=cfg) for code, cfg in SMC_CRT_INSTRUMENTS.items()}
         logger.info(
-            "SMC+CRT engine started (paper=%s mock=%s session_end=%02d:%02d IST)",
+            "SMC+CRT engine started (paper=%s mock=%s nifty only lot=%d session_end=%02d:%02d IST)",
             PAPER_TRADING,
             MOCK_MODE,
+            LOTS_PER_TRADE,
             SESSION_END.hour,
             SESSION_END.minute,
         )
@@ -359,7 +316,7 @@ class SMCCRTEngine:
         now = datetime.now(IST)
         self.client.refresh_token()
         if now.time() >= SESSION_END:
-            self._publish_all(now, entries_blocked=True, block_reason="session closed (23:30 IST)")
+            self._publish_all(now, entries_blocked=True, block_reason="session closed")
             return
 
         entries_blocked = now.time() >= SQUARE_OFF_TIME
@@ -368,9 +325,7 @@ class SMCCRTEngine:
         self._publish_heartbeat(now)
 
     def _process_instrument(self, state: InstrumentState, now: datetime, entries_blocked: bool) -> None:
-        """Process one instrument and publish Redis state."""
         cfg = state.config
-
         spot = self.client.get_spot(cfg)
         if spot is not None:
             state.spot = spot
@@ -427,6 +382,64 @@ class SMCCRTEngine:
             if float(candle["high"]) > state.crh:
                 state.swept_high = True
 
+    def _open_position(
+        self,
+        state: InstrumentState,
+        *,
+        direction: str,
+        entry: float,
+        sl: float,
+        tp1: float,
+        tp2: float,
+        fvg: FVGZone,
+        now: datetime,
+    ) -> None:
+        lot_size = INDEX_CONFIGS["NIFTY"].lot_size
+        quantity = lot_size * LOTS_PER_TRADE
+        contract = self.client.resolve_option(entry, direction)
+        if contract is None:
+            logger.error("SMC entry aborted — no Nifty option contract")
+            return
+        if not self.client.place_entry(str(contract.get("instrument_key") or ""), quantity):
+            logger.error("SMC entry order failed")
+            return
+
+        state.position = SMCCRTPosition(
+            direction=direction,
+            entry_price=entry,
+            sl_price=sl,
+            tp1_price=tp1,
+            tp2_price=tp2,
+            opened_at=now.isoformat(),
+            fvg_low=fvg.low,
+            fvg_high=fvg.high,
+            instrument_key=str(contract.get("instrument_key") or ""),
+            option_strike=int(contract["strike"]),
+            option_type=str(contract["option_type"]),
+            lot_size=lot_size,
+            quantity=quantity,
+        )
+        state.trades_today += 1
+        state.last_signal_fvg_ts = fvg.candle_ts
+        option_label = f"{contract['strike']}{contract['option_type']}"
+        state.setup_label = f"{direction} entry (Strategy Type 2)"
+        msg = (
+            f"{state.config.display} SMC {direction} @ {entry:.2f} via {option_label} x{LOTS_PER_TRADE} lot "
+            f"SL {sl:.2f} TP1 {tp1:.2f} TP2 {tp2:.2f} (book @ TP1)"
+        )
+        state.signal_log.append(msg)
+        logger.info(msg)
+        telegram_notifier.notify_trade_execution(
+            index_name=f"{state.config.display} SMC ({option_label} x{LOTS_PER_TRADE})",
+            trade_type=direction,
+            entry_price=entry,
+            target_price=tp1,
+            sl_price=sl,
+            tp2_price=tp2,
+            component_sentiment="NEUTRAL",
+            timestamp=now.strftime("%Y-%m-%d %H:%M:%S IST"),
+        )
+
     def _seek_entry(self, state: InstrumentState, candles: list[dict[str, float]], now: datetime) -> None:
         if state.spot is None or state.crm is None or state.crl is None or state.crh is None:
             return
@@ -438,8 +451,8 @@ class SMCCRTEngine:
         if not fvg or not candles:
             state.setup_label = "Watching for sweep + FVG"
             return
-        if state.trades_today >= 2:
-            state.setup_label = "Max 2 SMC trades/day reached"
+        if state.trades_today >= MAX_TRADES_PER_DAY:
+            state.setup_label = f"Max {MAX_TRADES_PER_DAY} SMC trades/day reached"
             return
         if fvg.candle_ts == state.last_signal_fvg_ts:
             state.setup_label = f"Setup armed — {fvg.direction} FVG"
@@ -451,56 +464,24 @@ class SMCCRTEngine:
         if fvg.direction == "LONG" and state.swept_low and close > state.crl:
             entry = close
             sl = fvg.low
-            tp1 = state.crm
-            tp2 = state.crh
-            if not rr_ok(entry, sl, tp1, "LONG"):
+            tp1, tp2, _ = rr_book_targets(entry, sl, "LONG")
+            if not rr_ok(entry, sl, state.crm, "LONG"):
                 state.setup_label = "Long FVG seen — R:R < 1:2 to CRM"
                 return
-            state.position = SMCCRTPosition(
-                direction="LONG",
-                entry_price=entry,
-                sl_price=sl,
-                tp1_price=tp1,
-                tp2_price=tp2,
-                opened_at=now.isoformat(),
-                fvg_low=fvg.low,
-                fvg_high=fvg.high,
+            self._open_position(
+                state, direction="LONG", entry=entry, sl=sl, tp1=tp1, tp2=tp2, fvg=fvg, now=now
             )
-            state.trades_today += 1
-            state.last_signal_fvg_ts = fvg.candle_ts
-            state.setup_label = "LONG entry (Strategy Type 2)"
-            msg = f"{state.config.display} SMC LONG @ {entry:.2f} SL {sl:.2f} TP1 CRM {tp1:.2f}"
-            state.signal_log.append(msg)
-            logger.info(msg)
-            if PAPER_TRADING or state.config.paper_only:
-                telegram_notifier.notify_system_event("SMC+CRT PAPER ENTRY", msg)
 
         elif fvg.direction == "SHORT" and state.swept_high and close < state.crh:
             entry = close
             sl = fvg.high
-            tp1 = state.crm
-            tp2 = state.crl
-            if not rr_ok(entry, sl, tp1, "SHORT"):
+            tp1, tp2, _ = rr_book_targets(entry, sl, "SHORT")
+            if not rr_ok(entry, sl, state.crm, "SHORT"):
                 state.setup_label = "Short FVG seen — R:R < 1:2 to CRM"
                 return
-            state.position = SMCCRTPosition(
-                direction="SHORT",
-                entry_price=entry,
-                sl_price=sl,
-                tp1_price=tp1,
-                tp2_price=tp2,
-                opened_at=now.isoformat(),
-                fvg_low=fvg.low,
-                fvg_high=fvg.high,
+            self._open_position(
+                state, direction="SHORT", entry=entry, sl=sl, tp1=tp1, tp2=tp2, fvg=fvg, now=now
             )
-            state.trades_today += 1
-            state.last_signal_fvg_ts = fvg.candle_ts
-            state.setup_label = "SHORT entry (Strategy Type 2)"
-            msg = f"{state.config.display} SMC SHORT @ {entry:.2f} SL {sl:.2f} TP1 CRM {tp1:.2f}"
-            state.signal_log.append(msg)
-            logger.info(msg)
-            if PAPER_TRADING or state.config.paper_only:
-                telegram_notifier.notify_system_event("SMC+CRT PAPER ENTRY", msg)
 
     def _manage_position(self, state: InstrumentState, now: datetime) -> None:
         pos = state.position
@@ -512,40 +493,44 @@ class SMCCRTEngine:
             if spot <= pos.sl_price:
                 exit_reason = "SL hit"
             elif spot >= pos.tp1_price:
-                exit_reason = "TP1 CRM hit"
-            elif spot >= pos.tp2_price:
-                exit_reason = "TP2 swing high hit"
+                exit_reason = "TP1 booked (1R)"
         else:
             if spot >= pos.sl_price:
                 exit_reason = "SL hit"
             elif spot <= pos.tp1_price:
-                exit_reason = "TP1 CRM hit"
-            elif spot <= pos.tp2_price:
-                exit_reason = "TP2 swing low hit"
+                exit_reason = "TP1 booked (1R)"
 
-        if exit_reason:
-            pnl = (spot - pos.entry_price) if pos.direction == "LONG" else (pos.entry_price - spot)
-            logger.info("%s SMC exit: %s @ spot %.2f", state.config.display, exit_reason, spot)
-            state.signal_log.append(f"Exit: {exit_reason} @ {spot:.2f}")
-            performance_store.record_completed_trade(
-                strategy=performance_store.STRATEGY_SMC_CRT,
-                strategy_id="smc_crt",
-                symbol=state.config.code,
-                direction=pos.direction,
-                entry_price=pos.entry_price,
-                exit_price=spot,
-                pnl_points=pnl,
-                exit_reason=exit_reason,
-                entry_at=pos.opened_at,
-                paper_trading=PAPER_TRADING or state.config.paper_only,
-            )
-            state.position = None
-            state.setup_label = f"Flat after {exit_reason}"
-            if PAPER_TRADING or state.config.paper_only:
-                telegram_notifier.notify_system_event(
-                    "SMC+CRT PAPER EXIT",
-                    f"{state.config.display} {exit_reason} spot={spot:.2f}",
-                )
+        if not exit_reason:
+            return
+
+        if pos.instrument_key:
+            self.client.place_exit(pos.instrument_key, pos.quantity)
+
+        pnl = (spot - pos.entry_price) if pos.direction == "LONG" else (pos.entry_price - spot)
+        logger.info("%s SMC exit: %s @ spot %.2f", state.config.display, exit_reason, spot)
+        state.signal_log.append(f"Exit: {exit_reason} @ {spot:.2f}")
+        performance_store.record_completed_trade(
+            strategy=performance_store.STRATEGY_SMC_CRT,
+            strategy_id="smc_crt",
+            symbol=state.config.code,
+            direction=pos.direction,
+            entry_price=pos.entry_price,
+            exit_price=spot,
+            pnl_points=pnl,
+            exit_reason=exit_reason,
+            entry_at=pos.opened_at,
+            paper_trading=PAPER_TRADING,
+        )
+        state.position = None
+        state.setup_label = f"Flat after {exit_reason}"
+        telegram_notifier.notify_trade_exit(
+            index_name=f"{state.config.display} SMC ({pos.option_strike}{pos.option_type})",
+            trade_type=pos.direction,
+            exit_price=spot,
+            pnl_points=pnl,
+            reason=exit_reason,
+            timestamp=now.strftime("%Y-%m-%d %H:%M:%S IST"),
+        )
 
     def _publish_all(self, now: datetime, entries_blocked: bool, block_reason: str = "") -> None:
         for state in self.states.values():
@@ -572,15 +557,15 @@ class SMCCRTEngine:
             "setup_label": state.setup_label,
             "swept_low": state.swept_low,
             "swept_high": state.swept_high,
-            "paper_only": state.config.paper_only,
-            "paper_trading": PAPER_TRADING or state.config.paper_only,
+            "paper_trading": PAPER_TRADING,
             "entries_blocked": entries_blocked,
             "block_reason": block_reason,
             "trades_today": state.trades_today,
+            "max_trades": MAX_TRADES_PER_DAY,
+            "lots_per_trade": LOTS_PER_TRADE,
             "session_end_ist": SESSION_END.strftime("%H:%M"),
             "signals": state.signal_log[-8:],
-            "quote_source": self.client.quote_source(state.config.code),
-            "instrument_key": self.client.resolved_key(state.config),
+            "instrument_key": self.client.instrument_key(state.config),
             "updated_at": now.isoformat(),
         }
         if state.last_fvg:
@@ -599,6 +584,9 @@ class SMCCRTEngine:
                 "tp2_price": pos.tp2_price,
                 "fvg_low": pos.fvg_low,
                 "fvg_high": pos.fvg_high,
+                "option_strike": pos.option_strike,
+                "option_type": pos.option_type,
+                "quantity": pos.quantity,
                 "opened_at": pos.opened_at,
             }
         key = cache_manager.SMC_CRT_STATE_KEY_TEMPLATE.format(symbol=state.config.code)

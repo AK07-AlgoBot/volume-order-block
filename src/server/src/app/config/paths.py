@@ -17,6 +17,16 @@ def server_root() -> Path:
     return Path(__file__).resolve().parents[3]
 
 
+def archive_dir() -> Path:
+    """Persistent session archives (Docker volume: src/server/data/archive)."""
+    import os  # noqa: PLC0415
+
+    override = (os.environ.get("AK07_ARCHIVE_DIR") or "").strip()
+    if override:
+        return Path(override)
+    return server_root() / "data" / "archive"
+
+
 def lib_root() -> Path:
     """Shared Python modules (`upstox_credentials_store`, etc.)."""
     return repo_root() / "src" / "lib"

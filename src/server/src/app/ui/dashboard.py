@@ -21,7 +21,6 @@ import streamlit as st
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from app.services import cache_manager
-from app.services.smc_crt_engine import SMC_CRT_INSTRUMENTS
 from app.services.upstox_engine import INDEX_CONFIGS
 from app.ui.cockpit_layout import render_compact_sidebar, render_top_status_bar
 from app.ui.styles import inject_dark_theme
@@ -76,26 +75,13 @@ def render_smc_crt_strategy_panel(symbol_code: str) -> None:
         return
 
     if smc_hb:
-        end = smc_hb.get("session_end_ist", "23:30")
+        end = smc_hb.get("session_end_ist", "15:30")
         mode = "PAPER" if smc_hb.get("paper_trading") else "LIVE"
-        st.caption(f"SMC engine heartbeat {str(smc_hb.get('at', ''))[:19]} · session until {end} IST · {mode}")
+        st.caption(f"SMC engine heartbeat {str(smc_hb.get('at', ''))[:19]} · until {end} IST · {mode} · 1 lot options")
 
     if not smc:
         st.info(f"No SMC state for {symbol_code} yet.")
         return
-
-    cfg = SMC_CRT_INSTRUMENTS.get(symbol_code)
-    if cfg and cfg.paper_only:
-        source = smc.get("quote_source") or "unknown"
-        key = smc.get("instrument_key") or "—"
-        if source == "upstox":
-            st.caption(f"Paper orders only · **live Upstox quote** · `{key}`")
-        else:
-            st.warning(
-                "Showing **simulated** prices — Upstox MCX quote unavailable. "
-                "Check access token (Profile HTTP 200) and restart `smc_crt_engine`."
-            )
-            st.caption(f"Optional override: set `SMC_CRT_{symbol_code}_INSTRUMENT_KEY` in `.env`")
 
     s1, s2, s3, s4, s5 = st.columns(5)
     s1.metric("CRH (range high)", fmt(smc.get("crh")))
@@ -131,19 +117,20 @@ def render_smc_crt_strategy_panel(symbol_code: str) -> None:
     st.markdown("##### Strategy Type 2 — Active Position")
     smc_pos = smc.get("position")
     if smc_pos:
-        p1, p2, p3, p4, p5 = st.columns(5)
-        p1.metric("Direction", smc_pos.get("direction", "—"))
+        p1, p2, p3, p4, p5, p6 = st.columns(6)
+        option = f"{smc_pos.get('option_strike', '')}{smc_pos.get('option_type', '')}"
+        p1.metric("Direction", smc_pos.get("direction", "—"), delta=option or None, delta_color="off")
         p2.metric("Entry", fmt(float(smc_pos.get("entry_price", 0))))
         p3.metric("Stop (FVG)", fmt(float(smc_pos.get("sl_price", 0))))
-        p4.metric("TP1 CRM", fmt(float(smc_pos.get("tp1_price", 0))))
-        p5.metric("TP2 liquidity", fmt(float(smc_pos.get("tp2_price", 0))))
+        p4.metric("TP1 (1R book)", fmt(float(smc_pos.get("tp1_price", 0))))
+        p5.metric("TP2 (2R)", fmt(float(smc_pos.get("tp2_price", 0))))
         if smc.get("spot") is not None and smc_pos.get("entry_price") is not None:
             spot = float(smc["spot"])
             entry = float(smc_pos["entry_price"])
             pnl = spot - entry if smc_pos.get("direction") == "LONG" else entry - spot
-            st.metric("Live P&L (pts)", f"{pnl:+.2f}")
+            p6.metric("Live P&L (pts)", f"{pnl:+.2f}")
     else:
-        st.caption("Flat — waiting for sweep + FVG + confirmation.")
+        st.caption("Flat — waiting for sweep + FVG + confirmation (1 lot · Nifty options).")
 
     signals = smc.get("signals") or []
     if signals:
@@ -205,13 +192,14 @@ def render_breakout_strategy_panel(index_code: str) -> None:
     st.markdown("##### Strategy Type 3 — Active Position")
     bo_pos = bo.get("position")
     if bo_pos:
-        p1, p2, p3, p4, p5 = st.columns(5)
+        p1, p2, p3, p4, p5, p6 = st.columns(6)
         option = f"{bo_pos.get('option_strike', '')}{bo_pos.get('option_type', '')}"
         p1.metric("Direction", bo_pos.get("direction", "—"), delta=option or None, delta_color="off")
         p2.metric("Entry (spot)", fmt(float(bo_pos.get("entry_price", 0))))
-        p3.metric("TP1 (1R)", fmt(float(bo_pos.get("tp1_price", 0))))
-        p4.metric("Stop-Loss", fmt(float(bo_pos.get("sl_price", 0))))
-        p5.metric("Reason", str(bo_pos.get("entry_reason", "—"))[:18])
+        p3.metric("TP1 (1R book)", fmt(float(bo_pos.get("tp1_price", 0))))
+        p4.metric("TP2 (2R)", fmt(float(bo_pos.get("tp2_price", 0))))
+        p5.metric("Stop-Loss", fmt(float(bo_pos.get("sl_price", 0))))
+        p6.metric("Reason", str(bo_pos.get("entry_reason", "—"))[:18])
     else:
         st.caption("Flat — no breakout position (1 lot · options · max 2/day).")
 
@@ -229,14 +217,6 @@ def render_breakout_strategy_panel(index_code: str) -> None:
     )
 
 
-def render_smc_only_tab(symbol_code: str) -> None:
-    """Full-tab SMC+CRT view for commodity paper instruments."""
-    cfg = SMC_CRT_INSTRUMENTS[symbol_code]
-    st.markdown(f"### {cfg.display}")
-    st.caption("Strategy Type 2 · paper orders · live Upstox quotes · session until 23:30 IST")
-    render_smc_crt_strategy_panel(symbol_code)
-
-
 # ---------------------------------------------------------------------------
 # Layout: slim sidebar + top status bar (full-width main content)
 # ---------------------------------------------------------------------------
@@ -251,18 +231,20 @@ auto_refresh = render_top_status_bar(
 # Main: one tab per index
 # ---------------------------------------------------------------------------
 st.markdown("# AK07 Multi-Index Execution Cockpit")
-st.caption(
-    f"Updated {datetime.now(timezone.utc).astimezone().strftime('%H:%M:%S')} local · "
-    "S1 OI · S2 SMC+CRT · S3 BLR Breakout · sidebar « for emergency only · "
-    "**Performance Review** in nav"
-)
+meta_col, domain_col = st.columns([10, 2])
+with meta_col:
+    st.caption(
+        f"Updated {datetime.now(timezone.utc).astimezone().strftime('%H:%M:%S')} local · "
+        "S1 OI · S2 SMC (Nifty) · S3 BLR · **Performance Review** in nav · "
+        "collapse sidebar « for full width"
+    )
+with domain_col:
+    st.caption(PRODUCTION_DOMAIN)
 
 ak07_tabs = [cfg.display for cfg in INDEX_CONFIGS.values()]
-smc_only_codes = ["CRUDE", "GOLD", "SILVER"]
-smc_tab_labels = [SMC_CRT_INSTRUMENTS[c].display for c in smc_only_codes]
-tabs = st.tabs(ak07_tabs + smc_tab_labels)
+tabs = st.tabs(ak07_tabs)
 
-for tab, (code, cfg) in zip(tabs[: len(ak07_tabs)], INDEX_CONFIGS.items()):
+for tab, (code, cfg) in zip(tabs, INDEX_CONFIGS.items()):
     with tab:
         state = cache_manager.get_json(cache_manager.INDEX_STATE_KEY_TEMPLATE.format(index=code))
         if not state:
@@ -337,19 +319,14 @@ for tab, (code, cfg) in zip(tabs[: len(ak07_tabs)], INDEX_CONFIGS.items()):
             flags.append("paper mode")
         st.caption(f"Engine state updated {updated}" + (f" · {' · '.join(flags)}" if flags else ""))
 
-        smc_symbol = "NIFTY" if code == "NIFTY" else None
-        if smc_symbol:
-            render_smc_crt_strategy_panel(smc_symbol)
+        if code == "NIFTY":
+            render_smc_crt_strategy_panel("NIFTY")
         else:
             st.markdown("---")
             st.markdown("#### Strategy Type 2 — SMC + CRT")
-            st.caption("Primary SMC+CRT feed runs on **Nifty 50** tab and commodity tabs (Crude / Gold / Silver).")
+            st.caption("SMC+CRT runs on **Nifty 50** only (see Nifty tab).")
 
         render_breakout_strategy_panel(code)
-
-for tab, smc_code in zip(tabs[len(ak07_tabs) :], smc_only_codes):
-    with tab:
-        render_smc_only_tab(smc_code)
 
 if auto_refresh:
     time.sleep(REFRESH_SECONDS)

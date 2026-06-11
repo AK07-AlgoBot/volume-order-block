@@ -69,6 +69,7 @@ else:
     start_date = today - timedelta(days=365)
 
 trades = performance_store.load_trades(start_date=start_date, end_date=today)
+load_status = performance_store.load_status(start_date, today)
 
 if paper_filter == "Paper only":
     trades = [t for t in trades if t.get("paper_trading")]
@@ -84,7 +85,32 @@ daily_df = pd.DataFrame(daily_series) if daily_series else pd.DataFrame()
 st.markdown("## Performance charts")
 
 if not trades:
-    st.info("No completed trades in the selected range yet. Trades appear here when engines record exits.")
+    st.info(
+        "No completed trades in the selected range yet. "
+        "Trades appear when engines exit positions or when Strategy 1 archives at 15:30 IST."
+    )
+    with st.expander("Why is this empty?", expanded=True):
+        st.markdown(
+            f"""
+**Data sources checked**
+
+| Source | Status |
+|--------|--------|
+| Archive folder | `{load_status['archive_dir']}` |
+| Folder exists | **{'yes' if load_status['archive_dir_exists'] else 'no'}** |
+| Archive files (total) | **{load_status['archive_files_total']}** |
+| Archive files in range | **{load_status['archive_files_in_range']}** |
+| Legacy archive folder | `{load_status.get('legacy_archive_dir', '—')}` |
+| Redis days with trades | **{load_status['redis_days_with_trades']}** |
+| Latest archive | `{load_status['latest_archive'] or 'none'}` |
+
+**Notes**
+- Strategy 1 writes `performance_review_YYYY-MM-DD.json` at **15:30 IST** (only if the engine ran that day).
+- Archives are stored under **`src/server/data/archive`** on the Docker volume — cockpit must mount the same volume as the engine.
+- Strategy 2 / 3 record exits to Redis when trades close (after latest deploy).
+- If you had old archives inside the container image path, redeploy once — new archives land on the persistent volume.
+            """
+        )
 else:
     m1, m2, m3, m4 = st.columns(4)
     total_row = summary_rows[-1] if summary_rows else {}

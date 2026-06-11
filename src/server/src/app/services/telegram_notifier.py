@@ -137,14 +137,24 @@ def notify_trade_execution(
     sl_price: float,
     component_sentiment: str,
     timestamp: str,
+    tp2_price: float | None = None,
 ) -> bool:
     """Dispatch the formatted AK07 trade execution alert (fire-and-forget)."""
+    if tp2_price is not None:
+        target_block = (
+            f"\u2022 **TP1 (1R \u2014 book):** {target_price:.2f}\n"
+            f"\u2022 **TP2 (2R):** {tp2_price:.2f}\n"
+            f"\u2022 **R:R:** 1:2\n"
+        )
+    else:
+        target_block = f"\u2022 **Target:** {target_price:.2f}\n"
+
     text = (
         "\U0001f6a8 **AK07 TRADE EXECUTION ALERT** \U0001f6a8\n"
         f"\u2022 **Index:** {index_name}\n"
         f"\u2022 **Type:** {trade_type}\n"
         f"\u2022 **Entry Price:** {entry_price:.2f}\n"
-        f"\u2022 **Target:** {target_price:.2f}\n"
+        f"{target_block}"
         f"\u2022 **Stop-Loss:** {sl_price:.2f}\n"
         f"\u2022 **Component Sentiment:** {component_sentiment}\n"
         f"\u2022 **Execution Time:** {timestamp}"

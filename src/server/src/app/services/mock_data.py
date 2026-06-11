@@ -170,30 +170,30 @@ def _seed_performance_trades(now: datetime) -> None:
         {
             "strategy": performance_store.STRATEGY_SMC_CRT,
             "strategy_id": "smc_crt",
-            "symbol": "CRUDE",
+            "symbol": "NIFTY",
             "direction": "LONG",
-            "entry_price": 6850.0,
-            "exit_price": 6885.0,
+            "entry_price": 23100.0,
+            "exit_price": 23135.0,
             "pnl_points": 35.0,
             "result": "WIN",
             "exit_reason": "TP1 CRM hit",
             "entry_at": now.isoformat(),
             "exit_at": now.isoformat(),
-            "paper_trading": True,
+            "paper_trading": False,
         },
         {
             "strategy": performance_store.STRATEGY_SMC_CRT,
             "strategy_id": "smc_crt",
-            "symbol": "GOLD",
+            "symbol": "NIFTY",
             "direction": "SHORT",
-            "entry_price": 146200.0,
-            "exit_price": 146260.0,
-            "pnl_points": -60.0,
+            "entry_price": 23150.0,
+            "exit_price": 23190.0,
+            "pnl_points": -40.0,
             "result": "LOSS",
             "exit_reason": "SL hit",
             "entry_at": now.isoformat(),
             "exit_at": now.isoformat(),
-            "paper_trading": True,
+            "paper_trading": False,
         },
         {
             "strategy": performance_store.STRATEGY_BREAKOUT,
@@ -299,71 +299,73 @@ def _seed_breakout(now: datetime, kill_engaged: bool) -> None:
 
 
 def _seed_smc_crt(now: datetime, kill_engaged: bool) -> None:
-    """Strategy Type 2 mock frames for Nifty + commodity paper tabs."""
-    for code, cfg in SMC_CRT_INSTRUMENTS.items():
-        key = cache_manager.SMC_CRT_STATE_KEY_TEMPLATE.format(symbol=code)
-        previous = cache_manager.get_json(key) or {}
-        spot = _walk(float(previous.get("spot") or cfg.baseline_spot), max_pct=0.0012)
-        width = spot * 0.004
-        crh = float(previous.get("crh") or spot + width / 2)
-        crm = float(previous.get("crm") or spot)
-        crl = float(previous.get("crl") or spot - width / 2)
+    """Strategy Type 2 mock frame — Nifty only."""
+    cfg = SMC_CRT_INSTRUMENTS["NIFTY"]
+    key = cache_manager.SMC_CRT_STATE_KEY_TEMPLATE.format(symbol="NIFTY")
+    previous = cache_manager.get_json(key) or {}
+    spot = _walk(float(previous.get("spot") or cfg.baseline_spot), max_pct=0.0012)
+    width = spot * 0.004
+    crh = float(previous.get("crh") or spot + width / 2)
+    crm = float(previous.get("crm") or spot)
+    crl = float(previous.get("crl") or spot - width / 2)
 
-        position = None
-        if code == "CRUDE" and not kill_engaged:
-            prev_pos = previous.get("position") or {}
-            entry = float(prev_pos.get("entry_price") or crl + (crm - crl) * 0.3)
-            position = {
+    position = None
+    if not kill_engaged:
+        prev_pos = previous.get("position") or {}
+        entry = float(prev_pos.get("entry_price") or crl + (crm - crl) * 0.3)
+        position = {
+            "direction": "LONG",
+            "entry_price": round(entry, 2),
+            "sl_price": round(entry - width * 0.35, 2),
+            "tp1_price": round(crm, 2),
+            "tp2_price": round(crh, 2),
+            "option_strike": int(round((entry - 50) / 50) * 50),
+            "option_type": "CE",
+            "quantity": INDEX_CONFIGS["NIFTY"].lot_size,
+            "opened_at": prev_pos.get("opened_at") or now.isoformat(),
+        }
+
+    cache_manager.set_json(
+        key,
+        {
+            "symbol": "NIFTY",
+            "display": cfg.display,
+            "strategy": "SMC+CRT",
+            "spot": round(spot, 2),
+            "crh": round(crh, 2),
+            "crm": round(crm, 2),
+            "crl": round(crl, 2),
+            "crt_ready": True,
+            "setup_label": "CRT locked — watching 5m FVG (mock)",
+            "swept_low": True,
+            "swept_high": False,
+            "paper_trading": False,
+            "entries_blocked": kill_engaged,
+            "trades_today": 1 if position else 0,
+            "max_trades": 2,
+            "lots_per_trade": 1,
+            "session_end_ist": "15:30",
+            "fvg": {
                 "direction": "LONG",
-                "entry_price": round(entry, 2),
-                "sl_price": round(entry - width * 0.35, 2),
-                "tp1_price": round(crm, 2),
-                "tp2_price": round(crh, 2),
-                "fvg_low": round(entry - width * 0.2, 2),
-                "fvg_high": round(entry - width * 0.05, 2),
-                "opened_at": prev_pos.get("opened_at") or now.isoformat(),
-            }
-
-        cache_manager.set_json(
-            key,
-            {
-                "symbol": code,
-                "display": cfg.display,
-                "strategy": "SMC+CRT",
-                "spot": round(spot, 2),
-                "crh": round(crh, 2),
-                "crm": round(crm, 2),
-                "crl": round(crl, 2),
-                "crt_ready": True,
-                "setup_label": "CRT locked — watching 5m FVG (mock)",
-                "swept_low": True,
-                "swept_high": code == "GOLD",
-                "paper_only": cfg.paper_only,
-                "paper_trading": True,
-                "entries_blocked": kill_engaged,
-                "trades_today": 1 if position else 0,
-                "session_end_ist": "23:30",
-                "fvg": {
-                    "direction": "LONG",
-                    "low": round(crl + width * 0.1, 2),
-                    "high": round(crl + width * 0.25, 2),
-                    "candle_ts": now.isoformat(),
-                },
-                "position": position,
-                "signals": previous.get("signals") or ["Mock CRT range seeded"],
-                "updated_at": now.isoformat(),
+                "low": round(crl + width * 0.1, 2),
+                "high": round(crl + width * 0.25, 2),
+                "candle_ts": now.isoformat(),
             },
-            ttl_seconds=120,
-        )
+            "position": position,
+            "signals": previous.get("signals") or ["Mock CRT range seeded"],
+            "updated_at": now.isoformat(),
+        },
+        ttl_seconds=120,
+    )
 
     cache_manager.set_json(
         cache_manager.SMC_CRT_HEARTBEAT_KEY,
         {
             "at": now.isoformat(),
-            "paper_trading": True,
+            "paper_trading": False,
             "mock": True,
-            "session_end_ist": "23:30",
-            "instruments": list(SMC_CRT_INSTRUMENTS.keys()),
+            "session_end_ist": "15:30",
+            "instruments": ["NIFTY"],
         },
         ttl_seconds=60,
     )

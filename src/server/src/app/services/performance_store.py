@@ -1,24 +1,29 @@
 """Unified completed-trade store for strategy performance review.
 
 Engines append normalized exit records to Redis (per day). The performance
-dashboard also reads archived Strategy 1 session JSON when present.
+dashboard reads Redis plus archived Strategy 1 session JSON from the shared
+data volume (src/server/data/archive).
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import re
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Final
 from zoneinfo import ZoneInfo
 
+from app.config.paths import archive_dir
 from app.services import cache_manager
 
 logger = logging.getLogger("ak07.performance_store")
 
 IST: Final = ZoneInfo("Asia/Kolkata")
-ARCHIVE_DIR: Final[Path] = Path(__file__).resolve().parents[1] / "archive"
+ARCHIVE_DIR: Final[Path] = archive_dir()
+LEGACY_ARCHIVE_DIR: Final[Path] = Path(__file__).resolve().parents[1] / "archive"
+ARCHIVE_NAME_RE: Final[re.Pattern[str]] = re.compile(r"^performance_review_(\d{4}-\d{2}-\d{2})\.json$")
 COMPLETED_TRADES_KEY_TEMPLATE: Final[str] = "ak07:completed_trades:{day}"
 TRADE_TTL_SECONDS: Final[int] = 86_400 * 45
 
@@ -87,18 +92,42 @@ def record_completed_trade(
         )
 
 
-def _parse_archive_trades(path: Path) -> list[dict[str, Any]]:
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError, TypeError):
-        return []
-    if not isinstance(payload, dict):
-        return []
+def ingest_strategy1_trade_log(
+    day: str,
+    trade_log: list[dict[str, Any]],
+    *,
+    paper_trading: bool,
+) -> int:
+    """Import EXIT / PARTIAL_BOOK rows from a Strategy 1 archive into Redis."""
+    parsed = _parse_archive_payload(day, trade_log, paper_trading)
+    if not parsed:
+        return 0
 
-    day = str(payload.get("date") or path.stem.replace("performance_review_", ""))
-    paper = bool(payload.get("paper_trading", True))
+    key = COMPLETED_TRADES_KEY_TEMPLATE.format(day=day)
+    existing = cache_manager.get_json(key)
+    merged: list[dict[str, Any]] = existing if isinstance(existing, list) else []
+    seen = {_fingerprint(row) for row in merged}
+    added = 0
+    for row in parsed:
+        fp = _fingerprint(row)
+        if fp in seen:
+            continue
+        seen.add(fp)
+        merged.append(row)
+        added += 1
+    if added:
+        cache_manager.set_json(key, merged, ttl_seconds=TRADE_TTL_SECONDS)
+        logger.info("Ingested %d Strategy 1 closed trade(s) for %s into Redis", added, day)
+    return added
+
+
+def _parse_archive_payload(
+    day: str,
+    trade_log: list[Any],
+    paper_trading: bool,
+) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
-    for event in payload.get("trade_log") or []:
+    for event in trade_log:
         if not isinstance(event, dict):
             continue
         event_type = str(event.get("event") or "")
@@ -114,17 +143,102 @@ def _parse_archive_trades(path: Path) -> list[dict[str, Any]]:
                 "strategy_id": "ak07_oi",
                 "symbol": str(event.get("index") or ""),
                 "direction": str(event.get("direction") or ""),
-                "entry_price": float(event.get("entry_spot") or event.get("spot") or 0),
+                "entry_price": float(
+                    event.get("entry_spot") or event.get("exit_spot") or event.get("spot") or 0
+                ),
                 "exit_price": float(event.get("exit_spot") or event.get("spot") or 0),
                 "pnl_points": round(pnl, 2),
                 "result": classify_result(pnl),
                 "exit_reason": str(event.get("reason") or event_type),
                 "entry_at": "",
                 "exit_at": str(event.get("at") or f"{day}T15:30:00+05:30"),
-                "paper_trading": paper,
+                "paper_trading": paper_trading,
             }
         )
     return out
+
+
+def _parse_archive_trades(path: Path) -> list[dict[str, Any]]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, TypeError):
+        return []
+    if not isinstance(payload, dict):
+        return []
+
+    day = str(payload.get("date") or path.stem.replace("performance_review_", ""))
+    paper = bool(payload.get("paper_trading", True))
+    trade_log = payload.get("trade_log") or []
+    if not isinstance(trade_log, list):
+        return []
+    return _parse_archive_payload(day, trade_log, paper)
+
+
+def _archive_search_dirs() -> list[Path]:
+    dirs: list[Path] = []
+    for candidate in (ARCHIVE_DIR, LEGACY_ARCHIVE_DIR):
+        if candidate in dirs:
+            continue
+        if candidate.is_dir():
+            dirs.append(candidate)
+    return dirs
+
+
+def list_archive_files() -> list[Path]:
+    """All performance_review_*.json files on disk (newest first)."""
+    seen_names: set[str] = set()
+    files: list[Path] = []
+    for directory in _archive_search_dirs():
+        for path in directory.glob("performance_review_*.json"):
+            if not path.is_file() or not ARCHIVE_NAME_RE.match(path.name):
+                continue
+            if path.name in seen_names:
+                continue
+            seen_names.add(path.name)
+            files.append(path)
+    files.sort(key=lambda p: p.name, reverse=True)
+    return files
+
+
+def archive_dates() -> list[str]:
+    return [
+        match.group(1)
+        for path in list_archive_files()
+        if (match := ARCHIVE_NAME_RE.match(path.name))
+    ]
+
+
+def load_status(start_date: date, end_date: date) -> dict[str, Any]:
+    """Diagnostics for the performance dashboard."""
+    archive_files = list_archive_files()
+    archive_in_range = 0
+    for path in archive_files:
+        match = ARCHIVE_NAME_RE.match(path.name)
+        if not match:
+            continue
+        day = date.fromisoformat(match.group(1))
+        if start_date <= day <= end_date:
+            archive_in_range += 1
+
+    redis_days = 0
+    cursor = start_date
+    while cursor <= end_date:
+        key = COMPLETED_TRADES_KEY_TEMPLATE.format(day=cursor.isoformat())
+        rows = cache_manager.get_json(key)
+        if isinstance(rows, list) and rows:
+            redis_days += 1
+        cursor += timedelta(days=1)
+
+    return {
+        "archive_dir": str(ARCHIVE_DIR),
+        "archive_dir_exists": ARCHIVE_DIR.is_dir(),
+        "legacy_archive_dir": str(LEGACY_ARCHIVE_DIR),
+        "legacy_archive_exists": LEGACY_ARCHIVE_DIR.is_dir(),
+        "archive_files_total": len(archive_files),
+        "archive_files_in_range": archive_in_range,
+        "redis_days_with_trades": redis_days,
+        "latest_archive": archive_files[0].name if archive_files else None,
+    }
 
 
 def _load_day_trades(day: str, seen: set[str]) -> list[dict[str, Any]]:
@@ -150,6 +264,15 @@ def _load_day_trades(day: str, seen: set[str]) -> list[dict[str, Any]]:
                 continue
             seen.add(fp)
             out.append(row)
+    else:
+        legacy_path = LEGACY_ARCHIVE_DIR / f"performance_review_{day}.json"
+        if legacy_path.is_file():
+            for row in _parse_archive_trades(legacy_path):
+                fp = _fingerprint(row)
+                if fp in seen:
+                    continue
+                seen.add(fp)
+                out.append(row)
 
     return out
 
@@ -178,10 +301,27 @@ def load_trades(
 
     seen: set[str] = set()
     trades: list[dict[str, Any]] = []
+
+    # Redis + exact-day archive files
     cursor = start_date
     while cursor <= end_date:
         trades.extend(_load_day_trades(cursor.isoformat(), seen))
         cursor += timedelta(days=1)
+
+    # Any archive file in range (covers files whose date key was missed)
+    for path in list_archive_files():
+        match = ARCHIVE_NAME_RE.match(path.name)
+        if not match:
+            continue
+        day = date.fromisoformat(match.group(1))
+        if day < start_date or day > end_date:
+            continue
+        for row in _parse_archive_trades(path):
+            fp = _fingerprint(row)
+            if fp in seen:
+                continue
+            seen.add(fp)
+            trades.append(row)
 
     trades.sort(key=lambda row: str(row.get("exit_at") or ""))
     return trades

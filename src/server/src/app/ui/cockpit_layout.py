@@ -23,7 +23,7 @@ def render_top_status_bar(
 
     s1_mode = "PAPER" if (heartbeat or {}).get("paper_trading") else "LIVE"
     s1_detail = s1_mode if heartbeat else "offline"
-    smc_detail = f"→{smc_hb.get('session_end_ist', '23:30')}" if smc_hb else "offline"
+    smc_detail = f"→{smc_hb.get('session_end_ist', '15:30')}" if smc_hb else "offline"
     bo_detail = f"→{bo_hb.get('session_end_ist', '15:30')}" if bo_hb else "offline"
 
     pills = " ".join(
@@ -37,10 +37,10 @@ def render_top_status_bar(
     if mock_mode:
         pills += ' <span class="ak07-pill ak07-dot-warn">● MOCK</span>'
 
-    c1, c2 = st.columns([5, 1])
-    with c1:
+    bar_col, refresh_col = st.columns([12, 1], gap="small")
+    with bar_col:
         st.markdown(f'<div class="ak07-status-bar">{pills}</div>', unsafe_allow_html=True)
-    with c2:
+    with refresh_col:
         auto_refresh = st.toggle("Refresh", value=True, key="auto_refresh")
         st.caption(f"{refresh_seconds}s · {production_domain}")
     return auto_refresh
