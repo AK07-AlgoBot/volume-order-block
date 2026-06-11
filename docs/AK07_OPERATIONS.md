@@ -42,7 +42,7 @@ Upstox credentials live outside source code:
 src/server/data/users/AK07/upstox_credentials.json
 ```
 
-Use `src/server/templates/upstox_credentials.example.json` as the shape. The engine also attempts the Upstox V3 token-request flow daily at 09:15 IST using `api_key` and `api_secret`.
+Use `src/server/templates/upstox_credentials.example.json` as the shape. The engine also attempts the Upstox V3 token-request flow daily at **08:45 IST** (`AK07_TOKEN_REFRESH_IST`) using `api_key` and `api_secret`.
 
 ## Docker
 
@@ -134,7 +134,7 @@ Persistent volumes:
 
 ## Daily lifecycle
 
-- 09:15 IST: engine requests/refreshes Upstox V3 token and warms Redis.
+- **08:45 IST**: engine requests/refreshes Upstox V3 token and warms Redis (`AK07_TOKEN_REFRESH_IST`).
 - 14:55 IST: entries stop and active positions are squared off.
 - 15:30 IST: performance JSON archive is written under `src/server/src/app/archive/`.
 

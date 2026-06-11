@@ -12,8 +12,8 @@ Responsibilities:
   spot-50, SHORT -> PE near spot+50) and trade it in 2 lots: book 1 lot at
   half target (+60 pts) or on backend warning signals, run the rest to the
   full +120 pt target or the hard -60 pt stop from entry.
-- Daily session automation: at 09:15 IST request/refresh the Upstox V3 access
-  token (API-only flow, no browser) and warm the Redis connection pool; at
+- Daily session automation: at AK07_TOKEN_REFRESH_IST (default 08:45 IST)
+  request/refresh the Upstox V3 access token and warm the Redis connection pool; at
   15:30 IST archive the full session (trades, spot tracking, sentiment, P&L,
   Redis cache dump) to app/archive/performance_review_<YYYY-MM-DD>.json.
 - Manage risk: max 2 trades per index per day, hard 14:55 IST square-off, and
@@ -64,9 +64,34 @@ SUPPORT_POCKET_POINTS: Final[float] = 30.0
 RESISTANCE_POCKET_POINTS: Final[float] = 30.0
 WICK_REJECTION_RATIO: Final[float] = 0.40
 SQUARE_OFF_TIME: Final[dtime] = dtime(14, 55)   # IST hard intraday protection
-ENTRY_OPEN_TIME: Final[dtime] = dtime(9, 20)    # skip the opening rotation
-TOKEN_REFRESH_TIME: Final[dtime] = dtime(9, 15) # daily V3 token request + Redis warm-up
 ARCHIVE_TIME: Final[dtime] = dtime(15, 30)      # post-market performance archival
+
+
+def _parse_ist_time(env_key: str, default_hour: int, default_minute: int) -> dtime:
+    """Parse HH:MM from env (e.g. AK07_TOKEN_REFRESH_IST=08:45)."""
+    raw = (os.environ.get(env_key) or "").strip()
+    if raw:
+        parts = raw.replace(".", ":").split(":")
+        if len(parts) >= 2:
+            try:
+                return dtime(int(parts[0]), int(parts[1]))
+            except ValueError:
+                logger.warning(
+                    "Invalid %s=%r; using default %02d:%02d IST",
+                    env_key,
+                    raw,
+                    default_hour,
+                    default_minute,
+                )
+    return dtime(default_hour, default_minute)
+
+
+def _format_ist_time(value: dtime) -> str:
+    return f"{value.hour:02d}:{value.minute:02d}"
+
+
+ENTRY_OPEN_TIME: Final[dtime] = _parse_ist_time("AK07_ENTRY_OPEN_IST", 9, 20)
+TOKEN_REFRESH_TIME: Final[dtime] = _parse_ist_time("AK07_TOKEN_REFRESH_IST", 8, 45)
 WALL_REFRESH_SECONDS: Final[int] = 300
 POLL_SECONDS: Final[float] = float(os.environ.get("AK07_POLL_SECONDS", "15"))
 PAPER_TRADING: Final[bool] = os.environ.get("AK07_PAPER_TRADING", "1") != "0"
@@ -273,17 +298,18 @@ class UpstoxClient:
                     {**creds, "access_token": token},
                 )
                 logger.info("Upstox V3 access token refreshed and persisted (HTTP 200)")
+                return self.refresh_access_token_from_disk()
             elif response.status_code == 200:
                 logger.info(
                     "Upstox V3 token request accepted; token will arrive via notifier webhook"
                 )
-            else:
-                logger.error(
-                    "Upstox V3 token request failed: HTTP %d %s",
-                    response.status_code,
-                    str(response.text or "")[:300],
-                )
-            return self.refresh_access_token_from_disk()
+                return self.refresh_access_token_from_disk()
+            logger.error(
+                "Upstox V3 token request failed: HTTP %d %s",
+                response.status_code,
+                str(response.text or "")[:300],
+            )
+            return False
         except Exception as exc:  # Bound exception explicitly for debugging safely
             logger.exception("Unexpected failure during daily token refresh: %s", exc)
             return False
@@ -747,7 +773,8 @@ class AK07Engine:
         if self.token_refresh_day == today or now.time() < TOKEN_REFRESH_TIME:
             return
         self.token_refresh_day = today
-        logger.info("Daily session init (09:15 IST gate): requesting Upstox V3 access token")
+        refresh_at = _format_ist_time(TOKEN_REFRESH_TIME)
+        logger.info("Daily session init (%s IST): requesting Upstox V3 access token", refresh_at)
         token_ok = self.client.request_daily_access_token()
         redis_ok = cache_manager.set_json(
             cache_manager.ENGINE_HEARTBEAT_KEY,
@@ -756,7 +783,7 @@ class AK07Engine:
         )
         telegram_notifier.notify_system_event(
             "DAILY SESSION INIT",
-            f"09:15 IST startup - token {'OK' if token_ok else 'PENDING/FAILED'}, "
+            f"{refresh_at} IST startup - token {'OK' if token_ok else 'PENDING/FAILED'}, "
             f"Redis pool {'warm' if redis_ok else 'UNREACHABLE'}.",
         )
 
