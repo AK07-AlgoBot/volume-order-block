@@ -44,6 +44,31 @@ src/server/data/users/AK07/upstox_credentials.json
 
 Use `src/server/templates/upstox_credentials.example.json` as the shape. The engine also attempts the Upstox V3 token-request flow daily at **08:45 IST** (`AK07_TOKEN_REFRESH_IST`) using `api_key` and `api_secret`.
 
+### Upstox auto token (V3 notifier webhook)
+
+API-only apps need a **Notifier Webhook Endpoint** in the [Upstox My Apps](https://account.upstox.com/developer/apps) form:
+
+```text
+https://ak07.in/api/upstox/token-notifier
+```
+
+Requirements:
+
+1. **FastAPI `api` container** must be running (port `8080`).
+2. **nginx** must proxy `/api/` to `127.0.0.1:8080` (see `configs/host-nginx-ak07.conf.example`).
+3. Notifier URL in Upstox portal must match exactly (HTTPS, no trailing slash).
+4. After `refresh_upstox_token.py` succeeds, **approve the request** in the Upstox app/WhatsApp; Upstox POSTs the token to the webhook.
+
+Verify from the server:
+
+```bash
+curl -s https://ak07.in/api/upstox/token-notifier
+curl -s https://ak07.in/api/health
+docker compose -p ak07 -f configs/docker-compose.yml exec engine python scripts/refresh_upstox_token.py
+```
+
+If you see `UDAPI1123 Invalid notifier url`, the portal URL is wrong or `/api/` is not reaching FastAPI. Until fixed, paste today's token manually into `upstox_credentials.json`.
+
 ## Docker
 
 ```bash

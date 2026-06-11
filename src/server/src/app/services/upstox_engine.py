@@ -724,6 +724,8 @@ class AK07Engine:
 
     def tick(self) -> None:
         now = datetime.now(IST)
+        if not isinstance(self.client, MockUpstoxClient):
+            self.client.refresh_access_token_from_disk()
         self._roll_trade_day(now)
         self._daily_session_init(now)
         self._refresh_session_entry_gate(now)

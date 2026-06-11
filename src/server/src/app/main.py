@@ -14,6 +14,7 @@ from app.routes import (
     auth,
     settings_credentials,
     settings_upstox,
+    upstox_notifier,
 )
 
 app = FastAPI(title="AK07 Dashboard API", version="2.0.0")
@@ -30,6 +31,7 @@ app.add_middleware(
 app.include_router(auth.router)
 app.include_router(settings_upstox.router)
 app.include_router(settings_credentials.router)
+app.include_router(upstox_notifier.router)
 
 
 @app.get("/api/health")

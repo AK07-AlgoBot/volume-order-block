@@ -34,3 +34,13 @@ class UserPublic(BaseModel):
     username: str
     role: str
 
+
+class UpstoxTokenNotifierBody(BaseModel):
+    client_id: str = ""
+    user_id: str = ""
+    access_token: str = ""
+    token_type: str = ""
+    expires_at: str = ""
+    issued_at: str = ""
+    message_type: str = ""
+

@@ -24,14 +24,30 @@ from app.services.upstox_engine import UpstoxClient  # noqa: E402
 
 def main() -> int:
     client = UpstoxClient()
+    before = (client.session.headers.get("Authorization") or "").replace("Bearer ", "")
     ok = client.request_daily_access_token()
+    client.refresh_access_token_from_disk()
     token = (client.session.headers.get("Authorization") or "").replace("Bearer ", "")
     print(f"request_daily_access_token returned: {ok}")
     print(f"access_token length: {len(token)}")
-    if not ok or not token:
-        print("Token refresh did not succeed. Check engine logs / Upstox notifier URL.", file=sys.stderr)
+    if not ok:
+        print(
+            "Token request rejected (UDAPI1123 = invalid notifier URL in Upstox portal).",
+            file=sys.stderr,
+        )
+        print(
+            "Set notifier to https://ak07.in/api/upstox/token-notifier, deploy api + nginx /api/ proxy.",
+            file=sys.stderr,
+        )
         return 1
-    return 0
+    if token and token != before:
+        print("Fresh access token saved.")
+        return 0
+    if token:
+        print("Token request accepted — approve on Upstox app; token arrives via webhook.")
+        return 0
+    print("No access token on disk yet.", file=sys.stderr)
+    return 1
 
 
 if __name__ == "__main__":
