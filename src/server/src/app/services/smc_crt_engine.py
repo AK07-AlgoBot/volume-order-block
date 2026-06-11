@@ -1,10 +1,11 @@
 """SMC + CRT strategy engine (Strategy Type 2).
 
 Candle Range Theory on the first 1H session candle (CRH / CRM / CRL), then
-5-minute Fair Value Gap setups with 1:2 minimum R:R toward CRM and swing targets.
-Nifty 50 only — live ITM options, 1 lot per trade.
+5-minute Fair Value Gap setups with 1:2 minimum R:R toward CRM.
+Nifty 50 only — live ITM options, 1 lot per trade, book at TP1 (1R).
 
-Run: python -u src/server/src/app/services/smc_crt_engine.py
+Intraday only: no new entries after 14:45 IST; all open positions are
+market-squared at 14:55 IST (or on kill switch / session end at 15:30).
 """
 
 from __future__ import annotations
@@ -60,6 +61,7 @@ def _parse_ist_time(env_key: str, default_hour: int, default_minute: int) -> dti
 CRT_SESSION_START: Final[dtime] = _parse_ist_time("SMC_CRT_CRT_START_IST", 9, 15)
 SESSION_END: Final[dtime] = _parse_ist_time("SMC_CRT_SESSION_END_IST", 15, 30)
 SQUARE_OFF_TIME: Final[dtime] = _parse_ist_time("SMC_CRT_SQUARE_OFF_IST", 14, 55)
+NO_ENTRY_AFTER: Final[dtime] = _parse_ist_time("SMC_CRT_NO_ENTRY_AFTER_IST", 14, 45)
 
 
 @dataclass(frozen=True)
@@ -110,6 +112,7 @@ class SMCCRTPosition:
 @dataclass
 class InstrumentState:
     config: SMCCRTInstrument
+    trade_day: str = ""
     spot: float | None = None
     crh: float | None = None
     crm: float | None = None
@@ -294,13 +297,16 @@ class SMCCRTEngine:
     def __init__(self) -> None:
         self.client = SMCCRTMarketClient()
         self.states = {code: InstrumentState(config=cfg) for code, cfg in SMC_CRT_INSTRUMENTS.items()}
+        self._square_off_alert_day = ""
         logger.info(
-            "SMC+CRT engine started (paper=%s mock=%s nifty only lot=%d session_end=%02d:%02d IST)",
+            "SMC+CRT engine started (paper=%s mock=%s nifty only lot=%d "
+            "no_entry_after=%s square_off=%s session_end=%s IST)",
             PAPER_TRADING,
             MOCK_MODE,
             LOTS_PER_TRADE,
-            SESSION_END.hour,
-            SESSION_END.minute,
+            NO_ENTRY_AFTER.strftime("%H:%M"),
+            SQUARE_OFF_TIME.strftime("%H:%M"),
+            SESSION_END.strftime("%H:%M"),
         )
 
     def run(self) -> None:
@@ -315,14 +321,53 @@ class SMCCRTEngine:
     def tick(self) -> None:
         now = datetime.now(IST)
         self.client.refresh_token()
+        self._roll_trade_day(now)
+
         if now.time() >= SESSION_END:
+            self._square_off_all("SESSION_END", now)
             self._publish_all(now, entries_blocked=True, block_reason="session closed")
             return
 
-        entries_blocked = now.time() >= SQUARE_OFF_TIME
+        kill = self._kill_switch_engaged()
+        if kill:
+            self._square_off_all("KILL_SWITCH", now)
+
+        entries_blocked = kill or now.time() >= NO_ENTRY_AFTER
+        if now.time() >= SQUARE_OFF_TIME:
+            today = now.date().isoformat()
+            if any(s.position for s in self.states.values()) and self._square_off_alert_day != today:
+                telegram_notifier.notify_system_event(
+                    "SMC INTRADAY SQUARE-OFF",
+                    f"Closing all SMC positions at {SQUARE_OFF_TIME.strftime('%H:%M')} IST.",
+                )
+                self._square_off_alert_day = today
+            self._square_off_all("TIME_GATE_1455", now)
+            entries_blocked = True
+
         for state in self.states.values():
             self._process_instrument(state, now, entries_blocked)
         self._publish_heartbeat(now)
+
+    def _roll_trade_day(self, now: datetime) -> None:
+        today = now.date().isoformat()
+        for state in self.states.values():
+            if state.trade_day != today:
+                if state.position is not None:
+                    logger.warning(
+                        "%s SMC open position at day roll — forcing flat (intraday only)",
+                        state.config.display,
+                    )
+                state.trade_day = today
+                self._square_off_alert_day = ""
+                state.trades_today = 0
+                state.position = None
+                state.crt_ready = False
+                state.crh = state.crm = state.crl = None
+                state.swept_low = state.swept_high = False
+                state.last_fvg = None
+                state.last_signal_fvg_ts = ""
+                state.setup_label = "New session — building 1H CRT"
+                state.signal_log = []
 
     def _process_instrument(self, state: InstrumentState, now: datetime, entries_blocked: bool) -> None:
         cfg = state.config
@@ -330,8 +375,12 @@ class SMCCRTEngine:
         if spot is not None:
             state.spot = spot
 
+        # Always monitor open positions (TP/SL/intraday square-off), even while CRT builds.
+        if state.position:
+            self._manage_position(state, now)
+
         self._refresh_crt(state, now)
-        if state.crt_ready:
+        if state.crt_ready and not state.position:
             candles_5m = self.client.get_candles(cfg, CANDLE_5M) or []
             if candles_5m:
                 self._update_sweep_flags(state, candles_5m)
@@ -339,12 +388,12 @@ class SMCCRTEngine:
                 if fvg:
                     state.last_fvg = fvg
 
-            if state.position:
-                self._manage_position(state, now)
-            elif not entries_blocked:
+            if not entries_blocked:
                 self._seek_entry(state, candles_5m, now)
+            elif now.time() >= SQUARE_OFF_TIME:
+                state.setup_label = "Intraday square-off — flat, no new entries"
             else:
-                state.setup_label = "Square-off window — no new SMC entries"
+                state.setup_label = f"No new entries after {NO_ENTRY_AFTER.strftime('%H:%M')} IST"
 
         self._publish_state(state, now, entries_blocked)
 
@@ -485,9 +534,14 @@ class SMCCRTEngine:
 
     def _manage_position(self, state: InstrumentState, now: datetime) -> None:
         pos = state.position
-        if pos is None or state.spot is None:
+        if pos is None:
             return
-        spot = state.spot
+        spot = state.spot if state.spot is not None else pos.entry_price
+
+        if now.time() >= SQUARE_OFF_TIME:
+            self._close_position(state, pos, spot, "INTRADAY_SQUARE_OFF_1455", now)
+            return
+
         exit_reason = ""
         if pos.direction == "LONG":
             if spot <= pos.sl_price:
@@ -503,12 +557,30 @@ class SMCCRTEngine:
         if not exit_reason:
             return
 
+        self._close_position(state, pos, spot, exit_reason, now)
+
+    def _close_position(
+        self,
+        state: InstrumentState,
+        pos: SMCCRTPosition,
+        spot: float,
+        reason: str,
+        now: datetime,
+    ) -> bool:
         if pos.instrument_key:
-            self.client.place_exit(pos.instrument_key, pos.quantity)
+            ok = self.client.place_exit(pos.instrument_key, pos.quantity)
+            if not ok:
+                logger.error(
+                    "%s SMC exit order failed (%s) — will retry next tick",
+                    state.config.display,
+                    reason,
+                )
+                state.setup_label = f"Exit pending — {reason} (retrying)"
+                return False
 
         pnl = (spot - pos.entry_price) if pos.direction == "LONG" else (pos.entry_price - spot)
-        logger.info("%s SMC exit: %s @ spot %.2f", state.config.display, exit_reason, spot)
-        state.signal_log.append(f"Exit: {exit_reason} @ {spot:.2f}")
+        logger.info("%s SMC exit: %s @ spot %.2f", state.config.display, reason, spot)
+        state.signal_log.append(f"Exit: {reason} @ {spot:.2f}")
         performance_store.record_completed_trade(
             strategy=performance_store.STRATEGY_SMC_CRT,
             strategy_id="smc_crt",
@@ -517,20 +589,33 @@ class SMCCRTEngine:
             entry_price=pos.entry_price,
             exit_price=spot,
             pnl_points=pnl,
-            exit_reason=exit_reason,
+            exit_reason=reason,
             entry_at=pos.opened_at,
             paper_trading=PAPER_TRADING,
         )
         state.position = None
-        state.setup_label = f"Flat after {exit_reason}"
+        state.setup_label = f"Flat — {reason}"
         telegram_notifier.notify_trade_exit(
             index_name=f"{state.config.display} SMC ({pos.option_strike}{pos.option_type})",
             trade_type=pos.direction,
             exit_price=spot,
             pnl_points=pnl,
-            reason=exit_reason,
+            reason=reason,
             timestamp=now.strftime("%Y-%m-%d %H:%M:%S IST"),
         )
+        return True
+
+    def _square_off_all(self, reason: str, now: datetime) -> None:
+        for state in self.states.values():
+            if state.position is None:
+                continue
+            pos = state.position
+            spot = state.spot if state.spot is not None else pos.entry_price
+            self._close_position(state, pos, spot, reason, now)
+
+    def _kill_switch_engaged(self) -> bool:
+        flag = cache_manager.get_json(cache_manager.KILL_SWITCH_KEY)
+        return bool(flag and flag.get("engaged"))
 
     def _publish_all(self, now: datetime, entries_blocked: bool, block_reason: str = "") -> None:
         for state in self.states.values():
@@ -564,6 +649,8 @@ class SMCCRTEngine:
             "max_trades": MAX_TRADES_PER_DAY,
             "lots_per_trade": LOTS_PER_TRADE,
             "session_end_ist": SESSION_END.strftime("%H:%M"),
+            "square_off_ist": SQUARE_OFF_TIME.strftime("%H:%M"),
+            "no_entry_after_ist": NO_ENTRY_AFTER.strftime("%H:%M"),
             "signals": state.signal_log[-8:],
             "instrument_key": self.client.instrument_key(state.config),
             "updated_at": now.isoformat(),
@@ -600,6 +687,8 @@ class SMCCRTEngine:
                 "paper_trading": PAPER_TRADING,
                 "mock": MOCK_MODE,
                 "session_end_ist": SESSION_END.strftime("%H:%M"),
+                "square_off_ist": SQUARE_OFF_TIME.strftime("%H:%M"),
+                "no_entry_after_ist": NO_ENTRY_AFTER.strftime("%H:%M"),
                 "instruments": list(SMC_CRT_INSTRUMENTS.keys()),
             },
             ttl_seconds=60,

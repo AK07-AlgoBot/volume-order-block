@@ -79,8 +79,8 @@ def _parse_ist_time(env_key: str, default_hour: int, default_minute: int) -> dti
 
 SESSION_START: Final[dtime] = _parse_ist_time("BREAKOUT_SESSION_START_IST", 9, 15)
 ENTRY_START: Final[dtime] = _parse_ist_time("BREAKOUT_ENTRY_START_IST", 9, 20)
-NO_ENTRY_AFTER: Final[dtime] = _parse_ist_time("BREAKOUT_NO_ENTRY_AFTER_IST", 15, 0)
-SQUARE_OFF_TIME: Final[dtime] = _parse_ist_time("BREAKOUT_SQUARE_OFF_IST", 15, 15)
+NO_ENTRY_AFTER: Final[dtime] = _parse_ist_time("BREAKOUT_NO_ENTRY_AFTER_IST", 14, 45)
+SQUARE_OFF_TIME: Final[dtime] = _parse_ist_time("BREAKOUT_SQUARE_OFF_IST", 14, 55)
 SESSION_END: Final[dtime] = _parse_ist_time("BREAKOUT_SESSION_END_IST", 15, 30)
 
 
@@ -446,6 +446,7 @@ class BreakoutEngine:
         self._roll_trade_day(now)
 
         if now.time() >= SESSION_END:
+            self._square_off_all("SESSION_END", now)
             self._publish_all(now, entries_blocked=True, block_reason="session closed")
             return
 
@@ -466,6 +467,11 @@ class BreakoutEngine:
         today = now.date().isoformat()
         for state in self.states.values():
             if state.trade_day != today:
+                if state.position is not None:
+                    logger.warning(
+                        "[%s] breakout open position at day roll — forcing flat (intraday only)",
+                        state.config.code,
+                    )
                 state.trade_day = today
                 state.trades_today = 0
                 state.position = None
@@ -795,6 +801,9 @@ class BreakoutEngine:
             "block_reason": block_reason,
             "paper_trading": PAPER_TRADING,
             "signals": state.signal_log[-10:],
+            "session_end_ist": SESSION_END.strftime("%H:%M"),
+            "square_off_ist": SQUARE_OFF_TIME.strftime("%H:%M"),
+            "no_entry_after_ist": NO_ENTRY_AFTER.strftime("%H:%M"),
             "updated_at": now.isoformat(),
         }
         if pos:
@@ -820,6 +829,8 @@ class BreakoutEngine:
                 "paper_trading": PAPER_TRADING,
                 "mock": MOCK_MODE,
                 "session_end_ist": SESSION_END.strftime("%H:%M"),
+                "square_off_ist": SQUARE_OFF_TIME.strftime("%H:%M"),
+                "no_entry_after_ist": NO_ENTRY_AFTER.strftime("%H:%M"),
                 "indices": list(INDEX_CONFIGS.keys()),
             },
             ttl_seconds=60,

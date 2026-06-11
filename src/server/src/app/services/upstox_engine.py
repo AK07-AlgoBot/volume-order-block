@@ -93,6 +93,7 @@ def _format_ist_time(value: dtime) -> str:
 
 
 ENTRY_OPEN_TIME: Final[dtime] = _parse_ist_time("AK07_ENTRY_OPEN_IST", 9, 20)
+NO_ENTRY_AFTER: Final[dtime] = _parse_ist_time("AK07_NO_ENTRY_AFTER_IST", 14, 45)
 TOKEN_REFRESH_TIME: Final[dtime] = _parse_ist_time("AK07_TOKEN_REFRESH_IST", 8, 45)
 WALL_REFRESH_SECONDS: Final[int] = 300
 POLL_SECONDS: Final[float] = float(os.environ.get("AK07_POLL_SECONDS", "15"))
@@ -783,6 +784,9 @@ class AK07Engine:
             self.square_off_all("TIME_GATE_1455")
             self.session_entries_blocked = True
             logger.info("entries blocked (14:55 IST time gate)")
+        elif now.time() >= NO_ENTRY_AFTER:
+            self.session_entries_blocked = True
+            logger.debug("entries blocked (post %s IST no-entry window)", NO_ENTRY_AFTER.strftime("%H:%M"))
         elif now.time() < ENTRY_OPEN_TIME:
             self.session_entries_blocked = True
             logger.debug("entries blocked (pre-9:20 opening rotation skip)")
@@ -1197,6 +1201,12 @@ class AK07Engine:
         today = now.date().isoformat()
         for state in self.states.values():
             if state.trade_day != today:
+                if state.position is not None:
+                    logger.warning(
+                        "[%s] open position at day roll — forcing flat (intraday only)",
+                        state.config.code,
+                    )
+                    state.position = None
                 state.trade_day = today
                 state.trades_today = 0
                 state.last_candle_ts = ""
@@ -1245,7 +1255,14 @@ class AK07Engine:
         cache_manager.set_json(cache_manager.POSITIONS_KEY, positions)
         cache_manager.set_json(
             cache_manager.ENGINE_HEARTBEAT_KEY,
-            {"at": now.isoformat(), "paper_trading": PAPER_TRADING},
+            {
+                "at": now.isoformat(),
+                "paper_trading": PAPER_TRADING,
+                "entry_open_ist": ENTRY_OPEN_TIME.strftime("%H:%M"),
+                "no_entry_after_ist": NO_ENTRY_AFTER.strftime("%H:%M"),
+                "square_off_ist": SQUARE_OFF_TIME.strftime("%H:%M"),
+                "session_end_ist": ARCHIVE_TIME.strftime("%H:%M"),
+            },
             ttl_seconds=60,
         )
         nifty = self.states["NIFTY"]
