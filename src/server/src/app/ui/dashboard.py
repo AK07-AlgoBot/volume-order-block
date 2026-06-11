@@ -75,6 +75,34 @@ st.markdown(
         color: #fff !important; font-weight: 800 !important; font-size: 1.05rem !important;
         padding: 0.9rem 0.5rem !important; width: 100%;
       }
+      /* Readable text on dark background (captions, expanders, signals) */
+      .stApp, .stApp p, .stApp li, .stApp label, .stApp span { color: #e6e9ef; }
+      [data-testid="stCaptionContainer"], .stCaption {
+        color: #b8c4d4 !important;
+      }
+      [data-testid="stExpander"] {
+        background-color: #161b24 !important;
+        border: 1px solid #232b38 !important;
+        border-radius: 8px !important;
+      }
+      [data-testid="stExpander"] summary,
+      [data-testid="stExpander"] summary span,
+      [data-testid="stExpander"] summary p {
+        color: #e6e9ef !important;
+      }
+      [data-testid="stExpander"] div[data-testid="stExpanderDetails"] {
+        background-color: #12161d !important;
+        color: #e6e9ef !important;
+      }
+      [data-testid="stExpander"] div[data-testid="stExpanderDetails"] p,
+      [data-testid="stExpander"] div[data-testid="stExpanderDetails"] pre {
+        color: #e6e9ef !important;
+      }
+      .ak07-signal-line {
+        color: #e6e9ef; font-family: ui-monospace, monospace;
+        font-size: 0.88rem; margin: 0.15rem 0;
+      }
+      .ak07-muted-line { color: #b8c4d4; font-size: 0.85rem; }
     </style>
     """,
     unsafe_allow_html=True,
@@ -138,7 +166,10 @@ def render_smc_crt_strategy_panel(symbol_code: str) -> None:
     s2.metric("CRM (equilibrium)", fmt(smc.get("crm")))
     s3.metric("CRL (range low)", fmt(smc.get("crl")))
     s4.metric("Spot", fmt(float(smc["spot"])) if smc.get("spot") is not None else "—")
-    s5.metric("Setup", smc.get("setup_label", "—")[:28])
+    setup = str(smc.get("setup_label") or "—")
+    s5.metric("Setup", setup[:22] + "…" if len(setup) > 22 else setup)
+    if len(setup) > 22:
+        st.markdown(f'<p class="ak07-muted-line">Setup detail: {setup}</p>', unsafe_allow_html=True)
 
     flags = []
     if smc.get("swept_low"):
@@ -150,15 +181,16 @@ def render_smc_crt_strategy_panel(symbol_code: str) -> None:
     if smc.get("entries_blocked"):
         flags.append("entries blocked")
     if flags:
-        st.caption(" · ".join(flags))
+        st.markdown(f'<p class="ak07-muted-line">{" · ".join(flags)}</p>', unsafe_allow_html=True)
 
     fvg = smc.get("fvg") or {}
     if fvg:
-        st.caption(
+        fvg_line = (
             f"Last FVG: {fvg.get('direction', '—')} "
             f"{fmt(float(fvg.get('low'))) if fvg.get('low') is not None else '—'} – "
             f"{fmt(float(fvg.get('high'))) if fvg.get('high') is not None else '—'}"
         )
+        st.markdown(f'<p class="ak07-muted-line">{fvg_line}</p>', unsafe_allow_html=True)
 
     st.markdown("##### Strategy Type 2 — Active Position")
     smc_pos = smc.get("position")
@@ -179,19 +211,22 @@ def render_smc_crt_strategy_panel(symbol_code: str) -> None:
 
     signals = smc.get("signals") or []
     if signals:
-        with st.expander("Recent SMC signals"):
+        with st.expander("Recent SMC signals", expanded=False):
             for line in signals:
-                st.text(line)
+                st.markdown(f'<p class="ak07-signal-line">{line}</p>', unsafe_allow_html=True)
 
     updated = str(smc.get("updated_at", ""))[:19].replace("T", " ")
-    st.caption(f"SMC state updated {updated} · trades today {smc.get('trades_today', 0)}")
+    st.markdown(
+        f'<p class="ak07-muted-line">SMC state updated {updated} · trades today {smc.get("trades_today", 0)}</p>',
+        unsafe_allow_html=True,
+    )
 
 
 def render_smc_only_tab(symbol_code: str) -> None:
     """Full-tab SMC+CRT view for commodity paper instruments."""
     cfg = SMC_CRT_INSTRUMENTS[symbol_code]
     st.markdown(f"### {cfg.display}")
-    st.caption("Strategy Type 2 only · paper simulation · session extended to 23:30 IST")
+    st.caption("Strategy Type 2 · paper orders · live Upstox quotes · session until 23:30 IST")
     render_smc_crt_strategy_panel(symbol_code)
 
 
