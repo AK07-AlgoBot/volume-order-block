@@ -122,7 +122,16 @@ def render_smc_crt_strategy_panel(symbol_code: str) -> None:
 
     cfg = SMC_CRT_INSTRUMENTS.get(symbol_code)
     if cfg and cfg.paper_only:
-        st.info(f"Paper-only instrument — simulated feed until live MCX keys are wired.")
+        source = smc.get("quote_source") or "unknown"
+        key = smc.get("instrument_key") or "—"
+        if source == "upstox":
+            st.caption(f"Paper orders only · **live Upstox quote** · `{key}`")
+        else:
+            st.warning(
+                "Showing **simulated** prices — Upstox MCX quote unavailable. "
+                "Check access token (Profile HTTP 200) and restart `smc_crt_engine`."
+            )
+            st.caption(f"Optional override: set `SMC_CRT_{symbol_code}_INSTRUMENT_KEY` in `.env`")
 
     s1, s2, s3, s4, s5 = st.columns(5)
     s1.metric("CRH (range high)", fmt(smc.get("crh")))

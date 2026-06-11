@@ -29,7 +29,6 @@ from app.services.upstox_engine import (
     MOCK_MODE,
     PAPER_TRADING,
     UpstoxClient,
-    build_upstox_client,
     parse_v3_intraday_candles,
 )
 
@@ -65,6 +64,7 @@ class SMCCRTInstrument:
     code: str
     display: str
     spot_instrument_key: str
+    mcx_search_query: str
     paper_only: bool
     crt_start: dtime
     baseline_spot: float
@@ -84,7 +84,8 @@ SMC_CRT_INSTRUMENTS: Final[dict[str, SMCCRTInstrument]] = {
     "CRUDE": SMCCRTInstrument(
         code="CRUDE",
         display="Crude Oil (MCX)",
-        spot_instrument_key="MCX_FO|CRUDEOIL",
+        spot_instrument_key="",
+        mcx_search_query="CRUDEOIL",
         paper_only=True,
         crt_start=_parse_ist_time("SMC_CRT_CRUDE_CRT_START_IST", 9, 0),
         baseline_spot=6_820.0,
@@ -93,7 +94,8 @@ SMC_CRT_INSTRUMENTS: Final[dict[str, SMCCRTInstrument]] = {
     "GOLD": SMCCRTInstrument(
         code="GOLD",
         display="Gold (MCX)",
-        spot_instrument_key="MCX_FO|GOLD",
+        spot_instrument_key="",
+        mcx_search_query="GOLD",
         paper_only=True,
         crt_start=_parse_ist_time("SMC_CRT_GOLD_CRT_START_IST", 9, 0),
         baseline_spot=72_450.0,
@@ -102,7 +104,8 @@ SMC_CRT_INSTRUMENTS: Final[dict[str, SMCCRTInstrument]] = {
     "SILVER": SMCCRTInstrument(
         code="SILVER",
         display="Silver (MCX)",
-        spot_instrument_key="MCX_FO|SILVER",
+        spot_instrument_key="",
+        mcx_search_query="SILVER",
         paper_only=True,
         crt_start=_parse_ist_time("SMC_CRT_SILVER_CRT_START_IST", 9, 0),
         baseline_spot=85_200.0,
@@ -188,42 +191,109 @@ def rr_ok(entry: float, sl: float, target: float, direction: str) -> bool:
 
 
 class SMCCRTMarketClient:
-    """Wraps Upstox + internal mock paths for commodity paper testing."""
+    """Live Upstox quotes for all symbols; paper-only = no real orders on commodities."""
 
     def __init__(self) -> None:
-        self._upstox = build_upstox_client() if not MOCK_MODE else None
+        self._upstox: UpstoxClient | None = None if MOCK_MODE else UpstoxClient()
         self._mock_spots: dict[str, float] = {
             code: cfg.baseline_spot for code, cfg in SMC_CRT_INSTRUMENTS.items()
         }
         self._mock_crt: dict[str, tuple[float, float, float]] = {}
+        self._resolved_keys: dict[str, str] = {}
+        self._quote_source: dict[str, str] = {}
         self._tick = 0
 
     def refresh_token(self) -> None:
         if self._upstox:
             self._upstox.refresh_access_token_from_disk()
 
+    def quote_source(self, code: str) -> str:
+        return self._quote_source.get(code, "unknown")
+
+    def resolved_key(self, cfg: SMCCRTInstrument) -> str:
+        return self._resolve_key(cfg)
+
+    def _env_instrument_key(self, code: str) -> str:
+        return (os.environ.get(f"SMC_CRT_{code}_INSTRUMENT_KEY") or "").strip()
+
+    def _resolve_key(self, cfg: SMCCRTInstrument) -> str:
+        override = self._env_instrument_key(cfg.code)
+        if override:
+            self._resolved_keys[cfg.code] = override
+            return override
+        if cfg.code in self._resolved_keys:
+            return self._resolved_keys[cfg.code]
+        if cfg.spot_instrument_key:
+            return cfg.spot_instrument_key
+        if not self._upstox or not cfg.mcx_search_query:
+            return ""
+        rows = self._upstox._get(  # noqa: SLF001
+            f"{self._upstox.base_url}/instruments/search",
+            {
+                "query": cfg.mcx_search_query,
+                "exchanges": "MCX",
+                "segments": "FUT",
+                "expiry": "current_month",
+                "page_number": 1,
+                "records": 20,
+            },
+        )
+        if not isinstance(rows, list):
+            rows = []
+        futures = [
+            row
+            for row in rows
+            if isinstance(row, dict)
+            and str(row.get("segment") or "") == "MCX_FO"
+            and row.get("expiry")
+            and row.get("instrument_key")
+        ]
+        futures.sort(key=lambda row: str(row.get("expiry") or ""))
+        if futures:
+            key = str(futures[0]["instrument_key"])
+            self._resolved_keys[cfg.code] = key
+            logger.info("Resolved %s MCX future -> %s", cfg.code, key)
+            return key
+        logger.warning("Could not resolve MCX instrument for %s (%s)", cfg.code, cfg.mcx_search_query)
+        return ""
+
     def get_spot(self, cfg: SMCCRTInstrument) -> float | None:
-        if MOCK_MODE or cfg.paper_only:
-            base = self._mock_spots.get(cfg.code, cfg.baseline_spot)
-            drift = base * random.uniform(-0.0008, 0.0008)
-            value = round(base + drift, 2)
-            self._mock_spots[cfg.code] = value
-            return value
+        if MOCK_MODE:
+            return self._mock_spot(cfg)
         if self._upstox:
-            return self._upstox.get_ltp(cfg.spot_instrument_key)
-        return None
+            key = self._resolve_key(cfg)
+            if key:
+                ltp = self._upstox.get_ltp(key)
+                if ltp is not None:
+                    self._quote_source[cfg.code] = "upstox"
+                    self._mock_spots[cfg.code] = ltp
+                    return ltp
+                logger.warning("Upstox LTP failed for %s (%s)", cfg.code, key)
+        self._quote_source[cfg.code] = "simulated"
+        return self._mock_spot(cfg)
+
+    def _mock_spot(self, cfg: SMCCRTInstrument) -> float:
+        base = self._mock_spots.get(cfg.code, cfg.baseline_spot)
+        drift = base * random.uniform(-0.0008, 0.0008)
+        value = round(base + drift, 2)
+        self._mock_spots[cfg.code] = value
+        return value
 
     def get_candles(self, cfg: SMCCRTInstrument, minutes: int) -> list[dict[str, float]] | None:
-        if MOCK_MODE or cfg.paper_only:
+        if MOCK_MODE:
             return self._mock_candles(cfg, minutes)
-        if not self._upstox:
-            return []
-        v3_base = self._upstox.base_url.replace("/v2", "/v3")
-        url = f"{v3_base}/historical-candle/intraday/{cfg.spot_instrument_key}/minutes/{minutes}"
-        data = self._upstox._get(url)  # noqa: SLF001
-        if data is None:
-            return []
-        return parse_v3_intraday_candles(data, datetime.now(IST)) or []
+        if self._upstox:
+            key = self._resolve_key(cfg)
+            if key:
+                v3_base = self._upstox.base_url.replace("/v2", "/v3")
+                url = f"{v3_base}/historical-candle/intraday/{key}/minutes/{minutes}"
+                data = self._upstox._get(url)  # noqa: SLF001
+                if data is not None:
+                    parsed = parse_v3_intraday_candles(data, datetime.now(IST))
+                    if parsed:
+                        return parsed
+                logger.warning("Upstox candles failed for %s (%s)", cfg.code, key)
+        return self._mock_candles(cfg, minutes)
 
     def _mock_candles(self, cfg: SMCCRTInstrument, minutes: int) -> list[dict[str, float]]:
         now = datetime.now(IST)
@@ -495,6 +565,8 @@ class SMCCRTEngine:
             "trades_today": state.trades_today,
             "session_end_ist": SESSION_END.strftime("%H:%M"),
             "signals": state.signal_log[-8:],
+            "quote_source": self.client.quote_source(state.config.code),
+            "instrument_key": self.client.resolved_key(state.config),
             "updated_at": now.isoformat(),
         }
         if state.last_fvg:
