@@ -731,6 +731,10 @@ class AK07Engine:
         self.realized_pnl_points: dict[str, float] = {c: 0.0 for c in INDEX_CONFIGS}
         self.token_refresh_day = ""
         self.archived_day = ""
+        logger.info("AK07 archive directory: %s", ARCHIVE_DIR.resolve())
+        migrated = performance_store.migrate_legacy_archives_to_volume(ingest_redis=True)
+        if migrated.get("copied"):
+            logger.info("Migrated legacy archives on startup: %s", migrated["copied"])
         logger.info("AK07 engine initialized (paper_trading=%s)", PAPER_TRADING)
 
     def run(self) -> None:
@@ -1183,7 +1187,7 @@ class AK07Engine:
                 os.chmod(out_path, 0o600)
             except OSError:
                 pass
-            logger.info("Performance review archived: %s", out_path)
+            logger.info("Performance review archived: %s", out_path.resolve())
             performance_store.ingest_strategy1_trade_log(
                 today,
                 self.trade_log,
@@ -1191,7 +1195,7 @@ class AK07Engine:
             )
             telegram_notifier.notify_system_event(
                 "15:30 DATA ARCHIVAL",
-                f"Session archived to {out_path.name} "
+                f"Session archived to `{out_path.resolve()}` "
                 f"(total {payload['pnl_points_total']:+.2f} pts, {len(self.trade_log)} events).",
             )
         except Exception as exc:

@@ -86,6 +86,10 @@ for i in {1..30}; do
   fi
 done
 
+echo "==> Migrate performance archives to persistent volume"
+docker compose -p "$PROJECT_NAME" -f "$COMPOSE_FILE" exec -T engine \
+  python scripts/migrate_performance_archives.py || true
+
 echo "==> Status"
 docker compose -p "$PROJECT_NAME" -f "$COMPOSE_FILE" ps
 

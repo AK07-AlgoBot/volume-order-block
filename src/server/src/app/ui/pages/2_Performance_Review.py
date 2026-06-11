@@ -6,9 +6,12 @@ import os
 import sys
 from datetime import date, datetime, timedelta
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 import streamlit as st
+
+IST = ZoneInfo("Asia/Kolkata")
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
@@ -56,7 +59,7 @@ with f3:
     else:
         st.caption("Closed trades · S1 OI · S2 SMC+CRT · S3 BLR Breakout · sidebar « for nav")
 
-today = date.today()
+today = datetime.now(IST).date()
 if range_choice == "Today":
     start_date = today
 elif range_choice == "Last 7 days":

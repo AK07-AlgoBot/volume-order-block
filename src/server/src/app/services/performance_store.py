@@ -121,6 +121,61 @@ def ingest_strategy1_trade_log(
     return added
 
 
+def migrate_legacy_archives_to_volume(*, ingest_redis: bool = True) -> dict[str, Any]:
+    """Copy performance_review_*.json from legacy app/archive into the data volume."""
+    import shutil
+
+    target = ARCHIVE_DIR
+    target.mkdir(parents=True, exist_ok=True)
+    copied: list[str] = []
+    ingested_days: list[str] = []
+
+    if not LEGACY_ARCHIVE_DIR.is_dir():
+        return {
+            "legacy_dir": str(LEGACY_ARCHIVE_DIR),
+            "target_dir": str(target),
+            "copied": copied,
+            "ingested_days": ingested_days,
+        }
+
+    for path in sorted(LEGACY_ARCHIVE_DIR.glob("performance_review_*.json")):
+        if not ARCHIVE_NAME_RE.match(path.name):
+            continue
+        dest = target / path.name
+        if not dest.exists() or dest.stat().st_size < path.stat().st_size:
+            shutil.copy2(path, dest)
+            copied.append(path.name)
+        if ingest_redis:
+            try:
+                payload = json.loads(dest.read_text(encoding="utf-8"))
+                day = str(payload.get("date") or dest.stem.replace("performance_review_", ""))
+                trade_log = payload.get("trade_log") or []
+                if isinstance(trade_log, list):
+                    added = ingest_strategy1_trade_log(
+                        day,
+                        trade_log,
+                        paper_trading=bool(payload.get("paper_trading", True)),
+                    )
+                    if added:
+                        ingested_days.append(day)
+            except (OSError, json.JSONDecodeError, TypeError) as exc:
+                logger.warning("Could not ingest %s after migrate: %s", path.name, exc)
+
+    if copied:
+        logger.info(
+            "Migrated %d archive file(s) from %s -> %s",
+            len(copied),
+            LEGACY_ARCHIVE_DIR,
+            target,
+        )
+    return {
+        "legacy_dir": str(LEGACY_ARCHIVE_DIR),
+        "target_dir": str(target),
+        "copied": copied,
+        "ingested_days": ingested_days,
+    }
+
+
 def _parse_archive_payload(
     day: str,
     trade_log: list[Any],
@@ -171,7 +226,34 @@ def _parse_archive_trades(path: Path) -> list[dict[str, Any]]:
     trade_log = payload.get("trade_log") or []
     if not isinstance(trade_log, list):
         return []
-    return _parse_archive_payload(day, trade_log, paper)
+    rows = _parse_archive_payload(day, trade_log, paper)
+    if rows:
+        return rows
+    # Fallback when trade_log only has ENTRY rows but session PnL was recorded.
+    pnl_by_index = payload.get("pnl_points_by_index") or {}
+    if not isinstance(pnl_by_index, dict):
+        return []
+    for index, raw_pnl in pnl_by_index.items():
+        pnl = float(raw_pnl or 0)
+        if abs(pnl) < 0.01:
+            continue
+        rows.append(
+            {
+                "strategy": STRATEGY_AK07_OI,
+                "strategy_id": "ak07_oi",
+                "symbol": str(index),
+                "direction": "",
+                "entry_price": 0.0,
+                "exit_price": 0.0,
+                "pnl_points": round(pnl, 2),
+                "result": classify_result(pnl),
+                "exit_reason": "session_archive_summary",
+                "entry_at": "",
+                "exit_at": f"{day}T15:30:00+05:30",
+                "paper_trading": paper,
+            }
+        )
+    return rows
 
 
 def _archive_search_dirs() -> list[Path]:
@@ -294,6 +376,8 @@ def load_trades(
     end_date: date | None = None,
 ) -> list[dict[str, Any]]:
     """Load completed trades from Redis + archive files for the inclusive date range."""
+    migrate_legacy_archives_to_volume(ingest_redis=True)
+
     if end_date is None:
         end_date = datetime.now(IST).date()
     if start_date is None:
