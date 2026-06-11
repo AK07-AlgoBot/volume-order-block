@@ -33,6 +33,8 @@ KILL_SWITCH_KEY: Final[str] = "ak07:kill_switch"
 ENGINE_HEARTBEAT_KEY: Final[str] = "ak07:engine_heartbeat"
 SMC_CRT_STATE_KEY_TEMPLATE: Final[str] = "ak07:smc_crt_state:{symbol}"
 SMC_CRT_HEARTBEAT_KEY: Final[str] = "ak07:smc_crt_heartbeat"
+BREAKOUT_STATE_KEY_TEMPLATE: Final[str] = "ak07:breakout_state:{index}"
+BREAKOUT_HEARTBEAT_KEY: Final[str] = "ak07:breakout_heartbeat"
 
 LIVE_STATE_TTL_SECONDS: Final[int] = 300
 

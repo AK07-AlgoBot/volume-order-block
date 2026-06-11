@@ -125,6 +125,177 @@ def seed() -> None:
         )
 
     _seed_smc_crt(now, kill_engaged)
+    _seed_breakout(now, kill_engaged)
+    _seed_performance_trades(now)
+
+
+def _seed_performance_trades(now: datetime) -> None:
+    """Sample closed trades for the performance review page (mock mode)."""
+    from app.services import performance_store  # noqa: PLC0415
+
+    day = now.date().isoformat()
+    key = performance_store.COMPLETED_TRADES_KEY_TEMPLATE.format(day=day)
+    if cache_manager.get_json(key):
+        return
+
+    samples = [
+        {
+            "strategy": performance_store.STRATEGY_AK07_OI,
+            "strategy_id": "ak07_oi",
+            "symbol": "NIFTY",
+            "direction": "LONG",
+            "entry_price": 23100.0,
+            "exit_price": 23165.0,
+            "pnl_points": 65.0,
+            "result": "WIN",
+            "exit_reason": "PARTIAL_BOOK — HALF_TARGET_+60",
+            "entry_at": now.isoformat(),
+            "exit_at": now.isoformat(),
+            "paper_trading": True,
+        },
+        {
+            "strategy": performance_store.STRATEGY_AK07_OI,
+            "strategy_id": "ak07_oi",
+            "symbol": "NIFTY",
+            "direction": "LONG",
+            "entry_price": 23100.0,
+            "exit_price": 23040.0,
+            "pnl_points": -60.0,
+            "result": "LOSS",
+            "exit_reason": "STOP_LOSS",
+            "entry_at": now.isoformat(),
+            "exit_at": now.isoformat(),
+            "paper_trading": True,
+        },
+        {
+            "strategy": performance_store.STRATEGY_SMC_CRT,
+            "strategy_id": "smc_crt",
+            "symbol": "CRUDE",
+            "direction": "LONG",
+            "entry_price": 6850.0,
+            "exit_price": 6885.0,
+            "pnl_points": 35.0,
+            "result": "WIN",
+            "exit_reason": "TP1 CRM hit",
+            "entry_at": now.isoformat(),
+            "exit_at": now.isoformat(),
+            "paper_trading": True,
+        },
+        {
+            "strategy": performance_store.STRATEGY_SMC_CRT,
+            "strategy_id": "smc_crt",
+            "symbol": "GOLD",
+            "direction": "SHORT",
+            "entry_price": 146200.0,
+            "exit_price": 146260.0,
+            "pnl_points": -60.0,
+            "result": "LOSS",
+            "exit_reason": "SL hit",
+            "entry_at": now.isoformat(),
+            "exit_at": now.isoformat(),
+            "paper_trading": True,
+        },
+        {
+            "strategy": performance_store.STRATEGY_BREAKOUT,
+            "strategy_id": "breakout",
+            "symbol": "BANKNIFTY",
+            "direction": "LONG",
+            "entry_price": 51200.0,
+            "exit_price": 51255.0,
+            "pnl_points": 55.0,
+            "result": "WIN",
+            "exit_reason": "TP1",
+            "entry_at": now.isoformat(),
+            "exit_at": now.isoformat(),
+            "paper_trading": True,
+        },
+        {
+            "strategy": performance_store.STRATEGY_BREAKOUT,
+            "strategy_id": "breakout",
+            "symbol": "SENSEX",
+            "direction": "SHORT",
+            "entry_price": 76400.0,
+            "exit_price": 76435.0,
+            "pnl_points": -35.0,
+            "result": "LOSS",
+            "exit_reason": "SL",
+            "entry_at": now.isoformat(),
+            "exit_at": now.isoformat(),
+            "paper_trading": True,
+        },
+    ]
+    cache_manager.set_json(key, samples, ttl_seconds=performance_store.TRADE_TTL_SECONDS)
+
+
+def _seed_breakout(now: datetime, kill_engaged: bool) -> None:
+    """Strategy Type 3 mock frames for Nifty / BankNifty / Sensex."""
+    from app.services.breakout_engine import compute_blr_levels  # noqa: PLC0415
+
+    for code, cfg in INDEX_CONFIGS.items():
+        key = cache_manager.BREAKOUT_STATE_KEY_TEMPLATE.format(index=code)
+        previous = cache_manager.get_json(key) or {}
+        spot = _walk(float(previous.get("spot") or _BASELINES[code]["spot"]))
+        prev = {
+            "open": spot - 120,
+            "high": spot + 80,
+            "low": spot - 180,
+            "close": spot - 40,
+        }
+        levels = compute_blr_levels(prev["open"], prev["high"], prev["low"], prev["close"], spot)
+        day_review = "LONG" if spot > levels.mid else "SHORT"
+
+        position = None
+        if code == "BANKNIFTY" and not kill_engaged:
+            entry = levels.green - 15
+            sl, tp1 = entry - 45, entry + 45
+            position = {
+                "direction": "LONG",
+                "entry_price": round(entry, 2),
+                "sl_price": round(sl, 2),
+                "tp1_price": round(tp1, 2),
+                "option_strike": int(round((entry - 50) / _BASELINES[code]["step"]) * _BASELINES[code]["step"]),
+                "option_type": "CE",
+                "entry_reason": "green breakout (review side)",
+                "opened_at": previous.get("position", {}).get("opened_at") or now.isoformat(),
+            }
+
+        cache_manager.set_json(
+            key,
+            {
+                "index": code,
+                "display": cfg.display,
+                "strategy": "Breakout",
+                "spot": round(spot, 2),
+                "mid": round(levels.mid, 2),
+                "green": round(levels.green, 2),
+                "red": round(levels.red, 2),
+                "gap_regime": levels.gap_regime,
+                "levels_ready": True,
+                "day_review": day_review,
+                "first_candle_close": round(levels.mid + 12, 2),
+                "setup_label": f"Review {day_review} side (mock BLR locked)",
+                "trades_today": 1 if position else 0,
+                "max_trades": 2,
+                "entries_blocked": kill_engaged,
+                "paper_trading": True,
+                "position": position,
+                "signals": previous.get("signals") or ["Mock breakout levels seeded"],
+                "updated_at": now.isoformat(),
+            },
+            ttl_seconds=120,
+        )
+
+    cache_manager.set_json(
+        cache_manager.BREAKOUT_HEARTBEAT_KEY,
+        {
+            "at": now.isoformat(),
+            "paper_trading": True,
+            "mock": True,
+            "session_end_ist": "15:30",
+            "indices": list(INDEX_CONFIGS.keys()),
+        },
+        ttl_seconds=60,
+    )
 
 
 def _seed_smc_crt(now: datetime, kill_engaged: bool) -> None:

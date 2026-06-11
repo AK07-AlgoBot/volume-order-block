@@ -25,6 +25,7 @@ from zoneinfo import ZoneInfo
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from app.services import cache_manager, telegram_notifier
+from app.services import performance_store
 from app.services.upstox_engine import (
     MOCK_MODE,
     PAPER_TRADING,
@@ -523,8 +524,21 @@ class SMCCRTEngine:
                 exit_reason = "TP2 swing low hit"
 
         if exit_reason:
+            pnl = (spot - pos.entry_price) if pos.direction == "LONG" else (pos.entry_price - spot)
             logger.info("%s SMC exit: %s @ spot %.2f", state.config.display, exit_reason, spot)
             state.signal_log.append(f"Exit: {exit_reason} @ {spot:.2f}")
+            performance_store.record_completed_trade(
+                strategy=performance_store.STRATEGY_SMC_CRT,
+                strategy_id="smc_crt",
+                symbol=state.config.code,
+                direction=pos.direction,
+                entry_price=pos.entry_price,
+                exit_price=spot,
+                pnl_points=pnl,
+                exit_reason=exit_reason,
+                entry_at=pos.opened_at,
+                paper_trading=PAPER_TRADING or state.config.paper_only,
+            )
             state.position = None
             state.setup_label = f"Flat after {exit_reason}"
             if PAPER_TRADING or state.config.paper_only:

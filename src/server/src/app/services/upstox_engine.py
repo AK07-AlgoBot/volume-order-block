@@ -46,6 +46,7 @@ import requests
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from app.services import cache_manager, telegram_notifier
+from app.services import performance_store
 
 logger = logging.getLogger("ak07.upstox_engine")
 
@@ -96,6 +97,8 @@ WALL_REFRESH_SECONDS: Final[int] = 300
 POLL_SECONDS: Final[float] = float(os.environ.get("AK07_POLL_SECONDS", "15"))
 PAPER_TRADING: Final[bool] = os.environ.get("AK07_PAPER_TRADING", "1") != "0"
 MOCK_MODE: Final[bool] = os.environ.get("AK07_MOCK") == "1"
+OI_BAND_POINTS: Final[float] = float(os.environ.get("AK07_OI_BAND_POINTS", "500"))
+COMPONENT_BIAS_MIN_KNOWN: Final[int] = int(os.environ.get("AK07_COMPONENT_BIAS_MIN_KNOWN", "2"))
 
 CANDLE_MINUTES: Final[int] = 5
 
@@ -413,27 +416,43 @@ class UpstoxClient:
                 }
         return best
 
-    def get_oi_walls(self, instrument_key: str) -> tuple[int, int] | None:
+    def get_oi_walls(self, instrument_key: str, spot: float | None = None) -> tuple[int, int] | None:
         """(call_wall_strike, put_floor_strike) from the nearest-expiry chain."""
         data = self._fetch_nearest_expiry_chain(instrument_key)
         if not data:
             return None
-        best_call: tuple[float, int] | None = None
-        best_put: tuple[float, int] | None = None
-        for row in data:
-            try:
-                strike = int(float(row.get("strike_price", 0)))
-            except (TypeError, ValueError):
-                continue
-            call_oi = float(((row.get("call_options") or {}).get("market_data") or {}).get("oi") or 0)
-            put_oi = float(((row.get("put_options") or {}).get("market_data") or {}).get("oi") or 0)
-            if best_call is None or call_oi > best_call[0]:
-                best_call = (call_oi, strike)
-            if best_put is None or put_oi > best_put[0]:
-                best_put = (put_oi, strike)
-        if not best_call or not best_put or best_call[0] <= 0 or best_put[0] <= 0:
-            return None
-        return best_call[1], best_put[1]
+
+        def _scan(restrict_to_band: bool) -> tuple[int, int] | None:
+            best_call: tuple[float, int] | None = None
+            best_put: tuple[float, int] | None = None
+            for row in data:
+                try:
+                    strike = int(float(row.get("strike_price", 0)))
+                except (TypeError, ValueError):
+                    continue
+                if restrict_to_band and spot is not None and abs(strike - spot) > OI_BAND_POINTS:
+                    continue
+                call_oi = float(((row.get("call_options") or {}).get("market_data") or {}).get("oi") or 0)
+                put_oi = float(((row.get("put_options") or {}).get("market_data") or {}).get("oi") or 0)
+                if best_call is None or call_oi > best_call[0]:
+                    best_call = (call_oi, strike)
+                if best_put is None or put_oi > best_put[0]:
+                    best_put = (put_oi, strike)
+            if not best_call or not best_put or best_call[0] <= 0 or best_put[0] <= 0:
+                return None
+            return best_call[1], best_put[1]
+
+        if spot is not None:
+            banded = _scan(restrict_to_band=True)
+            if banded:
+                return banded
+            logger.info(
+                "OI walls: nothing within %.0f pts of spot %.2f for %s; using full chain",
+                OI_BAND_POINTS,
+                spot,
+                instrument_key,
+            )
+        return _scan(restrict_to_band=False)
 
     def place_market_order(self, instrument_key: str, quantity: int, transaction_type: str) -> bool:
         """Market order via the standard then HFT endpoint."""
@@ -527,7 +546,7 @@ class MockUpstoxClient(UpstoxClient):
             }
         ]
 
-    def get_oi_walls(self, instrument_key: str) -> tuple[int, int] | None:
+    def get_oi_walls(self, instrument_key: str, spot: float | None = None) -> tuple[int, int] | None:
         code = _index_code_for_spot_key(instrument_key)
         if code is None:
             return None
@@ -586,13 +605,13 @@ def component_changes(
 
 
 def component_bias(changes: dict[str, float | None]) -> str:
-    """Majority vote: BULLISH if most heavyweights are green, BEARISH if red."""
+    """Majority vote: BULLISH if most quoted heavyweights are green, BEARISH if red."""
     known = [c for c in changes.values() if c is not None]
-    if not known:
+    if len(known) < COMPONENT_BIAS_MIN_KNOWN:
         return "NEUTRAL"
     positives = sum(1 for c in known if c > 0)
     negatives = sum(1 for c in known if c < 0)
-    majority = len(changes) / 2
+    majority = len(known) / 2
     if positives > majority:
         return "BULLISH"
     if negatives > majority:
@@ -804,14 +823,14 @@ class AK07Engine:
                 state.comp_bias = component_bias(state.changes)
 
             if time.monotonic() - state.walls_refreshed_at > WALL_REFRESH_SECONDS:
-                walls = self.client.get_oi_walls(cfg.spot_instrument_key)
+                walls = self.client.get_oi_walls(cfg.spot_instrument_key, state.spot)
                 if walls:
                     state.call_wall, state.put_floor = walls
                 state.walls_refreshed_at = time.monotonic()
         except Exception as exc:
             logger.exception("[%s] live V3 feed read failed; resetting index cache: %s", cfg.code, exc)
             reset_index_live_cache(state)
-            walls = self.client.get_oi_walls(cfg.spot_instrument_key)
+            walls = self.client.get_oi_walls(cfg.spot_instrument_key, state.spot)
             if walls:
                 state.call_wall, state.put_floor = walls
                 state.walls_refreshed_at = time.monotonic()
@@ -862,7 +881,7 @@ class AK07Engine:
                 state.config.code,
             )
             reset_index_live_cache(state)
-            walls = self.client.get_oi_walls(state.config.spot_instrument_key)
+            walls = self.client.get_oi_walls(state.config.spot_instrument_key, state.spot)
             if walls:
                 state.call_wall, state.put_floor = walls
             return
@@ -1016,6 +1035,18 @@ class AK07Engine:
         pos.lots_remaining -= 1
         pos.partial_booked = True
         self.realized_pnl_points[index_code] += pnl
+        performance_store.record_completed_trade(
+            strategy=performance_store.STRATEGY_AK07_OI,
+            strategy_id="ak07_oi",
+            symbol=index_code,
+            direction=pos.direction,
+            entry_price=pos.entry_price,
+            exit_price=spot,
+            pnl_points=pnl,
+            exit_reason=f"PARTIAL_BOOK — {reason}",
+            entry_at=pos.opened_at,
+            paper_trading=PAPER_TRADING,
+        )
         self._record_event(
             now,
             index_code,
@@ -1052,6 +1083,18 @@ class AK07Engine:
             self.client.place_market_order(pos.instrument_key, pos.quantity, "SELL")
         pnl = (exit_price - pos.entry_price) if pos.direction == "LONG" else (pos.entry_price - exit_price)
         self.realized_pnl_points[index_code] += pnl * pos.lots_remaining
+        performance_store.record_completed_trade(
+            strategy=performance_store.STRATEGY_AK07_OI,
+            strategy_id="ak07_oi",
+            symbol=index_code,
+            direction=pos.direction,
+            entry_price=pos.entry_price,
+            exit_price=exit_price,
+            pnl_points=pnl,
+            exit_reason=reason,
+            entry_at=pos.opened_at,
+            paper_trading=PAPER_TRADING,
+        )
         self._record_event(
             now,
             index_code,
