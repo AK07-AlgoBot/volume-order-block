@@ -76,6 +76,7 @@ SMC_CRT_INSTRUMENTS: Final[dict[str, SMCCRTInstrument]] = {
         code="NIFTY",
         display="Nifty 50",
         spot_instrument_key="NSE_INDEX|Nifty 50",
+        mcx_search_query="",
         paper_only=False,
         crt_start=CRT_SESSION_START,
         baseline_spot=23_100.0,
