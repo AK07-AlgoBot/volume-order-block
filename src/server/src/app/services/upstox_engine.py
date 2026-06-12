@@ -418,6 +418,13 @@ class UpstoxClient:
                 }
         return best
 
+    def get_option_chain_with_expiry(self, instrument_key: str) -> tuple[str | None, list[dict[str, Any]]]:
+        """Nearest weekly expiry label and full chain rows."""
+        expiry = self._nearest_expiry(instrument_key)
+        if not expiry:
+            return None, []
+        return expiry, self._fetch_nearest_expiry_chain(instrument_key)
+
     def get_oi_walls(self, instrument_key: str, spot: float | None = None) -> tuple[int, int] | None:
         """(call_wall_strike, put_floor_strike) from the nearest-expiry chain."""
         data = self._fetch_nearest_expiry_chain(instrument_key)

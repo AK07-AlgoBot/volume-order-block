@@ -57,7 +57,7 @@ with f3:
     if MOCK_MODE:
         st.caption("MOCK DATA — sample trades · sidebar « only for page nav")
     else:
-        st.caption("Closed trades · S1 OI · S2 SMC+CRT · S3 BLR Breakout · sidebar « for nav")
+        st.caption("Closed trades · S1 OI · S2 SMC · S3 BLR · S4 PA · S5 Greeks · sidebar « for nav")
 
 today = datetime.now(IST).date()
 if range_choice == "Today":
