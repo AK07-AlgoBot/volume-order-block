@@ -318,7 +318,7 @@ def render_sr_reversal_panel(index_code: str) -> None:
     if hb:
         mode = "PAPER" if hb.get("paper_trading") else "LIVE"
         st.caption(
-            f"S/R heartbeat {str(hb.get('at', ''))[:19]} · {mode} · intraday zones only · 1 lot"
+            f"S/R heartbeat {str(hb.get('at', ''))[:19]} · {mode} · prior 1H swings @ open · 1 lot"
         )
 
     if not sr:
@@ -326,12 +326,12 @@ def render_sr_reversal_panel(index_code: str) -> None:
         return
 
     c1, c2, c3, c4, c5, c6 = st.columns(6)
-    c1.metric("OR High", fmt(sr.get("or_high")))
-    c2.metric("OR Low", fmt(sr.get("or_low")))
-    c3.metric("Session H", fmt(sr.get("session_high")))
-    c4.metric("Session L", fmt(sr.get("session_low")))
-    c5.metric("1H Swing H", fmt(sr.get("swing_high")))
-    c6.metric("1H Swing L", fmt(sr.get("swing_low")))
+    c1.metric("Prior 1H Swing H", fmt(sr.get("prior_swing_high")))
+    c2.metric("Prior 1H Swing L", fmt(sr.get("prior_swing_low")))
+    c3.metric("Today 1H Swing H", fmt(sr.get("swing_high")))
+    c4.metric("Today 1H Swing L", fmt(sr.get("swing_low")))
+    c5.metric("Session H/L", f"{fmt(sr.get('session_low'))} / {fmt(sr.get('session_high'))}")
+    c6.metric("Spot", fmt(float(sr["spot"])) if sr.get("spot") is not None else "—")
     st.markdown(f'<p class="ak07-muted-line">{sr.get("setup_label", "—")}</p>', unsafe_allow_html=True)
 
     zones = sr.get("zones") or []

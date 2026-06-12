@@ -1,9 +1,9 @@
 """Strategy Type 6 — Intraday S/R Reversal.
 
-Fade rejection at intraday support/resistance only (no previous-day OHLC):
-  - Opening range high/low (09:15–09:30 IST)
-  - Session high/low (rolling since open)
-  - Last 1H swing high/low (closed hourly bars)
+At 09:15 IST, anchor levels = last confirmed 1H swing high/low before today
+(structural pivots on the hourly chart — not yesterday's last hour candle).
+
+Also tracks today's session OR, session range, and intraday 1H swings as they form.
 
 Nifty · BankNifty · Sensex · 1 lot · book @ TP1 (1R) · flat 14:55 IST.
 
@@ -35,6 +35,7 @@ from app.services.upstox_engine import (
     MOCK_MODE,
     PAPER_TRADING,
     UpstoxClient,
+    _parse_v3_candle_row,
     build_upstox_client,
     parse_v3_intraday_candles,
 )
@@ -50,6 +51,7 @@ WICK_RATIO: Final[float] = float(os.environ.get("SR_WICK_RATIO", "0.42"))
 VOL_SPIKE: Final[float] = float(os.environ.get("SR_VOL_SPIKE", "1.15"))
 SL_BUFFER: Final[float] = float(os.environ.get("SR_SL_BUFFER_PTS", "3.0"))
 BASE_ZONE_TOLERANCE: Final[float] = float(os.environ.get("SR_ZONE_TOLERANCE_PTS", "20"))
+PRIOR_SWING_LOOKBACK_DAYS: Final[int] = int(os.environ.get("SR_PRIOR_SWING_LOOKBACK_DAYS", "30"))
 
 SESSION_START: Final[dtime] = parse_ist_time("SR_SESSION_START_IST", 9, 15)
 OR_END: Final[dtime] = parse_ist_time("SR_OR_END_IST", 9, 30)
@@ -92,6 +94,11 @@ class SRState:
     or_ready: bool = False
     session_high: float | None = None
     session_low: float | None = None
+    prior_swing_high: float | None = None
+    prior_swing_low: float | None = None
+    prior_swing_high_at: str = ""
+    prior_swing_low_at: str = ""
+    prior_swings_loaded: bool = False
     swing_high: float | None = None
     swing_low: float | None = None
     active_zones: list[dict[str, Any]] = field(default_factory=list)
@@ -145,22 +152,83 @@ def closed_hourly_bars(hourly: list[dict[str, float]], now: datetime) -> list[di
 
 
 def last_swing_high_low(hourly_closed: list[dict[str, float]]) -> tuple[float | None, float | None]:
+    sh, sl, _, _ = last_swing_high_low_detailed(hourly_closed)
+    return sh, sl
+
+
+def last_swing_high_low_detailed(
+    hourly_closed: list[dict[str, float]],
+) -> tuple[float | None, float | None, str, str]:
+    """Most recent confirmed 1H pivot high and pivot low in the series."""
     if len(hourly_closed) < 3:
-        return None, None
+        return None, None, "", ""
     swing_h: float | None = None
     swing_l: float | None = None
+    swing_h_at = ""
+    swing_l_at = ""
     for i in range(1, len(hourly_closed) - 1):
         h = float(hourly_closed[i]["high"])
         l = float(hourly_closed[i]["low"])
         if h > float(hourly_closed[i - 1]["high"]) and h > float(hourly_closed[i + 1]["high"]):
             swing_h = h
+            swing_h_at = str(hourly_closed[i]["timestamp"])
         if l < float(hourly_closed[i - 1]["low"]) and l < float(hourly_closed[i + 1]["low"]):
             swing_l = l
-    return swing_h, swing_l
+            swing_l_at = str(hourly_closed[i]["timestamp"])
+    return swing_h, swing_l, swing_h_at, swing_l_at
 
 
-def build_intraday_zones(state: SRState) -> list[SRZone]:
+def parse_historical_candles(data: Any) -> list[dict[str, float]]:
+    if not isinstance(data, dict):
+        return []
+    rows = data.get("candles")
+    if not isinstance(rows, list):
+        return []
+    out: list[dict[str, float]] = []
+    for row in rows:
+        candle = _parse_v3_candle_row(row)
+        if candle is not None:
+            out.append(candle)
+    out.sort(key=lambda c: c["timestamp"])
+    return out
+
+
+def closed_hourly_before(hourly: list[dict[str, float]], before: datetime) -> list[dict[str, float]]:
+    closed: list[dict[str, float]] = []
+    for bar in hourly:
+        ts = _parse_candle_ts(bar["timestamp"])
+        if ts + timedelta(hours=1) <= before:
+            closed.append(bar)
+    return closed
+
+
+def prior_1h_swings_before_open(
+    hourly: list[dict[str, float]],
+    session_open: datetime,
+) -> tuple[float | None, float | None, str, str]:
+    """Last confirmed 1H swing H/L strictly before today's session open."""
+    closed = closed_hourly_before(hourly, session_open)
+    return last_swing_high_low_detailed(closed)
+
+
+def _level_near(a: float, b: float, tolerance: float) -> bool:
+    return abs(a - b) <= tolerance
+
+
+def build_intraday_zones(state: SRState, tolerance: float = 0.0) -> list[SRZone]:
     zones: list[SRZone] = []
+    if state.prior_swing_high is not None:
+        zones.append(SRZone(state.prior_swing_high, "RESISTANCE", "Prior 1H Swing High"))
+    if state.prior_swing_low is not None:
+        zones.append(SRZone(state.prior_swing_low, "SUPPORT", "Prior 1H Swing Low"))
+    if state.swing_high is not None and (
+        state.prior_swing_high is None or not _level_near(state.swing_high, state.prior_swing_high, tolerance)
+    ):
+        zones.append(SRZone(state.swing_high, "RESISTANCE", "Today 1H Swing High"))
+    if state.swing_low is not None and (
+        state.prior_swing_low is None or not _level_near(state.swing_low, state.prior_swing_low, tolerance)
+    ):
+        zones.append(SRZone(state.swing_low, "SUPPORT", "Today 1H Swing Low"))
     if state.or_high is not None:
         zones.append(SRZone(state.or_high, "RESISTANCE", "OR High"))
     if state.or_low is not None:
@@ -169,10 +237,6 @@ def build_intraday_zones(state: SRState) -> list[SRZone]:
         zones.append(SRZone(state.session_high, "RESISTANCE", "Session High"))
     if state.session_low is not None:
         zones.append(SRZone(state.session_low, "SUPPORT", "Session Low"))
-    if state.swing_high is not None:
-        zones.append(SRZone(state.swing_high, "RESISTANCE", "1H Swing High"))
-    if state.swing_low is not None:
-        zones.append(SRZone(state.swing_low, "SUPPORT", "1H Swing Low"))
     return zones
 
 
@@ -252,19 +316,23 @@ def refresh_intraday_levels(state: SRState, candles: list[dict[str, float]], now
     closed = closed_hourly_bars(hourly, now)
     state.swing_high, state.swing_low = last_swing_high_low(closed)
 
-    zones = build_intraday_zones(state)
+    tol = zone_tolerance(state.config)
+    zones = build_intraday_zones(state, tol)
     state.active_zones = [{"level": z.level, "kind": z.kind, "label": z.label} for z in zones]
 
-    if not state.or_ready:
-        state.setup_label = "Building opening range (intraday S/R)"
+    if not state.prior_swings_loaded:
+        state.setup_label = "Loading prior 1H swing levels…"
     elif state.position is None:
         parts = []
+        if state.prior_swing_high:
+            parts.append(f"prior H {state.prior_swing_high:.2f}")
+        if state.prior_swing_low:
+            parts.append(f"prior L {state.prior_swing_low:.2f}")
         if state.swing_high:
-            parts.append(f"1H swing H {state.swing_high:.2f}")
+            parts.append(f"today H {state.swing_high:.2f}")
         if state.swing_low:
-            parts.append(f"L {state.swing_low:.2f}")
-        sess = f"session {state.session_low:.2f}–{state.session_high:.2f}" if state.session_low and state.session_high else ""
-        state.setup_label = " · ".join(filter(None, [sess] + parts)) or "Watching intraday S/R zones"
+            parts.append(f"today L {state.swing_low:.2f}")
+        state.setup_label = " · ".join(parts) or "Watching S/R zones"
 
 
 class SRMarketClient:
@@ -313,6 +381,79 @@ class SRMarketClient:
         v3 = self._upstox.base_url.replace("/v2", "/v3")
         data = self._upstox._get(f"{v3}/historical-candle/intraday/{key}/minutes/{CANDLE_5M}")  # noqa: SLF001
         return parse_v3_intraday_candles(data, datetime.now(IST))
+
+    def get_historical_1h_candles(self, cfg: IndexConfig) -> list[dict[str, float]]:
+        if MOCK_MODE:
+            return self._mock_historical_1h(cfg)
+        if not self._upstox:
+            return []
+        today = datetime.now(IST).date()
+        to_date = today - timedelta(days=1)
+        from_date = today - timedelta(days=PRIOR_SWING_LOOKBACK_DAYS)
+        key = quote(cfg.spot_instrument_key, safe="")
+        v3 = self._upstox.base_url.replace("/v2", "/v3")
+        url = f"{v3}/historical-candle/{key}/hours/1/{to_date.isoformat()}/{from_date.isoformat()}"
+        data = self._upstox._get(url)  # noqa: SLF001
+        candles = parse_historical_candles(data)
+        if candles:
+            return candles
+        v2_url = (
+            f"{self._upstox.base_url}/historical-candle/{key}/hour/"
+            f"{to_date.isoformat()}/{from_date.isoformat()}"
+        )
+        data = self._upstox._get(v2_url)  # noqa: SLF001
+        return parse_historical_candles(data)
+
+    def get_prior_1h_swings(
+        self,
+        cfg: IndexConfig,
+        session_open: datetime,
+    ) -> tuple[float | None, float | None, str, str]:
+        hourly = self.get_historical_1h_candles(cfg)
+        if not hourly:
+            logger.warning("[%s] no 1H history for prior swing lookup", cfg.code)
+            return None, None, "", ""
+        sh, sl, sh_at, sl_at = prior_1h_swings_before_open(hourly, session_open)
+        if sh is None and sl is None:
+            logger.warning("[%s] could not resolve prior 1H swings before %s", cfg.code, session_open.date())
+        else:
+            logger.info(
+                "[%s] prior 1H swings before open: H=%s (%s) L=%s (%s)",
+                cfg.code,
+                sh,
+                sh_at[:16] if sh_at else "—",
+                sl,
+                sl_at[:16] if sl_at else "—",
+            )
+        return sh, sl, sh_at, sl_at
+
+    def _mock_historical_1h(self, cfg: IndexConfig) -> list[dict[str, float]]:
+        """Synthetic hourly series with clear pivots for mock cockpit."""
+        spot = self._mock.get(cfg.code, 23_100.0)
+        now = datetime.now(IST)
+        session_open = datetime.combine(now.date(), SESSION_START, tzinfo=IST)
+        out: list[dict[str, float]] = []
+        price = spot
+        for i in range(40, 0, -1):
+            ts = session_open - timedelta(hours=i)
+            drift = random.uniform(-80, 80)
+            if i in (12, 8, 4):
+                drift = abs(drift) + 120
+            if i in (16, 10, 6):
+                drift = -abs(drift) - 120
+            c = price + drift
+            out.append(
+                {
+                    "timestamp": ts.isoformat(),
+                    "open": c - 20,
+                    "high": c + 35,
+                    "low": c - 35,
+                    "close": c,
+                    "volume": 100_000,
+                }
+            )
+            price = c
+        return out
 
     def resolve_option(self, cfg: IndexConfig, spot: float, direction: str) -> dict[str, Any] | None:
         if self._upstox and not MOCK_MODE:
@@ -386,10 +527,20 @@ class SRReversalEngine:
                 state.or_high = state.or_low = None
                 state.session_high = state.session_low = None
                 state.swing_high = state.swing_low = None
+                state.prior_swing_high = state.prior_swing_low = None
+                state.prior_swing_high_at = state.prior_swing_low_at = ""
+                state.prior_swings_loaded = False
                 state.or_ready = False
                 state.active_zones = []
-                state.setup_label = "New session — intraday S/R"
+                state.setup_label = "New session — loading prior 1H swings"
                 state.signal_log = []
+                session_open = datetime.combine(now.date(), SESSION_START, tzinfo=IST)
+                sh, sl, sh_at, sl_at = self.client.get_prior_1h_swings(state.config, session_open)
+                state.prior_swing_high = sh
+                state.prior_swing_low = sl
+                state.prior_swing_high_at = sh_at
+                state.prior_swing_low_at = sl_at
+                state.prior_swings_loaded = sh is not None or sl is not None
 
     def _process(self, state: SRState, now: datetime, entries_blocked: bool) -> None:
         spot = self.client.get_spot(state.config)
@@ -402,7 +553,7 @@ class SRReversalEngine:
             self._manage_position(state, now)
         elif (
             not entries_blocked
-            and state.or_ready
+            and state.prior_swings_loaded
             and now.time() >= ENTRY_START
             and state.trades_today < MAX_TRADES_PER_DAY
             and candles
@@ -417,7 +568,7 @@ class SRReversalEngine:
             return
         state.last_candle_ts = candle["timestamp"]
 
-        zones = build_intraday_zones(state)
+        zones = build_intraday_zones(state, zone_tolerance(state.config))
         tol = zone_tolerance(state.config)
         direction, sl, reason = detect_sr_reversal(candles, zones, tol)
         if direction is None:
@@ -532,6 +683,11 @@ class SRReversalEngine:
             "or_ready": state.or_ready,
             "session_high": state.session_high,
             "session_low": state.session_low,
+            "prior_swing_high": state.prior_swing_high,
+            "prior_swing_low": state.prior_swing_low,
+            "prior_swing_high_at": state.prior_swing_high_at,
+            "prior_swing_low_at": state.prior_swing_low_at,
+            "prior_swings_loaded": state.prior_swings_loaded,
             "swing_high": state.swing_high,
             "swing_low": state.swing_low,
             "zones": state.active_zones,
