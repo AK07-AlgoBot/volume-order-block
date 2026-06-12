@@ -41,6 +41,7 @@ GREEKS_STATE_KEY_TEMPLATE: Final[str] = "ak07:greeks_state:{index}"
 GREEKS_HEARTBEAT_KEY: Final[str] = "ak07:greeks_heartbeat"
 SR_REVERSAL_STATE_KEY_TEMPLATE: Final[str] = "ak07:sr_reversal_state:{index}"
 SR_REVERSAL_HEARTBEAT_KEY: Final[str] = "ak07:sr_reversal_heartbeat"
+TRADE_LOG_KEY_TEMPLATE: Final[str] = "ak07:trade_log:{day}"
 
 LIVE_STATE_TTL_SECONDS: Final[int] = 300
 

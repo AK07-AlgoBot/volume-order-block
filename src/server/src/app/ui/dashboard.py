@@ -453,6 +453,12 @@ for tab, (code, cfg) in zip(tabs, INDEX_CONFIGS.items()):
         else:
             st.caption("Flat — no open position.")
 
+        recent = state.get("recent_trades") or []
+        if recent:
+            with st.expander("Strategy 1 — today's trade log", expanded=False):
+                for line in reversed(recent):
+                    st.markdown(f'<p class="ak07-signal-line">{line}</p>', unsafe_allow_html=True)
+
         updated = str(state.get("updated_at", ""))[:19].replace("T", " ")
         flags = []
         if state.get("entries_blocked"):

@@ -111,7 +111,6 @@ _HISTORICAL_PAYLOAD_KEYS: Final[frozenset[str]] = frozenset(
 
 # Persistent session archives (Docker volume: src/server/data/archive)
 ARCHIVE_DIR: Final[Path] = archive_dir()
-TRADE_LOG_KEY_TEMPLATE: Final[str] = "ak07:trade_log:{day}"
 
 # ---------------------------------------------------------------------------
 # Component & asset definitions
@@ -742,7 +741,47 @@ class AK07Engine:
         migrated = performance_store.migrate_legacy_archives_to_volume(ingest_redis=True)
         if migrated.get("copied"):
             logger.info("Migrated legacy archives on startup: %s", migrated["copied"])
+        self._restore_session_from_redis(datetime.now(IST))
         logger.info("AK07 engine initialized (paper_trading=%s)", PAPER_TRADING)
+
+    def _restore_session_from_redis(self, now: datetime) -> None:
+        """Survive container restarts: reload today's trade log and per-index entry counts."""
+        today = now.date().isoformat()
+        for state in self.states.values():
+            state.trade_day = today
+
+        cached = cache_manager.get_json(cache_manager.TRADE_LOG_KEY_TEMPLATE.format(day=today))
+        if not isinstance(cached, list) or not cached:
+            return
+
+        self.trade_log = cached
+        entry_counts = {code: 0 for code in INDEX_CONFIGS}
+        pnl_by_index = {code: 0.0 for code in INDEX_CONFIGS}
+
+        for event in self.trade_log:
+            if not isinstance(event, dict):
+                continue
+            idx = str(event.get("index") or "")
+            if idx not in entry_counts:
+                continue
+            kind = str(event.get("event") or "")
+            if kind == "ENTRY":
+                entry_counts[idx] += 1
+            elif kind in ("PARTIAL_BOOK", "EXIT"):
+                try:
+                    pnl_by_index[idx] += float(event.get("points") or 0)
+                except (TypeError, ValueError):
+                    pass
+
+        for code, count in entry_counts.items():
+            self.states[code].trades_today = count
+            self.realized_pnl_points[code] = pnl_by_index[code]
+
+        logger.info(
+            "Restored session from Redis: %d trade_log events (entries %s)",
+            len(self.trade_log),
+            ", ".join(f"{c}={entry_counts[c]}" for c in INDEX_CONFIGS),
+        )
 
     def run(self) -> None:
         logger.info("AK07 engine loop starting (poll every %.0fs)", POLL_SECONDS)
@@ -1150,7 +1189,7 @@ class AK07Engine:
         entry = {"at": now.isoformat(), "index": index_code, "event": event, **detail}
         self.trade_log.append(entry)
         cache_manager.set_json(
-            TRADE_LOG_KEY_TEMPLATE.format(day=now.date().isoformat()),
+            cache_manager.TRADE_LOG_KEY_TEMPLATE.format(day=now.date().isoformat()),
             self.trade_log,
             ttl_seconds=86_400,
         )
@@ -1254,10 +1293,32 @@ class AK07Engine:
                     and in_execution_boundary(state.spot, state.call_wall, state.put_floor)
                 ),
                 "paper_trading": PAPER_TRADING,
+                "recent_trades": self._recent_trades_for_index(cfg.code),
                 "updated_at": now.isoformat(),
             },
             ttl_seconds=120,
         )
+
+    def _recent_trades_for_index(self, index_code: str) -> list[str]:
+        lines: list[str] = []
+        for event in self.trade_log:
+            if not isinstance(event, dict) or event.get("index") != index_code:
+                continue
+            kind = str(event.get("event") or "")
+            at = str(event.get("at") or "")[:19].replace("T", " ")
+            direction = event.get("direction", "—")
+            if kind == "ENTRY":
+                opt = event.get("option", "")
+                entry = event.get("entry_spot")
+                lines.append(f"{at} ENTRY {direction} @ {entry} via {opt}")
+            elif kind == "PARTIAL_BOOK":
+                lines.append(f"{at} PARTIAL {direction} @ {event.get('spot')} ({event.get('reason', '')})")
+            elif kind == "EXIT":
+                lines.append(
+                    f"{at} EXIT {direction} @ {event.get('exit_spot')} "
+                    f"({event.get('reason', '')}, {float(event.get('points') or 0):+.2f} pts)"
+                )
+        return lines[-8:]
 
     def _publish_global_state(self, now: datetime) -> None:
         positions = {
