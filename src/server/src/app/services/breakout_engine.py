@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, time as dtime, timedelta
 from pathlib import Path
 from typing import Any, Final
+from urllib.parse import quote
 from zoneinfo import ZoneInfo
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
@@ -314,14 +315,18 @@ class BreakoutMarketClient:
         self._mock_spots[cfg.code] = value
         return value
 
+    def _encoded_instrument_key(self, instrument_key: str) -> str:
+        return quote(instrument_key, safe="")
+
     def get_5m_candles(self, cfg: IndexConfig) -> list[dict[str, float]] | None:
         if MOCK_MODE:
             return self._mock_candles(cfg)
         if not self._upstox:
             return []
         v3_base = self._upstox.base_url.replace("/v2", "/v3")
+        key = self._encoded_instrument_key(cfg.spot_instrument_key)
         data = self._upstox._get(  # noqa: SLF001
-            f"{v3_base}/historical-candle/intraday/{cfg.spot_instrument_key}/minutes/{CANDLE_5M}"
+            f"{v3_base}/historical-candle/intraday/{key}/minutes/{CANDLE_5M}"
         )
         return parse_v3_intraday_candles(data, datetime.now(IST))
 
@@ -337,22 +342,46 @@ class BreakoutMarketClient:
             }
         if not self._upstox:
             return None
+
+        today = datetime.now(IST).date()
+        to_date = today - timedelta(days=1)
+        from_date = today - timedelta(days=14)
+        key = self._encoded_instrument_key(cfg.spot_instrument_key)
         v3_base = self._upstox.base_url.replace("/v2", "/v3")
-        data = self._upstox._get(f"{v3_base}/historical-candle/{cfg.spot_instrument_key}/days/1")  # noqa: SLF001
+        url = f"{v3_base}/historical-candle/{key}/days/1/{to_date.isoformat()}/{from_date.isoformat()}"
+        data = self._upstox._get(url)  # noqa: SLF001
         if not isinstance(data, dict):
+            # V2 fallback (same candle row format)
+            v2_url = (
+                f"{self._upstox.base_url}/historical-candle/{key}/day/"
+                f"{to_date.isoformat()}/{from_date.isoformat()}"
+            )
+            data = self._upstox._get(v2_url)  # noqa: SLF001
+        if not isinstance(data, dict):
+            logger.warning("[%s] previous-day OHLC fetch failed", cfg.code)
             return None
+
         rows = data.get("candles") or []
-        if not isinstance(rows, list):
+        if not isinstance(rows, list) or not rows:
+            logger.warning("[%s] previous-day OHLC returned no candles", cfg.code)
             return None
-        today = date.today()
+
+        best: dict[str, float] | None = None
+        best_day: date | None = None
         for row in rows:
             parsed = _parse_daily_row(row)
-            if parsed and date.fromisoformat(parsed["date"]) < today:
-                return parsed
-        if len(rows) >= 2:
-            parsed = _parse_daily_row(rows[1])
-            if parsed:
-                return parsed
+            if not parsed:
+                continue
+            row_day = date.fromisoformat(parsed["date"])
+            if row_day >= today:
+                continue
+            if best_day is None or row_day > best_day:
+                best_day = row_day
+                best = parsed
+        if best:
+            logger.info("[%s] previous-day OHLC from %s", cfg.code, best_day)
+            return best
+        logger.warning("[%s] no prior session OHLC before %s in %d rows", cfg.code, today, len(rows))
         return None
 
     def _mock_candles(self, cfg: IndexConfig) -> list[dict[str, float]]:
@@ -531,6 +560,12 @@ class BreakoutEngine:
             if ts.tzinfo is None:
                 ts = ts.replace(tzinfo=IST)
             if ts.date() == day and ts.time() == SESSION_START:
+                return candle
+        for candle in candles:
+            ts = datetime.fromisoformat(candle["timestamp"])
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=IST)
+            if ts.date() == day and ts.time() >= SESSION_START:
                 return candle
         return None
 
