@@ -144,7 +144,7 @@ INDEX_CONFIGS: Final[dict[str, IndexConfig]] = {
         display="Nifty 50",
         spot_instrument_key="NSE_INDEX|Nifty 50",
         heavyweights=("RELIANCE", "HDFCBANK", "ICICIBANK", "INFY", "TCS"),
-        lot_size=int(os.environ.get("AK07_LOT_SIZE_NIFTY", "75")),
+        lot_size=int(os.environ.get("AK07_LOT_SIZE_NIFTY", "65")),
         strike_step=50,
     ),
     "BANKNIFTY": IndexConfig(
@@ -152,7 +152,7 @@ INDEX_CONFIGS: Final[dict[str, IndexConfig]] = {
         display="BankNifty",
         spot_instrument_key="NSE_INDEX|Nifty Bank",
         heavyweights=("HDFCBANK", "ICICIBANK", "SBIN", "AXISBANK", "KOTAKBANK"),
-        lot_size=int(os.environ.get("AK07_LOT_SIZE_BANKNIFTY", "35")),
+        lot_size=int(os.environ.get("AK07_LOT_SIZE_BANKNIFTY", "30")),
         strike_step=100,
     ),
     "SENSEX": IndexConfig(

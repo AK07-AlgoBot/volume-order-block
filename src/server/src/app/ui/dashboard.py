@@ -170,13 +170,15 @@ def render_breakout_strategy_panel(index_code: str) -> None:
 
     b1, b2, b3, b4, b5 = st.columns(5)
     b1.metric("Green (buy line)", fmt(bo.get("green")))
-    b2.metric("Mid (pivot)", fmt(bo.get("mid")))
+    b2.metric("Mid (9:15 open)", fmt(bo.get("mid")))
     b3.metric("Red (sell line)", fmt(bo.get("red")))
     b4.metric("Spot", fmt(float(bo["spot"])) if bo.get("spot") is not None else "—")
     review = str(bo.get("day_review") or "PENDING")
     b5.metric("Day review", review)
 
     meta = []
+    if bo.get("session_open") is not None:
+        meta.append(f"9:15 open {fmt(float(bo['session_open']))}")
     if bo.get("gap_regime"):
         meta.append(str(bo["gap_regime"]))
     if bo.get("first_candle_close") is not None and bo.get("mid") is not None:
