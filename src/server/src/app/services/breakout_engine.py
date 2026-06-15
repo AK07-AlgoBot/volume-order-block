@@ -3,8 +3,8 @@
 Daily Green / Mid / Red levels from previous-day range + session open (Pine BLR
 logic). The first 5-minute close vs Mid sets which side to review for the session.
 Breakout entries on 5m close through Green (long) or Red (short), with override
-when price closes through the opposite line. Options only, 1 lot, TP1 (1R), max
-2 trades/day per index.
+when price closes through the opposite line. Options only, 1 lot, book @ fixed spot
+target (Nifty/BankNifty 50 pts · Sensex 100 pts), max 2 trades/day per index.
 
 Run: python -u src/server/src/app/services/breakout_engine.py
 """
@@ -45,8 +45,12 @@ CANDLE_5M: Final[int] = 5
 POLL_SECONDS: Final[float] = float(os.environ.get("BREAKOUT_POLL_SECONDS", "15"))
 MAX_TRADES_PER_DAY: Final[int] = int(os.environ.get("BREAKOUT_MAX_TRADES_PER_DAY", "2"))
 LOTS_PER_TRADE: Final[int] = 1
-RR1: Final[float] = 1.0
 SL_BUFFER: Final[float] = float(os.environ.get("BREAKOUT_SL_BUFFER_PTS", "2.0"))
+BREAKOUT_TP1_PTS: Final[dict[str, float]] = {
+    "NIFTY": float(os.environ.get("BREAKOUT_TP1_PTS_NIFTY", "50")),
+    "BANKNIFTY": float(os.environ.get("BREAKOUT_TP1_PTS_BANKNIFTY", "50")),
+    "SENSEX": float(os.environ.get("BREAKOUT_TP1_PTS_SENSEX", "100")),
+}
 
 # Pine locked BLR constants
 UP_R: Final[float] = 0.08
@@ -227,6 +231,7 @@ def detect_breakout_signal(
 
 
 def trade_levels(
+    index_code: str,
     direction: str,
     entry: float,
     mid: float,
@@ -234,19 +239,19 @@ def trade_levels(
     red: float,
     gap_regime: str,
 ) -> tuple[float, float, float]:
-    """Spot SL, TP1 (1R book), TP2 (2R reference)."""
+    """Spot SL, TP1 (fixed pts book), TP2 (2× TP1 reference)."""
+    tp1_pts = BREAKOUT_TP1_PTS.get(index_code, 50.0)
+    tp2_pts = tp1_pts * 2.0
     if direction == "LONG":
         sl_anchor = mid if gap_regime == "GAP_UP" else red
         sl = sl_anchor - SL_BUFFER
-        risk = max(entry - sl, 0.05)
-        tp1 = entry + risk * RR1
-        tp2 = entry + risk * 2.0
+        tp1 = entry + tp1_pts
+        tp2 = entry + tp2_pts
     else:
         sl_anchor = mid if gap_regime == "GAP_DN" else green
         sl = sl_anchor + SL_BUFFER
-        risk = max(sl - entry, 0.05)
-        tp1 = entry - risk * RR1
-        tp2 = entry - risk * 2.0
+        tp1 = entry - tp1_pts
+        tp2 = entry - tp2_pts
     return sl, tp1, tp2
 
 
@@ -666,6 +671,7 @@ class BreakoutEngine:
             return
 
         sl, tp1, tp2 = trade_levels(
+            state.config.code,
             direction,
             close,
             state.mid,
@@ -728,12 +734,12 @@ class BreakoutEngine:
             if spot <= pos.sl_price:
                 exit_reason = "SL"
             elif spot >= pos.tp1_price:
-                exit_reason = "TP1 booked (1R)"
+                exit_reason = "TP1 booked"
         else:
             if spot >= pos.sl_price:
                 exit_reason = "SL"
             elif spot <= pos.tp1_price:
-                exit_reason = "TP1 booked (1R)"
+                exit_reason = "TP1 booked"
 
         if not exit_reason:
             return
@@ -839,6 +845,7 @@ class BreakoutEngine:
             "session_end_ist": SESSION_END.strftime("%H:%M"),
             "square_off_ist": SQUARE_OFF_TIME.strftime("%H:%M"),
             "no_entry_after_ist": NO_ENTRY_AFTER.strftime("%H:%M"),
+            "tp1_points": BREAKOUT_TP1_PTS.get(state.config.code, 50.0),
             "updated_at": now.isoformat(),
         }
         if pos:

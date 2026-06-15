@@ -196,8 +196,10 @@ def render_breakout_strategy_panel(index_code: str) -> None:
         option = f"{bo_pos.get('option_strike', '')}{bo_pos.get('option_type', '')}"
         p1.metric("Direction", bo_pos.get("direction", "—"), delta=option or None, delta_color="off")
         p2.metric("Entry (spot)", fmt(float(bo_pos.get("entry_price", 0))))
-        p3.metric("TP1 (1R book)", fmt(float(bo_pos.get("tp1_price", 0))))
-        p4.metric("TP2 (2R)", fmt(float(bo_pos.get("tp2_price", 0))))
+        tp_pts = bo.get("tp1_points")
+        tp_label = f"TP1 ({int(tp_pts)}pt book)" if tp_pts else "TP1 (book)"
+        p3.metric(tp_label, fmt(float(bo_pos.get("tp1_price", 0))))
+        p4.metric("TP2 (2× ref)", fmt(float(bo_pos.get("tp2_price", 0))))
         p5.metric("Stop-Loss", fmt(float(bo_pos.get("sl_price", 0))))
         p6.metric("Reason", str(bo_pos.get("entry_reason", "—"))[:18])
     else:
