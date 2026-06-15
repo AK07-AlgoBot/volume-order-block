@@ -24,14 +24,25 @@ def _credential_username() -> str:
 
 
 @router.get("/token-notifier")
+@router.head("/token-notifier")
 async def token_notifier_probe():
-    """Upstox / health checks may GET the notifier URL before accepting it."""
+    """Upstox / health checks may GET or HEAD the notifier URL before accepting it."""
     return {"ok": True, "endpoint": "upstox-token-notifier"}
 
 
 @router.post("/token-notifier")
-async def receive_upstox_access_token(payload: UpstoxTokenNotifierBody, request: Request):
+async def receive_upstox_access_token(request: Request):
     """Receive V3 access_token deliveries from Upstox after user approval."""
+    raw = await request.body()
+    remote = request.client.host if request.client else "?"
+    logger.info("Upstox notifier POST from %s (%d bytes)", remote, len(raw))
+
+    try:
+        payload = UpstoxTokenNotifierBody.model_validate_json(raw)
+    except Exception as exc:
+        logger.error("Notifier payload parse failed from %s: %s body=%r", remote, exc, raw[:500])
+        raise HTTPException(status_code=400, detail="invalid notifier payload") from exc
+
     ensure_repo_and_lib_on_path()
     from upstox_credentials_store import (  # noqa: PLC0415
         persist_credentials_for_user,

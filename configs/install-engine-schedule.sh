@@ -2,24 +2,24 @@
 # Install cron jobs on EC2 to start/stop the AK07 engine container daily.
 #
 # Defaults (IST):
-# - START engine at 08:40 (before 08:45 token refresh)
-# - REFRESH Upstox token at 08:45 (optional manual script; engine also refreshes in-loop)
+# - START api+engine at 05:55 (before 06:00 token refresh)
+# - REFRESH Upstox token at 06:00 (optional cron script; engine also refreshes in-loop)
 # - STOP  engine at 15:45 (after the 15:30 performance archive hook)
 #
 # Usage:
 #   chmod +x configs/install-engine-schedule.sh
 #   ./configs/install-engine-schedule.sh
-#   START_HOUR=8 START_MIN=40 TOKEN_HOUR=8 TOKEN_MIN=45 ./configs/install-engine-schedule.sh
+#   START_HOUR=5 START_MIN=55 TOKEN_HOUR=6 TOKEN_MIN=0 ./configs/install-engine-schedule.sh
 
 set -euo pipefail
 
 REPO_ROOT="${1:-${HOME}/volume-order-block}"
 COMPOSE_FILE="${REPO_ROOT}/configs/docker-compose.yml"
 COMPOSE_PROJECT="${COMPOSE_PROJECT_NAME:-ak07}"
-START_HOUR="${START_HOUR:-8}"
-START_MIN="${START_MIN:-40}"
-TOKEN_HOUR="${TOKEN_HOUR:-8}"
-TOKEN_MIN="${TOKEN_MIN:-45}"
+START_HOUR="${START_HOUR:-5}"
+START_MIN="${START_MIN:-55}"
+TOKEN_HOUR="${TOKEN_HOUR:-6}"
+TOKEN_MIN="${TOKEN_MIN:-0}"
 STOP_HOUR="${STOP_HOUR:-15}"
 STOP_MIN="${STOP_MIN:-45}"
 
@@ -47,7 +47,7 @@ read -r STOP_MIN_UTC STOP_HOUR_UTC <<< "$(ist_to_utc_cron "${STOP_HOUR}" "${STOP
 _CRON_PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 COMPOSE="PATH=${_CRON_PATH} docker compose -p ${COMPOSE_PROJECT} -f configs/docker-compose.yml"
 
-START_CMD="cd ${REPO_ROOT} && { echo \"==== \$(TZ=Asia/Kolkata date -Is) AK07_ENGINE_START (IST) ====\"; ${COMPOSE} up -d redis engine; echo \"exit=\$?\"; } >> ${REPO_ROOT}/engine-scheduler.log 2>&1"
+START_CMD="cd ${REPO_ROOT} && { echo \"==== \$(TZ=Asia/Kolkata date -Is) AK07_ENGINE_START (IST) ====\"; ${COMPOSE} up -d redis api engine; echo \"exit=\$?\"; } >> ${REPO_ROOT}/engine-scheduler.log 2>&1"
 TOKEN_CMD="cd ${REPO_ROOT} && { echo \"==== \$(TZ=Asia/Kolkata date -Is) AK07_TOKEN_REFRESH (IST) ====\"; ${COMPOSE} exec -T engine python scripts/refresh_upstox_token.py; echo \"exit=\$?\"; } >> ${REPO_ROOT}/engine-scheduler.log 2>&1"
 STOP_CMD="cd ${REPO_ROOT} && { echo \"==== \$(TZ=Asia/Kolkata date -Is) AK07_ENGINE_STOP (IST) ====\"; ${COMPOSE} stop engine; echo \"exit=\$?\"; } >> ${REPO_ROOT}/engine-scheduler.log 2>&1"
 

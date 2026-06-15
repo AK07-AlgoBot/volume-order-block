@@ -12,7 +12,7 @@ Responsibilities:
   spot-50, SHORT -> PE near spot+50) and trade it in 2 lots: book 1 lot at
   half target (+60 pts) or on backend warning signals, run the rest to the
   full +120 pt target or the hard -60 pt stop from entry.
-- Daily session automation: at AK07_TOKEN_REFRESH_IST (default 08:45 IST)
+- Daily session automation: at AK07_TOKEN_REFRESH_IST (default 06:00 IST)
   request/refresh the Upstox V3 access token and warm the Redis connection pool; at
   15:30 IST archive the full session (trades, spot tracking, sentiment, P&L,
   Redis cache dump) to app/archive/performance_review_<YYYY-MM-DD>.json.
@@ -94,7 +94,7 @@ def _format_ist_time(value: dtime) -> str:
 
 ENTRY_OPEN_TIME: Final[dtime] = _parse_ist_time("AK07_ENTRY_OPEN_IST", 9, 20)
 NO_ENTRY_AFTER: Final[dtime] = _parse_ist_time("AK07_NO_ENTRY_AFTER_IST", 14, 45)
-TOKEN_REFRESH_TIME: Final[dtime] = _parse_ist_time("AK07_TOKEN_REFRESH_IST", 8, 45)
+TOKEN_REFRESH_TIME: Final[dtime] = _parse_ist_time("AK07_TOKEN_REFRESH_IST", 6, 0)
 WALL_REFRESH_SECONDS: Final[int] = 300
 POLL_SECONDS: Final[float] = float(os.environ.get("AK07_POLL_SECONDS", "15"))
 PAPER_TRADING: Final[bool] = os.environ.get("AK07_PAPER_TRADING", "0") != "0"
@@ -303,16 +303,30 @@ class UpstoxClient:
                 )
                 logger.info("Upstox V3 access token refreshed and persisted (HTTP 200)")
                 return self.refresh_access_token_from_disk()
-            elif response.status_code == 200:
+            if response.status_code == 200:
+                notifier_url = str(((body.get("data") or {}).get("notifier_url")) or "")
                 logger.info(
-                    "Upstox V3 token request accepted; token will arrive via notifier webhook"
+                    "Upstox V3 token request accepted — approve in Upstox app/WhatsApp; "
+                    "token will POST to notifier%s",
+                    f" ({notifier_url})" if notifier_url else "",
                 )
-                return self.refresh_access_token_from_disk()
+                return True
+            error_code = ""
+            errors = body.get("errors") if isinstance(body.get("errors"), list) else []
+            if errors and isinstance(errors[0], dict):
+                error_code = str(errors[0].get("errorCode") or errors[0].get("error_code") or "")
             logger.error(
                 "Upstox V3 token request failed: HTTP %d %s",
                 response.status_code,
                 str(response.text or "")[:300],
             )
+            if error_code == "UDAPI1123":
+                logger.error(
+                    "UDAPI1123 = Upstox rejected the Notifier URL saved in My Apps. "
+                    "Set exactly https://ak07.in/api/upstox/token-notifier (HTTPS, no trailing slash), "
+                    "verify `curl -s https://ak07.in/api/upstox/token-notifier` returns JSON, "
+                    "ensure nginx proxies /api/ to port 8080, then Edit+Save the app in Upstox portal."
+                )
             return False
         except Exception as exc:  # Bound exception explicitly for debugging safely
             logger.exception("Unexpected failure during daily token refresh: %s", exc)
