@@ -270,6 +270,8 @@ def _seed_breakout(now: datetime, kill_engaged: bool) -> None:
                 "green": round(levels.green, 2),
                 "red": round(levels.red, 2),
                 "gap_regime": levels.gap_regime,
+                "allowed_long": day_review in ("LONG", "NEUTRAL"),
+                "allowed_short": day_review in ("SHORT", "NEUTRAL"),
                 "levels_ready": True,
                 "day_review": day_review,
                 "first_candle_close": round(levels.mid + 12, 2),

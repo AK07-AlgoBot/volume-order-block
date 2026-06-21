@@ -1,9 +1,9 @@
 """AK07 Breakout System — Strategy Type 3.
 
 Daily Green / Mid / Red from 9:15 session open + instrument band half-width
-(Pine v6: Nifty 0.25%, BankNifty 0.125%, Sensex 0.14% of price). Gap-day filter:
-longs on GapUp/Flat, shorts on GapDn/Flat. Breakout on 5m close through Green/Red.
-Options only, 1 lot, book @ fixed spot target (Nifty/BN 50 pts · Sensex 100 pts),
+(Pine v6: Nifty 0.25%, BankNifty 0.125%, Sensex 0.14% of price). Day-review filter
+from 9:20 first 5m close vs Mid: Review LONG → longs only, Review SHORT → shorts only.
+Breakout on 5m close through Green/Red. Options only, 1 lot, book @ fixed spot target,
 max 2 trades/day per index, flat 14:55 IST.
 
 Run: python -u src/server/src/app/services/breakout_engine.py
@@ -27,6 +27,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from app.services import cache_manager, telegram_notifier
 from app.services import performance_store
+from app.services.engine_intraday import blr_day_review_allows_direction
 from app.services.upstox_engine import (
     INDEX_CONFIGS,
     ITM_OFFSET_POINTS,
@@ -194,15 +195,6 @@ def compute_blr_levels(
     )
 
 
-def gap_allows_direction(gap_regime: str, direction: str) -> bool:
-    """Pine: longDayOk = GapUp|Flat; shortDayOk = GapDn|Flat."""
-    if direction == "LONG":
-        return gap_regime in ("GAP_UP", "FLAT")
-    if direction == "SHORT":
-        return gap_regime in ("GAP_DN", "FLAT")
-    return False
-
-
 def day_review_from_first_close(first_close: float, mid: float) -> str:
     """First 5m close vs central pivot — which side to review today."""
     if first_close > mid:
@@ -218,22 +210,22 @@ def detect_breakout_signal(
     green: float,
     red: float,
     mid: float,
-    gap_regime: str,
+    day_review: str,
 ) -> tuple[str | None, str]:
-    """Return (direction, reason) for a closed 5m breakout (Pine gap-day filter)."""
+    """Return (direction, reason) for a closed 5m breakout (9:20 day-review filter)."""
     long_breakout = prev_close <= green and close > green and close > mid
     short_breakout = prev_close >= red and close < red and close < mid
 
-    if long_breakout and gap_allows_direction(gap_regime, "LONG"):
-        return "LONG", "green breakout (GapUp/Flat day)"
+    if long_breakout and blr_day_review_allows_direction(day_review, "LONG"):
+        return "LONG", f"green breakout (Review {day_review})"
 
-    if short_breakout and gap_allows_direction(gap_regime, "SHORT"):
-        return "SHORT", "red breakdown (GapDn/Flat day)"
+    if short_breakout and blr_day_review_allows_direction(day_review, "SHORT"):
+        return "SHORT", f"red breakdown (Review {day_review})"
 
     if long_breakout:
-        return None, "long breakout blocked (GapDn day)"
+        return None, f"long breakout blocked (Review {day_review} day)"
     if short_breakout:
-        return None, "short breakout blocked (GapUp day)"
+        return None, f"short breakout blocked (Review {day_review} day)"
 
     return None, ""
 
@@ -547,6 +539,7 @@ class BreakoutEngine:
         elif (
             not entries_blocked
             and state.levels_ready
+            and state.day_review not in ("", "PENDING")
             and now.time() >= ENTRY_START
             and state.trades_today < MAX_TRADES_PER_DAY
             and candles
@@ -692,6 +685,10 @@ class BreakoutEngine:
         if state.mid is None or state.green is None or state.red is None:
             return
 
+        if state.day_review in ("", "PENDING"):
+            state.setup_label = "Awaiting 9:20 5m close for day review"
+            return
+
         if len(candles) < 2:
             return
 
@@ -709,10 +706,10 @@ class BreakoutEngine:
             state.green,
             state.red,
             state.mid,
-            state.gap_regime,
+            state.day_review,
         )
         if direction is None:
-            blocked = reason or f"Watching breakouts ({state.gap_regime} day filter)"
+            blocked = reason or f"Watching breakouts (Review {state.day_review} day filter)"
             state.setup_label = blocked
             return
 
@@ -887,8 +884,8 @@ class BreakoutEngine:
             "green": state.green,
             "red": state.red,
             "gap_regime": state.gap_regime,
-            "allowed_long": state.gap_regime in ("GAP_UP", "FLAT") if state.gap_regime else False,
-            "allowed_short": state.gap_regime in ("GAP_DN", "FLAT") if state.gap_regime else False,
+            "allowed_long": blr_day_review_allows_direction(state.day_review, "LONG"),
+            "allowed_short": blr_day_review_allows_direction(state.day_review, "SHORT"),
             "band_half": state.band_half,
             "band_half_pct": state.band_half_pct,
             "session_open": state.session_open,

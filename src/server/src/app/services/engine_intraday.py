@@ -65,27 +65,31 @@ def fixed_sl_price(index_code: str, entry: float, direction: str) -> float:
     return entry + sl_pts
 
 
-def blr_gap_allows_direction(gap_regime: str, direction: str) -> bool:
-    """Strategy 3 session day view — same filter used by S2/S4/S5 entries."""
-    if gap_regime == "FLAT":
+def blr_day_review_allows_direction(day_review: str, direction: str) -> bool:
+    """9:20 first 5m close vs Mid — master bias for S3 entries and S2/S4/S5."""
+    if day_review in ("", "PENDING"):
+        return False
+    if day_review == "NEUTRAL":
         return True
     if direction == "LONG":
-        return gap_regime == "GAP_UP"
+        return day_review == "LONG"
     if direction == "SHORT":
-        return gap_regime == "GAP_DN"
+        return day_review == "SHORT"
     return False
 
 
 def direction_allowed_by_blr_day(index_code: str, direction: str) -> tuple[bool, str]:
-    """Return (allowed, note) using published Strategy 3 breakout state."""
+    """Return (allowed, note) using published Strategy 3 day review."""
     key = cache_manager.BREAKOUT_STATE_KEY_TEMPLATE.format(index=index_code)
     bo = cache_manager.get_json(key) or {}
     if not bo.get("levels_ready"):
         return False, "S3 BLR levels not ready"
-    gap = str(bo.get("gap_regime") or "")
-    if blr_gap_allows_direction(gap, direction):
-        return True, gap
-    return False, f"S3 {gap} day — skip {direction}"
+    review = str(bo.get("day_review") or "PENDING")
+    if review == "PENDING":
+        return False, "S3 day review pending (await 9:20 5m close)"
+    if blr_day_review_allows_direction(review, direction):
+        return True, f"Review {review}"
+    return False, f"S3 Review {review} — skip {direction}"
 
 
 def session_vwap(candles: list[dict[str, float]]) -> float | None:
