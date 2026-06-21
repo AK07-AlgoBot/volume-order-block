@@ -25,6 +25,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from app.services import cache_manager, telegram_notifier
 from app.services import performance_store
+from app.services.engine_intraday import direction_allowed_by_blr_day
 from app.services.upstox_engine import (
     INDEX_CONFIGS,
     ITM_OFFSET_POINTS,
@@ -511,6 +512,10 @@ class SMCCRTEngine:
         close = float(last["close"])
 
         if fvg.direction == "LONG" and state.swept_low and close > state.crl:
+            allowed, blr_note = direction_allowed_by_blr_day(state.config.code, "LONG")
+            if not allowed:
+                state.setup_label = blr_note
+                return
             entry = close
             sl = fvg.low
             tp1, tp2, _ = rr_book_targets(entry, sl, "LONG")
@@ -522,6 +527,10 @@ class SMCCRTEngine:
             )
 
         elif fvg.direction == "SHORT" and state.swept_high and close < state.crh:
+            allowed, blr_note = direction_allowed_by_blr_day(state.config.code, "SHORT")
+            if not allowed:
+                state.setup_label = blr_note
+                return
             entry = close
             sl = fvg.high
             tp1, tp2, _ = rr_book_targets(entry, sl, "SHORT")

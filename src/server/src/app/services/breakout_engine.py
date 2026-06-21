@@ -1,10 +1,10 @@
 """AK07 Breakout System — Strategy Type 3.
 
-Daily Green / Mid / Red levels from previous-day range + session open (Pine BLR
-logic). The first 5-minute close vs Mid sets which side to review for the session.
-Breakout entries on 5m close through Green (long) or Red (short), with override
-when price closes through the opposite line. Options only, 1 lot, book @ fixed spot
-target (Nifty/BankNifty 50 pts · Sensex 100 pts), max 2 trades/day per index.
+Daily Green / Mid / Red from 9:15 session open + instrument band half-width
+(Pine v6: Nifty 0.25%, BankNifty 0.125%, Sensex 0.14% of price). Gap-day filter:
+longs on GapUp/Flat, shorts on GapDn/Flat. Breakout on 5m close through Green/Red.
+Options only, 1 lot, book @ fixed spot target (Nifty/BN 50 pts · Sensex 100 pts),
+max 2 trades/day per index, flat 14:55 IST.
 
 Run: python -u src/server/src/app/services/breakout_engine.py
 """
@@ -47,27 +47,22 @@ MAX_TRADES_PER_DAY: Final[int] = int(os.environ.get("BREAKOUT_MAX_TRADES_PER_DAY
 LOTS_PER_TRADE: Final[int] = 1
 SL_BUFFER: Final[float] = float(os.environ.get("BREAKOUT_SL_BUFFER_PTS", "2.0"))
 BREAKOUT_TP1_PTS: Final[dict[str, float]] = {
-    "NIFTY": float(os.environ.get("BREAKOUT_TP1_PTS_NIFTY", "50")),
-    "BANKNIFTY": float(os.environ.get("BREAKOUT_TP1_PTS_BANKNIFTY", "50")),
+    "NIFTY": float(os.environ.get("BREAKOUT_TP1_PTS_NIFTY", "30")),
+    "BANKNIFTY": float(os.environ.get("BREAKOUT_TP1_PTS_BANKNIFTY", "30")),
     "SENSEX": float(os.environ.get("BREAKOUT_TP1_PTS_SENSEX", "100")),
 }
+SENSEX_COST_SL_PTS: Final[float] = float(os.environ.get("BREAKOUT_SENSEX_COST_SL_PTS", "50"))
 
-# Pine locked BLR constants
-UP_R: Final[float] = 0.08
-UP_B: Final[float] = 0.30
-DN_R: Final[float] = 0.26
-DN_B: Final[float] = 0.10
-GAP_UP_K: Final[float] = 0.06
-GAP_DN_K: Final[float] = 0.10
+# Pine v6 band half-width (% of 9:15 session open / Mid)
+BAND_HALF_PCT: Final[dict[str, float]] = {
+    "NIFTY": float(os.environ.get("BREAKOUT_BAND_PCT_NIFTY", "0.25")),
+    "BANKNIFTY": float(os.environ.get("BREAKOUT_BAND_PCT_BANKNIFTY", "0.125")),
+    "SENSEX": float(os.environ.get("BREAKOUT_BAND_PCT_SENSEX", "0.14")),
+}
+GAP_EXTRA_PCT: Final[float] = float(os.environ.get("BREAKOUT_GAP_EXTRA_PCT", "0.0"))
 FLAT_GAP_PCT: Final[float] = 0.10
-GREEN_MUL_GAPUP: Final[float] = 0.90
-RED_MUL_GAPUP: Final[float] = 1.00
-GREEN_MUL_GAPDN: Final[float] = 1.00
-RED_MUL_GAPDN: Final[float] = 0.90
-GREEN_MUL_FLAT: Final[float] = 0.95
-RED_MUL_FLAT: Final[float] = 0.95
-GREEN_GAPUP_SLOPE: Final[float] = 0.08
-RED_GAPDN_SLOPE: Final[float] = 0.08
+GREEN_OFFSET: Final[float] = 0.0
+RED_OFFSET: Final[float] = 0.0
 
 
 def _parse_ist_time(env_key: str, default_hour: int, default_minute: int) -> dtime:
@@ -96,6 +91,8 @@ class BLRLevels:
     red: float
     gap_regime: str
     session_open: float
+    band_half: float
+    band_half_pct: float
     prev_open: float
     prev_high: float
     prev_low: float
@@ -129,6 +126,8 @@ class IndexBreakoutState:
     green: float | None = None
     red: float | None = None
     gap_regime: str = ""
+    band_half: float | None = None
+    band_half_pct: float | None = None
     session_open: float | None = None
     levels_ready: bool = False
     day_review: str = "PENDING"
@@ -147,10 +146,10 @@ def compute_blr_levels(
     prev_low: float,
     prev_close: float,
     session_open: float,
+    index_code: str,
 ) -> BLRLevels:
-    """Replicate Pine BLR level math (SessionOpen base mode)."""
+    """Pine v6 BLR: Mid = session open; Green/Red = Mid ± band half-width (% of price)."""
     prev_range = prev_high - prev_low
-    prev_body = abs(prev_close - prev_open)
     safe_range = max(prev_range, 0.05)
 
     gap = session_open - prev_close
@@ -168,21 +167,17 @@ def compute_blr_levels(
     else:
         gap_regime = "GAP_DN"
 
-    base = session_open  # Mid = 09:15 opening price (Pine SessionOpen base)
-
-    green_dist = UP_R * prev_range + UP_B * prev_body + (GAP_UP_K * gap_abs if is_gap_up else 0.0)
-    red_dist = DN_R * prev_range + DN_B * prev_body + (GAP_DN_K * gap_abs if is_gap_dn else 0.0)
-
-    g_mul = GREEN_MUL_FLAT if is_flat else (GREEN_MUL_GAPUP if is_gap_up else GREEN_MUL_GAPDN)
-    r_mul = RED_MUL_FLAT if is_flat else (RED_MUL_GAPUP if is_gap_up else RED_MUL_GAPDN)
-
-    if is_gap_up:
-        g_mul = max(0.70, g_mul - GREEN_GAPUP_SLOPE * gap_pct)
-    if is_gap_dn:
-        r_mul = max(0.70, r_mul - RED_GAPDN_SLOPE * gap_pct)
-
-    green = base + green_dist * g_mul
-    red = base - red_dist * r_mul
+    base = session_open
+    active_pct = BAND_HALF_PCT.get(index_code, 0.25)
+    half_width = base * active_pct / 100.0
+    gap_addon = (
+        base * GAP_EXTRA_PCT / 100.0
+        if GAP_EXTRA_PCT and (is_gap_up or is_gap_dn)
+        else 0.0
+    )
+    band_half = half_width + gap_addon
+    green = base + band_half + GREEN_OFFSET
+    red = base - band_half + RED_OFFSET
 
     return BLRLevels(
         mid=base,
@@ -190,11 +185,22 @@ def compute_blr_levels(
         red=red,
         gap_regime=gap_regime,
         session_open=session_open,
+        band_half=band_half,
+        band_half_pct=active_pct,
         prev_open=prev_open,
         prev_high=prev_high,
         prev_low=prev_low,
         prev_close=prev_close,
     )
+
+
+def gap_allows_direction(gap_regime: str, direction: str) -> bool:
+    """Pine: longDayOk = GapUp|Flat; shortDayOk = GapDn|Flat."""
+    if direction == "LONG":
+        return gap_regime in ("GAP_UP", "FLAT")
+    if direction == "SHORT":
+        return gap_regime in ("GAP_DN", "FLAT")
+    return False
 
 
 def day_review_from_first_close(first_close: float, mid: float) -> str:
@@ -212,21 +218,22 @@ def detect_breakout_signal(
     green: float,
     red: float,
     mid: float,
-    day_review: str,
+    gap_regime: str,
 ) -> tuple[str | None, str]:
-    """Return (direction, reason) for a closed 5m candle breakout."""
+    """Return (direction, reason) for a closed 5m breakout (Pine gap-day filter)."""
     long_breakout = prev_close <= green and close > green and close > mid
     short_breakout = prev_close >= red and close < red and close < mid
 
-    if long_breakout:
-        if day_review in ("LONG", "NEUTRAL"):
-            return "LONG", "green breakout (review side)"
-        return "LONG", "green breakout override (against review)"
+    if long_breakout and gap_allows_direction(gap_regime, "LONG"):
+        return "LONG", "green breakout (GapUp/Flat day)"
 
+    if short_breakout and gap_allows_direction(gap_regime, "SHORT"):
+        return "SHORT", "red breakdown (GapDn/Flat day)"
+
+    if long_breakout:
+        return None, "long breakout blocked (GapDn day)"
     if short_breakout:
-        if day_review in ("SHORT", "NEUTRAL"):
-            return "SHORT", "red breakdown (review side)"
-        return "SHORT", "red breakdown override (against review)"
+        return None, "short breakout blocked (GapUp day)"
 
     return None, ""
 
@@ -241,7 +248,7 @@ def trade_levels(
     gap_regime: str,
 ) -> tuple[float, float, float]:
     """Spot SL, TP1 (fixed pts book), TP2 (2× TP1 reference)."""
-    tp1_pts = BREAKOUT_TP1_PTS.get(index_code, 50.0)
+    tp1_pts = BREAKOUT_TP1_PTS.get(index_code, 30.0)
     tp2_pts = tp1_pts * 2.0
     if direction == "LONG":
         sl_anchor = mid if gap_regime == "GAP_UP" else red
@@ -401,7 +408,9 @@ class BreakoutMarketClient:
                 "close": spot - 40,
             }
             levels = compute_blr_levels(
-                prev["open"], prev["high"], prev["low"], prev["close"], session_open=spot
+                prev["open"], prev["high"], prev["low"], prev["close"],
+                session_open=spot,
+                index_code=cfg.code,
             )
             self._mock_levels[cfg.code] = levels
 
@@ -512,6 +521,7 @@ class BreakoutEngine:
                 state.levels_ready = False
                 state.mid = state.green = state.red = None
                 state.session_open = None
+                state.band_half = state.band_half_pct = None
                 state.gap_regime = ""
                 state.day_review = "PENDING"
                 state.first_candle_close = None
@@ -537,7 +547,6 @@ class BreakoutEngine:
         elif (
             not entries_blocked
             and state.levels_ready
-            and state.day_review not in ("PENDING",)
             and now.time() >= ENTRY_START
             and state.trades_today < MAX_TRADES_PER_DAY
             and candles
@@ -634,27 +643,31 @@ class BreakoutEngine:
             prev["low"],
             prev["close"],
             opening_915,
+            state.config.code,
         )
         state.session_open = opening_915
         state.mid = levels.mid
         state.green = levels.green
         state.red = levels.red
         state.gap_regime = levels.gap_regime
+        state.band_half = levels.band_half
+        state.band_half_pct = levels.band_half_pct
         state.levels_ready = True
         base_label = (
             f"BLR locked — G {levels.green:.2f} / M {levels.mid:.2f} / R {levels.red:.2f} "
-            f"({levels.gap_regime} · 9:15 open {opening_915:.2f})"
+            f"({levels.gap_regime} · {levels.band_half_pct:.3f}% half · 9:15 open {opening_915:.2f})"
         )
         state.setup_label = base_label
         msg = state.setup_label
         state.signal_log.append(msg)
         logger.info(
-            "[%s] BLR locked — G %.2f / M %.2f / R %.2f (%s · 9:15 open %.2f)",
+            "[%s] BLR locked — G %.2f / M %.2f / R %.2f (%s · %.3f%% half · 9:15 open %.2f)",
             state.config.code,
             levels.green,
             levels.mid,
             levels.red,
             levels.gap_regime,
+            levels.band_half_pct,
             opening_915,
         )
 
@@ -696,10 +709,11 @@ class BreakoutEngine:
             state.green,
             state.red,
             state.mid,
-            state.day_review,
+            state.gap_regime,
         )
         if direction is None:
-            state.setup_label = f"Review {state.day_review} — watching green/red breakouts"
+            blocked = reason or f"Watching breakouts ({state.gap_regime} day filter)"
+            state.setup_label = blocked
             return
 
         sl, tp1, tp2 = trade_levels(
@@ -751,7 +765,7 @@ class BreakoutEngine:
             target_price=tp1,
             sl_price=sl,
             tp2_price=tp2,
-            component_sentiment=state.day_review,
+            component_sentiment=state.gap_regime,
             timestamp=now.strftime("%Y-%m-%d %H:%M:%S IST"),
         )
 
@@ -761,6 +775,15 @@ class BreakoutEngine:
             return
 
         spot = state.spot
+        # Sensex: after +50 pts move SL to entry (cost)
+        if state.config.code == "SENSEX":
+            fav = (spot - pos.entry_price) if pos.direction == "LONG" else (pos.entry_price - spot)
+            if fav >= SENSEX_COST_SL_PTS:
+                if pos.direction == "LONG" and pos.sl_price < pos.entry_price:
+                    pos.sl_price = pos.entry_price
+                elif pos.direction == "SHORT" and pos.sl_price > pos.entry_price:
+                    pos.sl_price = pos.entry_price
+
         exit_reason = ""
         if pos.direction == "LONG":
             if spot <= pos.sl_price:
@@ -864,6 +887,10 @@ class BreakoutEngine:
             "green": state.green,
             "red": state.red,
             "gap_regime": state.gap_regime,
+            "allowed_long": state.gap_regime in ("GAP_UP", "FLAT") if state.gap_regime else False,
+            "allowed_short": state.gap_regime in ("GAP_DN", "FLAT") if state.gap_regime else False,
+            "band_half": state.band_half,
+            "band_half_pct": state.band_half_pct,
             "session_open": state.session_open,
             "levels_ready": state.levels_ready,
             "day_review": state.day_review,

@@ -26,7 +26,7 @@ from zoneinfo import ZoneInfo
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from app.services import cache_manager, performance_store, telegram_notifier
-from app.services.engine_intraday import kill_switch_engaged, parse_ist_time, rr_book_targets, session_vwap
+from app.services.engine_intraday import direction_allowed_by_blr_day, kill_switch_engaged, parse_ist_time, rr_book_targets, session_vwap
 from app.services.upstox_engine import (
     INDEX_CONFIGS,
     ITM_OFFSET_POINTS,
@@ -337,6 +337,10 @@ class PriceActionEngine:
         )
         if direction is None:
             state.setup_label = f"Watching PA — {state.structure} · VWAP {state.session_vwap or 0:.2f}"
+            return
+        allowed, blr_note = direction_allowed_by_blr_day(state.config.code, direction)
+        if not allowed:
+            state.setup_label = blr_note
             return
         entry = float(candle["close"])
         tp1, tp2, _ = rr_book_targets(entry, sl, direction)

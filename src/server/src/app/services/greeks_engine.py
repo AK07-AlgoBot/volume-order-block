@@ -6,7 +6,7 @@ Dealer-positioning read from the weekly option chain:
   - Gamma flip level (GEX zero-cross proxy)
   - Regime filter (positive vs negative gamma)
 
-Nifty · BankNifty · Sensex · 1 lot ITM options · book @ TP1 (1R) · intraday flat 14:55 IST.
+Nifty · BankNifty · Sensex · 1 lot ITM options · book @ fixed TP1 · intraday flat 14:55 IST.
 """
 
 from __future__ import annotations
@@ -26,7 +26,14 @@ from zoneinfo import ZoneInfo
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from app.services import cache_manager, performance_store, telegram_notifier
-from app.services.engine_intraday import kill_switch_engaged, parse_ist_time, rr_book_targets, session_vwap
+from app.services.engine_intraday import (
+    direction_allowed_by_blr_day,
+    fixed_book_targets,
+    fixed_sl_price,
+    kill_switch_engaged,
+    parse_ist_time,
+    session_vwap,
+)
 from app.services.options_greeks import ChainAnalytics, analyze_option_chain
 from app.services.upstox_engine import (
     INDEX_CONFIGS,
@@ -327,8 +334,13 @@ class GreeksEngine:
         )
         if direction is None:
             return
+        allowed, blr_note = direction_allowed_by_blr_day(state.config.code, direction)
+        if not allowed:
+            state.setup_label = blr_note
+            return
         entry = float(bar["close"])
-        tp1, tp2, _ = rr_book_targets(entry, sl, direction)
+        sl = fixed_sl_price(state.config.code, entry, direction)
+        tp1, tp2, _ = fixed_book_targets(state.config.code, entry, direction)
         contract = self.client.resolve_option(state.config, entry, direction)
         if contract is None:
             return
@@ -380,12 +392,12 @@ class GreeksEngine:
             if spot <= pos.sl_price:
                 reason = "SL hit"
             elif spot >= pos.tp1_price:
-                reason = "TP1 booked (1R)"
+                reason = "TP1 booked"
         else:
             if spot >= pos.sl_price:
                 reason = "SL hit"
             elif spot <= pos.tp1_price:
-                reason = "TP1 booked (1R)"
+                reason = "TP1 booked"
         if reason:
             self._close_position(state, pos, spot, reason, now)
 

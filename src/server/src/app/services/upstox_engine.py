@@ -54,11 +54,27 @@ logger = logging.getLogger("ak07.upstox_engine")
 IST: Final = ZoneInfo("Asia/Kolkata")
 
 # ---------------------------------------------------------------------------
-# Strategy constants
+# Strategy constants — per-index spot risk (2 lots: book 1 at partial, exit 2 at target)
 # ---------------------------------------------------------------------------
-TARGET_POINTS: Final[float] = 120.0
-STOP_LOSS_POINTS: Final[float] = 60.0
-PARTIAL_BOOK_POINTS: Final[float] = TARGET_POINTS / 2  # +60: book 1 lot
+INDEX_OI_RISK: Final[dict[str, tuple[float, float, float]]] = {
+    # index: (stop_loss_pts, partial_book_pts, full_target_pts)
+    "NIFTY": (
+        float(os.environ.get("AK07_OI_SL_PTS_NIFTY", "30")),
+        float(os.environ.get("AK07_OI_PARTIAL_PTS_NIFTY", "30")),
+        float(os.environ.get("AK07_OI_TARGET_PTS_NIFTY", "60")),
+    ),
+    "BANKNIFTY": (
+        float(os.environ.get("AK07_OI_SL_PTS_BANKNIFTY", "30")),
+        float(os.environ.get("AK07_OI_PARTIAL_PTS_BANKNIFTY", "30")),
+        float(os.environ.get("AK07_OI_TARGET_PTS_BANKNIFTY", "60")),
+    ),
+    "SENSEX": (
+        float(os.environ.get("AK07_OI_SL_PTS_SENSEX", "60")),
+        float(os.environ.get("AK07_OI_PARTIAL_PTS_SENSEX", "60")),
+        float(os.environ.get("AK07_OI_TARGET_PTS_SENSEX", "120")),
+    ),
+}
+DEFAULT_OI_RISK: Final[tuple[float, float, float]] = (60.0, 60.0, 120.0)
 INITIAL_LOTS: Final[int] = 2
 ITM_OFFSET_POINTS: Final[float] = 50.0  # LONG -> CE near spot-50, SHORT -> PE near spot+50
 MAX_TRADES_PER_INDEX_PER_DAY: Final[int] = 2
@@ -975,10 +991,11 @@ class AK07Engine:
 
     def _enter_trade(self, state: IndexState, direction: str, entry: float, now: datetime) -> None:
         cfg = state.config
+        sl_pts, _, target_pts = INDEX_OI_RISK.get(cfg.code, DEFAULT_OI_RISK)
         if direction == "LONG":
-            target, sl = entry + TARGET_POINTS, entry - STOP_LOSS_POINTS
+            target, sl = entry + target_pts, entry - sl_pts
         else:
-            target, sl = entry - TARGET_POINTS, entry + STOP_LOSS_POINTS
+            target, sl = entry - target_pts, entry + sl_pts
 
         contract = self.client.get_itm_option_contract(cfg.spot_instrument_key, entry, direction)
         if contract is None:
@@ -1067,11 +1084,12 @@ class AK07Engine:
         favorable = (spot - pos.entry_price) if pos.direction == "LONG" else (pos.entry_price - spot)
 
         if not pos.partial_booked and pos.lots_remaining == INITIAL_LOTS:
+            _, partial_pts, _ = INDEX_OI_RISK.get(index_code, DEFAULT_OI_RISK)
             bias_opposed = (pos.direction == "LONG" and system_bias == "SHORT_ONLY") or (
                 pos.direction == "SHORT" and system_bias == "LONG_ONLY"
             )
-            if favorable >= PARTIAL_BOOK_POINTS:
-                self._book_partial(index_code, state, spot, "HALF_TARGET_+60", now)
+            if favorable >= partial_pts:
+                self._book_partial(index_code, state, spot, f"HALF_TARGET_+{int(partial_pts)}", now)
             elif bias_opposed and favorable > 0:
                 self._book_partial(index_code, state, spot, f"BACKEND_BLOCKER_{system_bias}", now)
             pos = state.position

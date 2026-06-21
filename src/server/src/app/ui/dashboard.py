@@ -181,6 +181,8 @@ def render_breakout_strategy_panel(index_code: str) -> None:
         meta.append(f"9:15 open {fmt(float(bo['session_open']))}")
     if bo.get("gap_regime"):
         meta.append(str(bo["gap_regime"]))
+    if bo.get("band_half_pct") is not None:
+        meta.append(f"band {float(bo['band_half_pct']):.3f}% half")
     if bo.get("first_candle_close") is not None and bo.get("mid") is not None:
         meta.append(f"1st 5m close {fmt(float(bo['first_candle_close']))} vs mid")
     if bo.get("entries_blocked"):
