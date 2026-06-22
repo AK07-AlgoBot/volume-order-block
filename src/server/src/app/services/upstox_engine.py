@@ -10,8 +10,8 @@ Responsibilities:
   component-confluence filters, gated by the AI system bias from Redis.
 - On entry, resolve the closest ITM weekly option contract (LONG -> CE near
   spot-50, SHORT -> PE near spot+50) and trade it in 2 lots: book 1 lot at
-  half target (+60 pts) or on backend warning signals, run the rest to the
-  full +120 pt target or the hard -60 pt stop from entry.
+  the partial target (Nifty/BN +30 · Sensex +60), run the rest to the full
+  target (Nifty/BN +60 · Sensex +120) or the index stop (Nifty/BN -30 · Sensex -60).
 - Daily session automation: at AK07_TOKEN_REFRESH_IST (default 06:00 IST)
   request/refresh the Upstox V3 access token and warm the Redis connection pool; at
   15:30 IST archive the full session (trades, spot tracking, sentiment, P&L,
@@ -772,6 +772,15 @@ class AK07Engine:
         if migrated.get("copied"):
             logger.info("Migrated legacy archives on startup: %s", migrated["copied"])
         self._restore_session_from_redis(datetime.now(IST))
+        for code, risk in INDEX_OI_RISK.items():
+            sl, partial, target = risk
+            logger.info(
+                "[%s] OI risk — SL %.0f pts · partial +%.0f · target +%.0f (2 lots)",
+                code,
+                sl,
+                partial,
+                target,
+            )
         logger.info("AK07 engine initialized (paper_trading=%s)", PAPER_TRADING)
 
     def _restore_session_from_redis(self, now: datetime) -> None:
@@ -806,6 +815,39 @@ class AK07Engine:
         for code, count in entry_counts.items():
             self.states[code].trades_today = count
             self.realized_pnl_points[code] = pnl_by_index[code]
+
+        positions = cache_manager.get_json(cache_manager.POSITIONS_KEY)
+        if isinstance(positions, dict):
+            for code, raw in positions.items():
+                state = self.states.get(code)
+                if state is None or not isinstance(raw, dict):
+                    continue
+                try:
+                    state.position = Position(
+                        index_code=code,
+                        direction=str(raw["direction"]),
+                        entry_price=float(raw["entry_price"]),
+                        target_price=float(raw["target_price"]),
+                        sl_price=float(raw["sl_price"]),
+                        lot_size=int(raw["lot_size"]),
+                        lots_remaining=int(raw.get("lots_remaining") or INITIAL_LOTS),
+                        partial_booked=bool(raw.get("partial_booked")),
+                        instrument_key=str(raw.get("instrument_key") or ""),
+                        option_strike=int(raw["option_strike"]),
+                        option_type=str(raw["option_type"]),
+                        opened_at=str(raw.get("opened_at") or ""),
+                    )
+                    logger.info(
+                        "[%s] restored open position from Redis (%s @ %.2f · SL %.2f · T %.2f · %d lot(s))",
+                        code,
+                        state.position.direction,
+                        state.position.entry_price,
+                        state.position.sl_price,
+                        state.position.target_price,
+                        state.position.lots_remaining,
+                    )
+                except (KeyError, TypeError, ValueError) as exc:
+                    logger.warning("[%s] could not restore position from Redis: %s", code, exc)
 
         logger.info(
             "Restored session from Redis: %d trade_log events (entries %s)",
@@ -1077,35 +1119,37 @@ class AK07Engine:
         now: datetime,
     ) -> None:
         """Manage open position for one index (partial book, target, stop-loss)."""
+        _ = system_bias  # entry gating only; partial book uses fixed index points
         pos = state.position
         if pos is None or state.spot is None:
             return
         spot = state.spot
         favorable = (spot - pos.entry_price) if pos.direction == "LONG" else (pos.entry_price - spot)
 
+        # Stop-loss always checked first (all lots still open).
+        if pos.direction == "LONG":
+            if spot <= pos.sl_price:
+                self._exit_position(index_code, state, spot, "STOP_LOSS", now)
+                return
+        elif spot >= pos.sl_price:
+            self._exit_position(index_code, state, spot, "STOP_LOSS", now)
+            return
+
+        # Partial book 1 of 2 lots at fixed index points (no early AI-bias partial).
         if not pos.partial_booked and pos.lots_remaining == INITIAL_LOTS:
             _, partial_pts, _ = INDEX_OI_RISK.get(index_code, DEFAULT_OI_RISK)
-            bias_opposed = (pos.direction == "LONG" and system_bias == "SHORT_ONLY") or (
-                pos.direction == "SHORT" and system_bias == "LONG_ONLY"
-            )
             if favorable >= partial_pts:
                 self._book_partial(index_code, state, spot, f"HALF_TARGET_+{int(partial_pts)}", now)
-            elif bias_opposed and favorable > 0:
-                self._book_partial(index_code, state, spot, f"BACKEND_BLOCKER_{system_bias}", now)
             pos = state.position
             if pos is None:
                 return
 
+        # Full target on remaining lot(s).
         if pos.direction == "LONG":
             if spot >= pos.target_price:
                 self._exit_position(index_code, state, spot, "TARGET", now)
-            elif spot <= pos.sl_price:
-                self._exit_position(index_code, state, spot, "STOP_LOSS", now)
-        else:
-            if spot <= pos.target_price:
-                self._exit_position(index_code, state, spot, "TARGET", now)
-            elif spot >= pos.sl_price:
-                self._exit_position(index_code, state, spot, "STOP_LOSS", now)
+        elif spot <= pos.target_price:
+            self._exit_position(index_code, state, spot, "TARGET", now)
 
     def _book_partial(
         self, index_code: str, state: IndexState, spot: float, reason: str, now: datetime

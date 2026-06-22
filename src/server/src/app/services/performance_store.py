@@ -495,3 +495,100 @@ def daily_pnl_series(trades: list[dict[str, Any]]) -> list[dict[str, Any]]:
             }
         )
     return series
+
+
+def purge_trades_for_day(
+    day: str,
+    *,
+    paper_only: bool = True,
+    remove_archive: bool = True,
+    remove_trade_log: bool = True,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    """Remove paper/simulation trades for one session day from Redis and archives."""
+    result: dict[str, Any] = {
+        "day": day,
+        "redis_removed": 0,
+        "redis_remaining": 0,
+        "archive_removed": False,
+        "archive_path": "",
+        "trade_log_removed": False,
+        "dry_run": dry_run,
+    }
+
+    key = COMPLETED_TRADES_KEY_TEMPLATE.format(day=day)
+    rows = cache_manager.get_json(key)
+    if not isinstance(rows, list):
+        rows = []
+
+    if paper_only:
+        kept = [r for r in rows if isinstance(r, dict) and not r.get("paper_trading")]
+        removed = len(rows) - len(kept)
+    else:
+        kept = []
+        removed = len(rows)
+
+    result["redis_removed"] = removed
+    result["redis_remaining"] = len(kept)
+
+    if not dry_run:
+        if kept:
+            cache_manager.set_json(key, kept, ttl_seconds=TRADE_TTL_SECONDS)
+        elif rows:
+            cache_manager.delete_key(key)
+
+    if remove_archive:
+        for directory in _archive_search_dirs():
+            path = directory / f"performance_review_{day}.json"
+            if not path.is_file():
+                continue
+            result["archive_path"] = str(path)
+            delete_archive = True
+            if paper_only:
+                try:
+                    payload = json.loads(path.read_text(encoding="utf-8"))
+                    delete_archive = bool(payload.get("paper_trading", True))
+                except (OSError, json.JSONDecodeError):
+                    delete_archive = True
+            if delete_archive:
+                result["archive_removed"] = True
+                if not dry_run:
+                    path.unlink(missing_ok=True)
+            break
+
+    if remove_trade_log and (result["redis_removed"] or result["archive_removed"]):
+        result["trade_log_removed"] = True
+        if not dry_run:
+            cache_manager.delete_key(cache_manager.TRADE_LOG_KEY_TEMPLATE.format(day=day))
+
+    if result["redis_removed"] or result["archive_removed"]:
+        logger.info(
+            "Purged %s: redis -%d (kept %d), archive %s, trade_log %s",
+            day,
+            result["redis_removed"],
+            result["redis_remaining"],
+            "removed" if result["archive_removed"] else "unchanged",
+            "removed" if result["trade_log_removed"] else "unchanged",
+        )
+
+    return result
+
+
+def purge_trades_for_days(
+    days: list[str],
+    *,
+    paper_only: bool = True,
+    remove_archive: bool = True,
+    remove_trade_log: bool = True,
+    dry_run: bool = False,
+) -> list[dict[str, Any]]:
+    return [
+        purge_trades_for_day(
+            day,
+            paper_only=paper_only,
+            remove_archive=remove_archive,
+            remove_trade_log=remove_trade_log,
+            dry_run=dry_run,
+        )
+        for day in days
+    ]

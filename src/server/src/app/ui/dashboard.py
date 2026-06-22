@@ -21,7 +21,7 @@ import streamlit as st
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from app.services import cache_manager
-from app.services.upstox_engine import INDEX_CONFIGS
+from app.services.upstox_engine import INDEX_CONFIGS, INDEX_OI_RISK, DEFAULT_OI_RISK
 from app.ui.cockpit_layout import render_compact_sidebar, render_top_status_bar
 from app.ui.styles import inject_dark_theme
 
@@ -443,10 +443,16 @@ for tab, (code, cfg) in zip(tabs, INDEX_CONFIGS.items()):
             p3.metric("Target", fmt(float(position.get("target_price", 0))))
             p4.metric("Stop-Loss", fmt(float(position.get("sl_price", 0))))
             lots = int(position.get("lots_remaining", 1))
+            _, partial_pts, _ = INDEX_OI_RISK.get(code, DEFAULT_OI_RISK)
+            partial_label = (
+                "1 lot booked"
+                if position.get("partial_booked")
+                else f"awaiting +{int(partial_pts)} book"
+            )
             p5.metric(
                 "Lots Running",
                 f"{lots}/2",
-                delta="1 lot booked" if position.get("partial_booked") else "awaiting +60 book",
+                delta=partial_label,
                 delta_color="off",
             )
             if spot is not None:
