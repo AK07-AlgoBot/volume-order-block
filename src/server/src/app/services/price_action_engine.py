@@ -69,7 +69,7 @@ class PAPosition:
     instrument_key: str = ""
     option_strike: int = 0
     option_type: str = ""
-    lot_size: int = 75
+    lot_size: int = 65
     quantity: int = 75
 
 

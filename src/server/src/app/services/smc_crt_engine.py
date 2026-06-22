@@ -41,7 +41,7 @@ IST: Final = ZoneInfo("Asia/Kolkata")
 POLL_SECONDS: Final[float] = float(os.environ.get("SMC_CRT_POLL_SECONDS", "15"))
 CANDLE_5M: Final[int] = 5
 CANDLE_1H: Final[int] = 60
-MIN_RR: Final[float] = 2.0
+MIN_RR: Final[float] = 1.5
 CRM_BUFFER_POINTS: Final[float] = 8.0
 LOTS_PER_TRADE: Final[int] = 1
 MAX_TRADES_PER_DAY: Final[int] = 2
@@ -106,7 +106,7 @@ class SMCCRTPosition:
     instrument_key: str = ""
     option_strike: int = 0
     option_type: str = ""
-    lot_size: int = 75
+    lot_size: int = 65
     quantity: int = 75
 
 

@@ -47,10 +47,12 @@ POLL_SECONDS: Final[float] = float(os.environ.get("BREAKOUT_POLL_SECONDS", "15")
 MAX_TRADES_PER_DAY: Final[int] = int(os.environ.get("BREAKOUT_MAX_TRADES_PER_DAY", "2"))
 LOTS_PER_TRADE: Final[int] = 1
 SL_BUFFER: Final[float] = float(os.environ.get("BREAKOUT_SL_BUFFER_PTS", "2.0"))
+# Minimum directional body ratio (body / candle_range). Filters wick-driven false breakouts.
+BREAKOUT_MIN_BODY_RATIO: Final[float] = float(os.environ.get("BREAKOUT_MIN_BODY_RATIO", "0.35"))
 BREAKOUT_TP1_PTS: Final[dict[str, float]] = {
-    "NIFTY": float(os.environ.get("BREAKOUT_TP1_PTS_NIFTY", "30")),
-    "BANKNIFTY": float(os.environ.get("BREAKOUT_TP1_PTS_BANKNIFTY", "30")),
-    "SENSEX": float(os.environ.get("BREAKOUT_TP1_PTS_SENSEX", "100")),
+    "NIFTY": float(os.environ.get("BREAKOUT_TP1_PTS_NIFTY", "80")),
+    "BANKNIFTY": float(os.environ.get("BREAKOUT_TP1_PTS_BANKNIFTY", "80")),
+    "SENSEX": float(os.environ.get("BREAKOUT_TP1_PTS_SENSEX", "200")),
 }
 SENSEX_COST_SL_PTS: Final[float] = float(os.environ.get("BREAKOUT_SENSEX_COST_SL_PTS", "50"))
 
@@ -80,7 +82,7 @@ def _parse_ist_time(env_key: str, default_hour: int, default_minute: int) -> dti
 
 SESSION_START: Final[dtime] = _parse_ist_time("BREAKOUT_SESSION_START_IST", 9, 15)
 ENTRY_START: Final[dtime] = _parse_ist_time("BREAKOUT_ENTRY_START_IST", 9, 20)
-NO_ENTRY_AFTER: Final[dtime] = _parse_ist_time("BREAKOUT_NO_ENTRY_AFTER_IST", 14, 45)
+NO_ENTRY_AFTER: Final[dtime] = _parse_ist_time("BREAKOUT_NO_ENTRY_AFTER_IST", 13, 0)
 SQUARE_OFF_TIME: Final[dtime] = _parse_ist_time("BREAKOUT_SQUARE_OFF_IST", 14, 55)
 SESSION_END: Final[dtime] = _parse_ist_time("BREAKOUT_SESSION_END_IST", 15, 30)
 
@@ -213,10 +215,34 @@ def detect_breakout_signal(
     red: float,
     mid: float,
     day_review: str,
+    *,
+    candle_open: float | None = None,
+    candle_high: float | None = None,
+    candle_low: float | None = None,
+    min_body_ratio: float = 0.0,
 ) -> tuple[str | None, str]:
-    """Return (direction, reason) for a closed 5m breakout (9:20 day-review filter)."""
+    """Return (direction, reason) for a closed 5m breakout (9:20 day-review filter).
+
+    Optional body-ratio confirmation: if min_body_ratio > 0, the candle must have
+    a directional body of at least that fraction of its total range. This filters
+    wick-driven false breakouts (e.g. big BANKNIFTY opening candles where price
+    spikes above the green level but closes back near open).
+    """
     long_breakout = prev_close <= green and close > green and close > mid
     short_breakout = prev_close >= red and close < red and close < mid
+
+    # Body-ratio confirmation gate
+    if min_body_ratio > 0 and candle_open is not None and candle_high is not None and candle_low is not None:
+        rng = candle_high - candle_low
+        if rng > 0:
+            if long_breakout:
+                bull_body = (close - candle_open) / rng
+                if bull_body < min_body_ratio:
+                    return None, f"long wick-breakout filtered (body {bull_body:.2f} < {min_body_ratio:.2f})"
+            if short_breakout:
+                bear_body = (candle_open - close) / rng
+                if bear_body < min_body_ratio:
+                    return None, f"short wick-breakout filtered (body {bear_body:.2f} < {min_body_ratio:.2f})"
 
     if long_breakout and blr_day_review_allows_direction(day_review, "LONG"):
         return "LONG", f"green breakout (Review {day_review})"
@@ -241,17 +267,23 @@ def trade_levels(
     red: float,
     gap_regime: str,
 ) -> tuple[float, float, float]:
-    """Spot SL, TP1 (fixed pts book), TP2 (2× TP1 reference)."""
-    tp1_pts = BREAKOUT_TP1_PTS.get(index_code, 30.0)
-    tp2_pts = tp1_pts * 2.0
+    """Spot SL, TP1, TP2 with entry-anchored fixed-risk sizing.
+
+    SL distance = band_half (green - mid), giving a constant R:R = 1.5:1
+    regardless of how extended the breakout candle is.  This prevents the
+    'blow-through' problem where a big opening candle creates a 200+ pt loss
+    even though the intended SL level was only ~60 pts away.
+    """
+    band_half = green - mid  # same day, same band for every bar
+    sl_dist = band_half + SL_BUFFER
+    tp1_pts = band_half * 1.5  # 1.5:1 R:R
+    tp2_pts = band_half * 3.0  # 3:1 R:R
     if direction == "LONG":
-        sl_anchor = mid if gap_regime == "GAP_UP" else red
-        sl = sl_anchor - SL_BUFFER
+        sl = entry - sl_dist
         tp1 = entry + tp1_pts
         tp2 = entry + tp2_pts
     else:
-        sl_anchor = mid if gap_regime == "GAP_DN" else green
-        sl = sl_anchor + SL_BUFFER
+        sl = entry + sl_dist
         tp1 = entry - tp1_pts
         tp2 = entry - tp2_pts
     return sl, tp1, tp2

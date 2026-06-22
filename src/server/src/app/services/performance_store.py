@@ -30,17 +30,10 @@ TRADE_TTL_SECONDS: Final[int] = 86_400 * 45
 STRATEGY_AK07_OI: Final[str] = "Strategy 1 — AK07 OI"
 STRATEGY_SMC_CRT: Final[str] = "Strategy 2 — SMC+CRT"
 STRATEGY_BREAKOUT: Final[str] = "Strategy 3 — BLR Breakout"
-STRATEGY_PRICE_ACTION: Final[str] = "Strategy 4 — Price Action"
-STRATEGY_GREEKS: Final[str] = "Strategy 5 — Greeks"
-STRATEGY_SR_REVERSAL: Final[str] = "Strategy 6 — S/R Reversal"
-
 STRATEGY_ORDER: Final[tuple[str, ...]] = (
     STRATEGY_AK07_OI,
     STRATEGY_SMC_CRT,
     STRATEGY_BREAKOUT,
-    STRATEGY_PRICE_ACTION,
-    STRATEGY_GREEKS,
-    STRATEGY_SR_REVERSAL,
 )
 
 
@@ -540,7 +533,6 @@ def analyze_losses(trades: list[dict[str, Any]]) -> dict[str, Any]:
 
     filter_exempt = {
         STRATEGY_AK07_OI,
-        STRATEGY_SR_REVERSAL,
     }
 
     for t in losses:

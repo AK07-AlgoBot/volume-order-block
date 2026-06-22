@@ -58,3 +58,4 @@ upstox_credentials.json
 
 # Local backtest / scratch output
 tmp/
+src/server/data/backtest_cache/

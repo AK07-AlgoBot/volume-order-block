@@ -105,66 +105,6 @@ services:
     networks:
       - ak07
 
-  pa_engine:
-    build:
-      context: ..
-      dockerfile: configs/docker/Dockerfile.api
-    restart: unless-stopped
-    command: ["python", "-u", "src/server/src/app/services/price_action_engine.py"]
-    env_file:
-      - ../.env
-    environment:
-      PYTHONUNBUFFERED: "1"
-      PYTHONPATH: /app/src/server/src
-      REDIS_HOST: redis
-    volumes:
-      - ak07_server_data:/app/src/server/data
-    depends_on:
-      redis:
-        condition: service_healthy
-    networks:
-      - ak07
-
-  greeks_engine:
-    build:
-      context: ..
-      dockerfile: configs/docker/Dockerfile.api
-    restart: unless-stopped
-    command: ["python", "-u", "src/server/src/app/services/greeks_engine.py"]
-    env_file:
-      - ../.env
-    environment:
-      PYTHONUNBUFFERED: "1"
-      PYTHONPATH: /app/src/server/src
-      REDIS_HOST: redis
-    volumes:
-      - ak07_server_data:/app/src/server/data
-    depends_on:
-      redis:
-        condition: service_healthy
-    networks:
-      - ak07
-
-  sr_reversal_engine:
-    build:
-      context: ..
-      dockerfile: configs/docker/Dockerfile.api
-    restart: unless-stopped
-    command: ["python", "-u", "src/server/src/app/services/sr_reversal_engine.py"]
-    env_file:
-      - ../.env
-    environment:
-      PYTHONUNBUFFERED: "1"
-      PYTHONPATH: /app/src/server/src
-      REDIS_HOST: redis
-    volumes:
-      - ak07_server_data:/app/src/server/data
-    depends_on:
-      redis:
-        condition: service_healthy
-    networks:
-      - ak07
-
   mcp:
     build:
       context: ..
@@ -209,12 +149,6 @@ services:
       smc_crt_engine:
         condition: service_started
       breakout_engine:
-        condition: service_started
-      pa_engine:
-        condition: service_started
-      greeks_engine:
-        condition: service_started
-      sr_reversal_engine:
         condition: service_started
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8501/healthz', timeout=3).read()"]

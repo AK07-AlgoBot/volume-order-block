@@ -1,0 +1,117 @@
+{
+  "summary": {
+    "start": "2026-03-25",
+    "end": "2026-06-22",
+    "total_trades": 7,
+    "wins": 5,
+    "losses": 2,
+    "breakeven": 0,
+    "total_pts": 616.39,
+    "win_rate_pct": 71.4,
+    "by_strategy": {
+      "Strategy 7 \u2014 ORB+": {
+        "trades": 7,
+        "wins": 5,
+        "losses": 2,
+        "pts": 616.39
+      }
+    },
+    "notes": [
+      "Strategy 7 v6 (ORB+ Late-Session): SL=1.0xATR TP=1.5xATR | 8 gates: BLR+VWAP+slope+body+direction+volume+extension+2-candle | Entry window 11:20-11:50 IST (precision late-session) | 90d backtest: 12 trades, 75% WR, +INR 24,471 (1 lot) | Target INR 3,000/day: 8 MIS lots from INR 5 lakh capital."
+    ],
+    "skipped_strategies": []
+  },
+  "trades": [
+    {
+      "strategy": "Strategy 7 \u2014 ORB+",
+      "symbol": "BANKNIFTY",
+      "direction": "LONG",
+      "entry_price": 55405.1,
+      "exit_price": 55335.26071428571,
+      "pnl_points": -69.84,
+      "exit_reason": "SL hit",
+      "entry_at": "2026-05-04T11:25:00+05:30",
+      "exit_at": "2026-05-04T12:05:00+05:30",
+      "entry_reason": "S7v7 ORB+ LONG | OR 55344.85 | VWAP 55399.63 | EMA9/21 bull | ST bull | ADX ? | RSI 61 | ATR 67.84 | R:R 1.5",
+      "result": "LOSS"
+    },
+    {
+      "strategy": "Strategy 7 \u2014 ORB+",
+      "symbol": "BANKNIFTY",
+      "direction": "SHORT",
+      "entry_price": 54398.35,
+      "exit_price": 54289.24642857143,
+      "pnl_points": 109.1,
+      "exit_reason": "TP1 booked (1R)",
+      "entry_at": "2026-05-05T11:25:00+05:30",
+      "exit_at": "2026-05-05T11:50:00+05:30",
+      "entry_reason": "S7v7 ORB+ SHORT | OR 54438.15 | VWAP 54404.68 | EMA9/21 bear | ST bear | ADX ? | RSI 39 | ATR 72.74 | R:R 1.5",
+      "result": "WIN"
+    },
+    {
+      "strategy": "Strategy 7 \u2014 ORB+",
+      "symbol": "NIFTY",
+      "direction": "LONG",
+      "entry_price": 23628.05,
+      "exit_price": 23684.407142857144,
+      "pnl_points": 56.36,
+      "exit_reason": "TP1 booked (1R)",
+      "entry_at": "2026-05-14T11:40:00+05:30",
+      "exit_at": "2026-05-14T11:55:00+05:30",
+      "entry_reason": "S7v7 ORB+ LONG | OR 23589.20 | VWAP 23621.05 | EMA9/21 bull | ST bull | ADX 34 | RSI 66 | ATR 37.57 | R:R 1.4",
+      "result": "WIN"
+    },
+    {
+      "strategy": "Strategy 7 \u2014 ORB+",
+      "symbol": "SENSEX",
+      "direction": "LONG",
+      "entry_price": 75239.7,
+      "exit_price": 75437.53071428572,
+      "pnl_points": 197.83,
+      "exit_reason": "TP1 booked (1R)",
+      "entry_at": "2026-05-14T11:40:00+05:30",
+      "exit_at": "2026-05-14T11:55:00+05:30",
+      "entry_reason": "S7v7 ORB+ LONG | OR 75079.80 | VWAP 75208.96 | EMA9/21 bull | ST bull | ADX 36 | RSI 67 | ATR 131.89 | R:R 1.5",
+      "result": "WIN"
+    },
+    {
+      "strategy": "Strategy 7 \u2014 ORB+",
+      "symbol": "BANKNIFTY",
+      "direction": "LONG",
+      "entry_price": 54130.45,
+      "exit_price": 54347.580357142855,
+      "pnl_points": 217.13,
+      "exit_reason": "TP1 booked (1R)",
+      "entry_at": "2026-05-14T11:45:00+05:30",
+      "exit_at": "2026-05-14T12:20:00+05:30",
+      "entry_reason": "S7v7 ORB+ LONG | OR 53968.65 | VWAP 54068.53 | EMA9/21 bull | ST bull | ADX 35 | RSI 70 | ATR 144.75 | R:R 1.5",
+      "result": "WIN"
+    },
+    {
+      "strategy": "Strategy 7 \u2014 ORB+",
+      "symbol": "SENSEX",
+      "direction": "SHORT",
+      "entry_price": 75417.48,
+      "exit_price": 75289.92642857143,
+      "pnl_points": 127.55,
+      "exit_reason": "TP1 booked (1R)",
+      "entry_at": "2026-05-21T11:50:00+05:30",
+      "exit_at": "2026-05-21T12:30:00+05:30",
+      "entry_reason": "S7v7 ORB+ SHORT | OR 75526.34 | VWAP 75425.22 | EMA9/21 bear | ST bear | ADX 36 | RSI 43 | ATR 85.04 | R:R 1.5",
+      "result": "WIN"
+    },
+    {
+      "strategy": "Strategy 7 \u2014 ORB+",
+      "symbol": "NIFTY",
+      "direction": "LONG",
+      "entry_price": 23972.5,
+      "exit_price": 23950.757142857143,
+      "pnl_points": -21.74,
+      "exit_reason": "SL hit",
+      "entry_at": "2026-05-27T11:20:00+05:30",
+      "exit_at": "2026-05-27T11:40:00+05:30",
+      "entry_reason": "S7v7 ORB+ LONG | OR 23950.15 | VWAP 23969.30 | EMA9/21 bull | ST bull | ADX ? | RSI 59 | ATR 19.74 | R:R 1.4",
+      "result": "LOSS"
+    }
+  ]
+}

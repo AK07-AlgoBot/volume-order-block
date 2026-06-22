@@ -78,9 +78,9 @@ DEFAULT_OI_RISK: Final[tuple[float, float, float]] = (60.0, 60.0, 120.0)
 INITIAL_LOTS: Final[int] = 2
 ITM_OFFSET_POINTS: Final[float] = 50.0  # LONG -> CE near spot-50, SHORT -> PE near spot+50
 MAX_TRADES_PER_INDEX_PER_DAY: Final[int] = 2
-SUPPORT_POCKET_POINTS: Final[float] = 30.0
-RESISTANCE_POCKET_POINTS: Final[float] = 30.0
-WICK_REJECTION_RATIO: Final[float] = 0.40
+SUPPORT_POCKET_POINTS: Final[float] = float(os.environ.get("AK07_SUPPORT_POCKET_PTS", "20"))
+RESISTANCE_POCKET_POINTS: Final[float] = float(os.environ.get("AK07_RESISTANCE_POCKET_PTS", "20"))
+WICK_REJECTION_RATIO: Final[float] = float(os.environ.get("AK07_WICK_REJECTION_RATIO", "0.50"))
 SQUARE_OFF_TIME: Final[dtime] = dtime(14, 55)   # IST hard intraday protection
 ARCHIVE_TIME: Final[dtime] = dtime(15, 30)      # post-market performance archival
 
