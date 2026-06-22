@@ -178,7 +178,11 @@ def render_breakout_strategy_panel(index_code: str) -> None:
 
     meta = []
     if bo.get("session_open") is not None:
-        meta.append(f"9:15 open {fmt(float(bo['session_open']))}")
+        src = str(bo.get("session_open_source") or "")
+        src_label = "candle" if src == "candle" else ("LTP*" if src == "ltp_provisional" else src)
+        meta.append(f"9:15 open {fmt(float(bo['session_open']))} ({src_label})")
+    if bo.get("prev_close") is not None:
+        meta.append(f"prev close {fmt(float(bo['prev_close']))}")
     if bo.get("gap_regime"):
         meta.append(str(bo["gap_regime"]))
     if bo.get("band_half_pct") is not None:

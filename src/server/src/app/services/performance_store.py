@@ -198,6 +198,11 @@ def _parse_archive_payload(
         if points is None:
             continue
         pnl = float(points)
+        reason = str(event.get("reason") or event_type)
+        if event_type == "PARTIAL_BOOK" and not reason.startswith("PARTIAL_BOOK"):
+            reason = f"PARTIAL_BOOK — {reason}"
+        elif event_type == "EXIT" and reason in ("STOP_LOSS", "TARGET", "TIME_GATE_1455", "KILL_SWITCH"):
+            reason = reason
         out.append(
             {
                 "strategy": STRATEGY_AK07_OI,
@@ -210,7 +215,7 @@ def _parse_archive_payload(
                 "exit_price": float(event.get("exit_spot") or event.get("spot") or 0),
                 "pnl_points": round(pnl, 2),
                 "result": classify_result(pnl),
-                "exit_reason": str(event.get("reason") or event_type),
+                "exit_reason": reason,
                 "entry_at": "",
                 "exit_at": str(event.get("at") or f"{day}T15:30:00+05:30"),
                 "paper_trading": paper_trading,
@@ -366,13 +371,17 @@ def _load_day_trades(day: str, seen: set[str]) -> list[dict[str, Any]]:
 
 
 def _fingerprint(row: dict[str, Any]) -> str:
+    """Dedupe live Redis rows vs archive ingest (same fill, different reason text)."""
+    exit_at = str(row.get("exit_at") or "")
+    if len(exit_at) >= 19:
+        exit_at = exit_at[:19]
     return "|".join(
         [
             str(row.get("strategy_id") or row.get("strategy")),
             str(row.get("symbol")),
-            str(row.get("exit_at")),
+            str(row.get("direction")),
+            exit_at,
             str(row.get("pnl_points")),
-            str(row.get("exit_reason")),
         ]
     )
 
@@ -495,6 +504,88 @@ def daily_pnl_series(trades: list[dict[str, Any]]) -> list[dict[str, Any]]:
             }
         )
     return series
+
+
+def classify_loss_reason(exit_reason: str, strategy: str) -> str:
+    """Human-readable bucket for loss post-mortems."""
+    reason = (exit_reason or "").upper()
+    strat = strategy or ""
+    if "STOP_LOSS" in reason or reason == "SL HIT" or " SL" in f" {reason}":
+        return "Stop-loss hit"
+    if "SQUARE_OFF" in reason or "TIME_GATE" in reason or "1455" in reason:
+        return "Intraday square-off (14:55)"
+    if "KILL_SWITCH" in reason:
+        return "Kill switch"
+    if "TP1" in reason or "TARGET" in reason or "PARTIAL" in reason:
+        return "Target/partial (not a loss unless mis-tagged)"
+    if "Strategy 1" in strat or "ak07_oi" in reason.lower():
+        if "STOP" in reason:
+            return "S1 OI stop (check SL pts vs 30/60 rule)"
+    if "Strategy 3" in strat or "breakout" in reason.lower():
+        return "S3 BLR — structural SL or fixed TP miss"
+    if "Strategy 6" in strat or "sr_reversal" in reason.lower():
+        return "S6 S/R — zone fade failed"
+    return "Other exit"
+
+
+def analyze_losses(trades: list[dict[str, Any]]) -> dict[str, Any]:
+    """Summarize losing trades for Performance Review."""
+    losses = [t for t in trades if float(t.get("pnl_points") or 0) < -0.01]
+    wins = [t for t in trades if float(t.get("pnl_points") or 0) > 0.01]
+
+    by_strategy: dict[str, list[dict[str, Any]]] = {}
+    by_bucket: dict[str, int] = {}
+    by_day: dict[str, float] = {}
+    rows: list[dict[str, Any]] = []
+
+    filter_exempt = {
+        STRATEGY_AK07_OI,
+        STRATEGY_SR_REVERSAL,
+    }
+
+    for t in losses:
+        strat = str(t.get("strategy") or "")
+        by_strategy.setdefault(strat, []).append(t)
+        bucket = classify_loss_reason(str(t.get("exit_reason") or ""), strat)
+        by_bucket[bucket] = by_bucket.get(bucket, 0) + 1
+        day = str(t.get("exit_at") or "")[:10]
+        by_day[day] = by_day.get(day, 0.0) + float(t.get("pnl_points") or 0)
+        rows.append(
+            {
+                "date": day,
+                "strategy": strat,
+                "symbol": t.get("symbol"),
+                "direction": t.get("direction"),
+                "pnl_pts": float(t.get("pnl_points") or 0),
+                "exit_reason": t.get("exit_reason"),
+                "loss_bucket": bucket,
+                "blr_filter": "exempt" if strat in filter_exempt else "S3 day review",
+                "paper": bool(t.get("paper_trading")),
+            }
+        )
+
+    strategy_summary = [
+        {
+            "Strategy": s,
+            "Losses": len(items),
+            "Loss pts": round(sum(float(x.get("pnl_points") or 0) for x in items), 2),
+        }
+        for s, items in sorted(by_strategy.items())
+    ]
+
+    return {
+        "total_trades": len(trades),
+        "wins": len(wins),
+        "losses": len(losses),
+        "loss_rows": sorted(rows, key=lambda r: str(r.get("date") or ""), reverse=True),
+        "by_bucket": by_bucket,
+        "by_strategy": strategy_summary,
+        "worst_days": sorted(by_day.items(), key=lambda x: x[1])[:5],
+        "filter_note": (
+            "S2/S3/S4/S5 only take trades aligned with S3 day review (9:20 5m close vs Mid). "
+            "S1 and S6 are exempt — losses there are not filter failures."
+        ),
+    }
 
 
 def purge_trades_for_day(

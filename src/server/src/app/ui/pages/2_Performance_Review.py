@@ -195,6 +195,8 @@ with st.expander("Raw trade log", expanded=False):
                 "strategy",
                 "symbol",
                 "direction",
+                "entry_price",
+                "exit_price",
                 "pnl_points",
                 "result",
                 "exit_reason",
@@ -205,3 +207,59 @@ with st.expander("Raw trade log", expanded=False):
         st.dataframe(raw_df[cols], use_container_width=True, hide_index=True)
     else:
         st.caption("No trades to list.")
+
+st.markdown("## Loss review")
+
+if hasattr(performance_store, "analyze_losses"):
+    loss_report = performance_store.analyze_losses(trades)
+else:
+    loss_report = {
+        "total_trades": len(trades),
+        "wins": sum(1 for t in trades if float(t.get("pnl_points") or 0) > 0.01),
+        "losses": sum(1 for t in trades if float(t.get("pnl_points") or 0) < -0.01),
+        "loss_rows": [],
+        "by_bucket": {},
+        "by_strategy": [],
+        "filter_note": "Rebuild cockpit image — loss analysis module not deployed yet.",
+    }
+l1, l2, l3, l4 = st.columns(4)
+l1.metric("Total trades", loss_report["total_trades"])
+l2.metric("Wins", loss_report["wins"])
+l3.metric("Losses", loss_report["losses"])
+l4.metric(
+    "Win rate",
+    f"{(loss_report['wins'] / loss_report['total_trades'] * 100):.1f}%"
+    if loss_report["total_trades"]
+    else "—",
+)
+
+st.caption(loss_report["filter_note"])
+
+if loss_report["losses"]:
+    st.markdown("### Why losses happened")
+    bucket_df = pd.DataFrame(
+        [{"Cause": k, "Count": v} for k, v in sorted(loss_report["by_bucket"].items(), key=lambda x: -x[1])]
+    )
+    st.dataframe(bucket_df, use_container_width=True, hide_index=True)
+
+    strat_loss_df = pd.DataFrame(loss_report["by_strategy"])
+    if not strat_loss_df.empty:
+        st.markdown("### Losses by strategy")
+        st.dataframe(strat_loss_df, use_container_width=True, hide_index=True)
+
+    loss_df = pd.DataFrame(loss_report["loss_rows"])
+    st.markdown("### Every losing trade")
+    st.dataframe(loss_df, use_container_width=True, hide_index=True)
+
+    st.markdown(
+        """
+**Common causes (even with day-review filter on):**
+- **Stop-loss hit** — filter picks direction, not outcome; structural S3 SL can be wider than fixed TP.
+- **14:55 square-off** — open trade closed at market before TP.
+- **S1 / S6 exempt** — can take either side; not gated by S3 day review.
+- **Bad levels** — if Green/Red differ from TradingView, entries trigger at wrong prices (see S3 open source: prefer *candle* not *LTP*).
+- **Old engine build** — e.g. S1 at 60pt SL instead of 30pt; redeploy `engine` after config changes.
+        """
+    )
+else:
+    st.info("No losing trades in the selected range.")
