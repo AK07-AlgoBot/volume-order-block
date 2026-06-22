@@ -304,7 +304,7 @@ meta_col, domain_col = st.columns([10, 2])
 with meta_col:
     st.caption(
         f"Updated {datetime.now(timezone.utc).astimezone().strftime('%H:%M:%S')} local · "
-        "S1 OI · S2 SMC (Nifty) · S3 BLR · S7 ORB+ · **Performance Review** in nav · "
+        "S1 OI · S2 SMC · S3 BLR · S7 ORB+ · **Performance Review** in nav · "
         "collapse sidebar « for full width"
     )
 with domain_col:
@@ -400,13 +400,7 @@ for tab, (code, cfg) in zip(tabs, INDEX_CONFIGS.items()):
             flags.append("paper mode")
         st.caption(f"Engine state updated {updated}" + (f" · {' · '.join(flags)}" if flags else ""))
 
-        if code == "NIFTY":
-            render_smc_crt_strategy_panel("NIFTY")
-        else:
-            st.markdown("---")
-            st.markdown("#### Strategy Type 2 — SMC + CRT")
-            st.caption("SMC+CRT runs on **Nifty 50** only (see Nifty tab).")
-
+        render_smc_crt_strategy_panel(code)
         render_breakout_strategy_panel(code)
         render_s7_strategy_panel(code)
 

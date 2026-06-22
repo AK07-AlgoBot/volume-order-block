@@ -2,7 +2,7 @@
 
 Candle Range Theory on the first 1H session candle (CRH / CRM / CRL), then
 5-minute Fair Value Gap setups with 1:2 minimum R:R toward CRM.
-Nifty 50 only — live ITM options, 1 lot per trade, book at TP1 (1R).
+Runs on Nifty 50, BankNifty, and Sensex — live ITM options, 1 lot per trade, book at TP1 (1R).
 
 Intraday only: no new entries after 14:45 IST; all open positions are
 market-squared at 14:55 IST (or on kill switch / session end at 15:30).
@@ -72,6 +72,7 @@ class SMCCRTInstrument:
     spot_instrument_key: str
     crt_start: dtime
     baseline_spot: float
+    crm_buffer: float = 8.0  # points — avoid trading when spot is this close to CRM equilibrium
 
 
 SMC_CRT_INSTRUMENTS: Final[dict[str, SMCCRTInstrument]] = {
@@ -81,6 +82,23 @@ SMC_CRT_INSTRUMENTS: Final[dict[str, SMCCRTInstrument]] = {
         spot_instrument_key="NSE_INDEX|Nifty 50",
         crt_start=CRT_SESSION_START,
         baseline_spot=23_100.0,
+        crm_buffer=8.0,
+    ),
+    "BANKNIFTY": SMCCRTInstrument(
+        code="BANKNIFTY",
+        display="BankNifty",
+        spot_instrument_key="NSE_INDEX|Nifty Bank",
+        crt_start=CRT_SESSION_START,
+        baseline_spot=52_500.0,
+        crm_buffer=25.0,
+    ),
+    "SENSEX": SMCCRTInstrument(
+        code="SENSEX",
+        display="Sensex",
+        spot_instrument_key="BSE_INDEX|SENSEX",
+        crt_start=CRT_SESSION_START,
+        baseline_spot=79_000.0,
+        crm_buffer=40.0,
     ),
 }
 
@@ -159,6 +177,11 @@ def detect_bearish_fvg(candles: list[dict[str, float]]) -> FVGZone | None:
 
 def near_crm(price: float, crm: float, band: float = CRM_BUFFER_POINTS) -> bool:
     return abs(price - crm) <= band
+
+
+def _index_cfg(code: str):
+    """Return the IndexConfig for the given instrument code."""
+    return INDEX_CONFIGS[code]
 
 
 def rr_book_targets(entry: float, sl: float, direction: str) -> tuple[float, float, float]:
@@ -265,14 +288,14 @@ class SMCCRTMarketClient:
             }
         ]
 
-    def resolve_option(self, spot: float, direction: str) -> dict[str, Any] | None:
-        cfg = INDEX_CONFIGS["NIFTY"]
+    def resolve_option(self, code: str, spot: float, direction: str) -> dict[str, Any] | None:
+        idx_cfg = _index_cfg(code)
         if self._upstox and not MOCK_MODE:
-            contract = self._upstox.get_itm_option_contract(cfg.spot_instrument_key, spot, direction)
+            contract = self._upstox.get_itm_option_contract(idx_cfg.spot_instrument_key, spot, direction)
             if contract:
                 return contract
         desired = spot - ITM_OFFSET_POINTS if direction == "LONG" else spot + ITM_OFFSET_POINTS
-        strike = int(round(desired / cfg.strike_step) * cfg.strike_step)
+        strike = int(round(desired / idx_cfg.strike_step) * idx_cfg.strike_step)
         return {
             "instrument_key": "",
             "strike": strike,
@@ -300,10 +323,11 @@ class SMCCRTEngine:
         self.states = {code: InstrumentState(config=cfg) for code, cfg in SMC_CRT_INSTRUMENTS.items()}
         self._square_off_alert_day = ""
         logger.info(
-            "SMC+CRT engine started (paper=%s mock=%s nifty only lot=%d "
+            "SMC+CRT engine started (paper=%s mock=%s indices=%s lot=%d "
             "no_entry_after=%s square_off=%s session_end=%s IST)",
             PAPER_TRADING,
             MOCK_MODE,
+            list(SMC_CRT_INSTRUMENTS.keys()),
             LOTS_PER_TRADE,
             NO_ENTRY_AFTER.strftime("%H:%M"),
             SQUARE_OFF_TIME.strftime("%H:%M"),
@@ -444,11 +468,11 @@ class SMCCRTEngine:
         fvg: FVGZone,
         now: datetime,
     ) -> None:
-        lot_size = INDEX_CONFIGS["NIFTY"].lot_size
+        lot_size = _index_cfg(state.config.code).lot_size
         quantity = lot_size * LOTS_PER_TRADE
-        contract = self.client.resolve_option(entry, direction)
+        contract = self.client.resolve_option(state.config.code, entry, direction)
         if contract is None:
-            logger.error("SMC entry aborted — no Nifty option contract")
+            logger.error("SMC entry aborted — no %s option contract", state.config.display)
             return
         if not self.client.place_entry(str(contract.get("instrument_key") or ""), quantity):
             logger.error("SMC entry order failed")
@@ -493,7 +517,7 @@ class SMCCRTEngine:
     def _seek_entry(self, state: InstrumentState, candles: list[dict[str, float]], now: datetime) -> None:
         if state.spot is None or state.crm is None or state.crl is None or state.crh is None:
             return
-        if near_crm(state.spot, state.crm):
+        if near_crm(state.spot, state.crm, state.config.crm_buffer):
             state.setup_label = "Near CRM equilibrium — avoid chop"
             return
 
