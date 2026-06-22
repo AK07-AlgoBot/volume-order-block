@@ -145,6 +145,65 @@ def render_smc_crt_strategy_panel(symbol_code: str) -> None:
     )
 
 
+def render_s7_strategy_panel(index_code: str) -> None:
+    """Strategy 7 — ORB+ ADX block."""
+    st.markdown("---")
+    st.markdown("#### Strategy 7 — ORB+ ADX")
+
+    s7 = cache_manager.get_json(cache_manager.S7_STATE_KEY)
+
+    if not s7:
+        st.caption("S7 engine offline — is the `engine` service running?")
+        return
+
+    updated = str(s7.get("timestamp", ""))[:19].replace("T", " ")
+    total_pnl = s7.get("total_daily_pnl_inr")
+    pnl_str = f"₹{total_pnl:+,.0f}" if total_pnl is not None else "—"
+    st.caption(f"S7 state updated {updated} · total daily P&L {pnl_str}")
+
+    indices: dict = s7.get("indices") or {}
+    idx = indices.get(index_code)
+
+    if not idx:
+        st.info(f"No S7 state for {index_code} yet — waiting for market open.")
+        return
+
+    c1, c2, c3, c4, c5 = st.columns(5)
+    c1.metric("Spot", fmt(float(idx["spot"])) if idx.get("spot") is not None else "—")
+    c2.metric("OR High", fmt(idx.get("or_high")))
+    c3.metric("OR Low", fmt(idx.get("or_low")))
+    c4.metric("Day Review", str(idx.get("day_review") or "PENDING"))
+    c5.metric("Trades Today", f"{idx.get('trades_today', 0)}/{2}")
+
+    setup = str(idx.get("setup_label") or "—")
+    st.markdown(f'<p class="ak07-muted-line">{setup}</p>', unsafe_allow_html=True)
+
+    st.markdown("##### Strategy 7 — Active Position")
+    pos = idx.get("position")
+    if pos:
+        p1, p2, p3, p4, p5 = st.columns(5)
+        p1.metric("Direction", pos.get("direction", "—"))
+        p2.metric("Entry", fmt(float(pos.get("entry", 0))))
+        p3.metric("Stop-Loss", fmt(float(pos.get("sl", 0))))
+        p4.metric("TP1", fmt(float(pos.get("tp1", 0))))
+        p5.metric("Lots", str(pos.get("lots", 1)))
+        if idx.get("spot") is not None and pos.get("entry") is not None:
+            live_pnl = (
+                float(idx["spot"]) - float(pos["entry"])
+                if pos.get("direction") == "LONG"
+                else float(pos["entry"]) - float(idx["spot"])
+            )
+            st.metric("Live P&L (pts)", f"{live_pnl:+.2f}")
+    else:
+        st.caption("Flat — waiting for ORB breakout + ADX confirmation.")
+
+    signals = idx.get("signals") or []
+    if signals:
+        with st.expander("Recent S7 signals", expanded=False):
+            for line in reversed(signals):
+                st.markdown(f'<p class="ak07-signal-line">{line}</p>', unsafe_allow_html=True)
+
+
 def render_breakout_strategy_panel(index_code: str) -> None:
     """Strategy Type 3 — BLR Breakout block."""
     st.markdown("---")
@@ -349,6 +408,7 @@ for tab, (code, cfg) in zip(tabs, INDEX_CONFIGS.items()):
             st.caption("SMC+CRT runs on **Nifty 50** only (see Nifty tab).")
 
         render_breakout_strategy_panel(code)
+        render_s7_strategy_panel(code)
 
 if auto_refresh:
     time.sleep(REFRESH_SECONDS)
