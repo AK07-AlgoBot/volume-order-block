@@ -777,6 +777,7 @@ class S7Engine:
             sl_price=sl,
             component_sentiment=state.day_review,
             timestamp=now.strftime("%Y-%m-%d %H:%M:%S IST"),
+            candles=candles,
         )
 
     def _build_or(self, state: S7State, candles: list[dict[str, float]], now: datetime) -> None:

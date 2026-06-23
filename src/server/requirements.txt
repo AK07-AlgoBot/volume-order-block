@@ -13,3 +13,4 @@ streamlit>=1.38.0
 pandas>=2.0.0
 fakeredis>=2.23.0
 docker>=7.0.0
+matplotlib>=3.8.0

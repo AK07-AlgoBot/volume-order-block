@@ -467,6 +467,7 @@ class SMCCRTEngine:
         tp2: float,
         fvg: FVGZone,
         now: datetime,
+        candles: list[dict] | None = None,
     ) -> None:
         lot_size = _index_cfg(state.config.code).lot_size
         quantity = lot_size * LOTS_PER_TRADE
@@ -512,6 +513,7 @@ class SMCCRTEngine:
             tp2_price=tp2,
             component_sentiment="NEUTRAL",
             timestamp=now.strftime("%Y-%m-%d %H:%M:%S IST"),
+            candles=candles,
         )
 
     def _seek_entry(self, state: InstrumentState, candles: list[dict[str, float]], now: datetime) -> None:
@@ -547,7 +549,7 @@ class SMCCRTEngine:
                 state.setup_label = "Long FVG seen — R:R < 1:2 to CRM"
                 return
             self._open_position(
-                state, direction="LONG", entry=entry, sl=sl, tp1=tp1, tp2=tp2, fvg=fvg, now=now
+                state, direction="LONG", entry=entry, sl=sl, tp1=tp1, tp2=tp2, fvg=fvg, now=now, candles=candles
             )
 
         elif fvg.direction == "SHORT" and state.swept_high and close < state.crh:
@@ -562,7 +564,7 @@ class SMCCRTEngine:
                 state.setup_label = "Short FVG seen — R:R < 1:2 to CRM"
                 return
             self._open_position(
-                state, direction="SHORT", entry=entry, sl=sl, tp1=tp1, tp2=tp2, fvg=fvg, now=now
+                state, direction="SHORT", entry=entry, sl=sl, tp1=tp1, tp2=tp2, fvg=fvg, now=now, candles=candles
             )
 
     def _manage_position(self, state: InstrumentState, now: datetime) -> None:

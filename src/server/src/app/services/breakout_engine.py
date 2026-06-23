@@ -900,6 +900,7 @@ class BreakoutEngine:
             tp2_price=tp2,
             component_sentiment=state.gap_regime,
             timestamp=now.strftime("%Y-%m-%d %H:%M:%S IST"),
+            candles=candles,
         )
 
     def _manage_position(self, state: IndexBreakoutState, now: datetime) -> None:
