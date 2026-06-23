@@ -37,6 +37,7 @@ BREAKOUT_STATE_KEY_TEMPLATE: Final[str] = "ak07:breakout_state:{index}"
 BREAKOUT_FROZEN_KEY_TEMPLATE: Final[str] = "ak07:breakout_frozen:{day}:{index}"
 BREAKOUT_HEARTBEAT_KEY: Final[str] = "ak07:breakout_heartbeat"
 S7_STATE_KEY: Final[str] = "ak07:s7_state"
+CHOCH_STATE_KEY: Final[str] = "ak07:choch_state"
 TRADE_LOG_KEY_TEMPLATE: Final[str] = "ak07:trade_log:{day}"
 
 LIVE_STATE_TTL_SECONDS: Final[int] = 300

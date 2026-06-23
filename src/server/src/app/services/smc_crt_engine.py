@@ -76,14 +76,9 @@ class SMCCRTInstrument:
 
 
 SMC_CRT_INSTRUMENTS: Final[dict[str, SMCCRTInstrument]] = {
-    "NIFTY": SMCCRTInstrument(
-        code="NIFTY",
-        display="Nifty 50",
-        spot_instrument_key="NSE_INDEX|Nifty 50",
-        crt_start=CRT_SESSION_START,
-        baseline_spot=23_100.0,
-        crm_buffer=8.0,
-    ),
+    # NIFTY disabled: +1.82 Expect/t over 3yr — barely covers live options commissions.
+    # Only 87 trades in 3 years (29/year). BANKNIFTY is 4.8x more profitable per trade.
+    # "NIFTY": SMCCRTInstrument(...),
     "BANKNIFTY": SMCCRTInstrument(
         code="BANKNIFTY",
         display="BankNifty",
@@ -92,14 +87,8 @@ SMC_CRT_INSTRUMENTS: Final[dict[str, SMCCRTInstrument]] = {
         baseline_spot=52_500.0,
         crm_buffer=25.0,
     ),
-    "SENSEX": SMCCRTInstrument(
-        code="SENSEX",
-        display="Sensex",
-        spot_instrument_key="BSE_INDEX|SENSEX",
-        crt_start=CRT_SESSION_START,
-        baseline_spot=79_000.0,
-        crm_buffer=40.0,
-    ),
+    # SENSEX disabled: -1,193 pts over 3yr. CRT ranges too wide for reliable FVG signals.
+    # "SENSEX": SMCCRTInstrument(...),
 }
 
 
@@ -409,7 +398,8 @@ class SMCCRTEngine:
             candles_5m = self.client.get_candles(cfg, CANDLE_5M) or []
             if candles_5m:
                 self._update_sweep_flags(state, candles_5m)
-                fvg = detect_bullish_fvg(candles_5m) or detect_bearish_fvg(candles_5m)
+                # SHORT side has negative expectancy over 3 years (39.1% WR, -796 pts) — LONG only.
+                fvg = detect_bullish_fvg(candles_5m)
                 if fvg:
                     state.last_fvg = fvg
 
@@ -552,20 +542,7 @@ class SMCCRTEngine:
                 state, direction="LONG", entry=entry, sl=sl, tp1=tp1, tp2=tp2, fvg=fvg, now=now, candles=candles
             )
 
-        elif fvg.direction == "SHORT" and state.swept_high and close < state.crh:
-            allowed, blr_note = direction_allowed_by_blr_day(state.config.code, "SHORT")
-            if not allowed:
-                state.setup_label = blr_note
-                return
-            entry = close
-            sl = fvg.high
-            tp1, tp2, _ = rr_book_targets(entry, sl, "SHORT")
-            if not rr_ok(entry, sl, state.crm, "SHORT"):
-                state.setup_label = "Short FVG seen — R:R < 1:2 to CRM"
-                return
-            self._open_position(
-                state, direction="SHORT", entry=entry, sl=sl, tp1=tp1, tp2=tp2, fvg=fvg, now=now, candles=candles
-            )
+        # SHORT side disabled: 39.1% WR, -796 pts over 3 years vs LONG 52.6% WR, +968 pts.
 
     def _manage_position(self, state: InstrumentState, now: datetime) -> None:
         pos = state.position

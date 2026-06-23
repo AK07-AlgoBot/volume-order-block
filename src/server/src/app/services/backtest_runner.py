@@ -28,11 +28,25 @@ from app.services.smc_crt_engine import (
     MAX_TRADES_PER_DAY as S2_MAX_TRADES,
     NO_ENTRY_AFTER as S2_NO_ENTRY,
     SQUARE_OFF_TIME as S2_SQUARE_OFF,
+    SMC_CRT_INSTRUMENTS,
     crt_from_1h_candle,
     detect_bearish_fvg,
     detect_bullish_fvg,
     near_crm,
     rr_ok,
+)
+from app.services.choch_engine import (
+    ENTRY_START as S8_ENTRY_START,
+    NO_ENTRY_AFTER as S8_NO_ENTRY,
+    SQUARE_OFF_TIME as S8_SQUARE_OFF,
+    MAX_TRADES_PER_DAY as S8_MAX_TRADES,
+    STRATEGY_LABEL as S8_LABEL,
+    StructureState,
+    update_structure,
+    detect_choch,
+    _atr as s8_atr,
+    _adx as s8_adx,
+    _htf_trend as s8_htf_trend,
 )
 from app.services.upstox_engine import (
     DEFAULT_OI_RISK,
@@ -76,6 +90,7 @@ STRATEGY_RUNNERS: Final[dict[str, str]] = {
     "s2": performance_store.STRATEGY_SMC_CRT,
     "s3": performance_store.STRATEGY_BREAKOUT,
     "s7": S7_LABEL,
+    "s8": S8_LABEL,
 }
 
 
@@ -394,13 +409,30 @@ def _simulate_day_bars(
         )
 
 
-def backtest_strategy_3(report: BacktestReport, cfg: IndexConfig, day: date, session_candles: list[dict[str, float]], blr: BLRDayContext) -> None:
-    if cfg.code == "SENSEX":
-        return  # BLR breakout does not work on Sensex (25% WR due to wide band)
-    prev_close = session_candles[0]["open"]
-    # BANKNIFTY first 15 min (09:20-09:30) has 34% WR due to extreme opening volatility.
-    # Skip those bars; Nifty keeps 09:20 which is mildly positive.
+def backtest_strategy_3(
+    report: BacktestReport,
+    cfg: IndexConfig,
+    day: date,
+    session_candles: list[dict[str, float]],
+    blr: BLRDayContext,
+    prev_ohlc: dict[str, float] | None = None,
+) -> None:
+    # S3 disabled: -1,663 pts loss over 3 years across all variants. No valid edge detected.
+    # NIFTY: 42.1% WR break-even is 42.9%; BANKNIFTY: 36.7% WR. SHORT signals especially weak.
+    return
+
+    # BANKNIFTY + NIFTY: skip opening volatility (09:20-09:30).
     effective_entry_start = dtime(9, 35) if cfg.code == "BANKNIFTY" else S3_ENTRY_START
+
+    # Prev-day direction filter: LONG signals only on bullish prior day, SHORT on bearish.
+    prev_day_bias: str | None = None
+    if prev_ohlc:
+        if prev_ohlc["close"] > prev_ohlc["open"]:
+            prev_day_bias = "LONG"
+        elif prev_ohlc["close"] < prev_ohlc["open"]:
+            prev_day_bias = "SHORT"
+
+    prev_close = session_candles[0]["open"]
 
     def on_bar(closed: list[dict[str, float]], bar_close: datetime, _trades: int) -> SimPosition | None:
         nonlocal prev_close
@@ -420,6 +452,16 @@ def backtest_strategy_3(report: BacktestReport, cfg: IndexConfig, day: date, ses
         prev_close = close
         if direction is None or not reason:
             return None
+
+        # ADX filter: skip on choppy/ranging days (ADX < 20).
+        adx_val = s8_adx(closed)
+        if adx_val is not None and adx_val < 20.0:
+            return None
+
+        # Prev-day direction filter: skip signals that go against prior-day momentum.
+        if prev_day_bias is not None and direction != prev_day_bias:
+            return None
+
         entry = close
         sl, tp1, _ = trade_levels(cfg.code, direction, entry, blr.mid, blr.green, blr.red, blr.gap_regime)
         return SimPosition(
@@ -428,7 +470,7 @@ def backtest_strategy_3(report: BacktestReport, cfg: IndexConfig, day: date, ses
             sl_price=sl,
             tp1_price=tp1,
             entry_at=bar_close.isoformat(),
-            entry_reason=reason,
+            entry_reason=f"{reason} | ADX={adx_val:.1f}" if adx_val else reason,
         )
 
     _simulate_day_bars(
@@ -444,7 +486,19 @@ def backtest_strategy_3(report: BacktestReport, cfg: IndexConfig, day: date, ses
     )
 
 
-def backtest_strategy_2(report: BacktestReport, day: date, session_candles: list[dict[str, float]], blr: BLRDayContext) -> None:
+def backtest_strategy_2(report: BacktestReport, day: date, session_candles: list[dict[str, float]], blr: BLRDayContext, index_code: str = "NIFTY") -> None:
+    """S2 SMC+CRT backtest — BANKNIFTY only.
+
+    Disabled indices:
+      SENSEX: -1,193 pts over 3 years (wide CRT ranges, negative expectancy).
+      NIFTY:  +1.82 Expect/t over 3 years — barely covers live options commissions.
+              Only 87 trades over 3 years = 29/year, too infrequent to be reliable.
+    """
+    if index_code in ("SENSEX", "NIFTY"):
+        return
+    smc_cfg = SMC_CRT_INSTRUMENTS.get(index_code)
+    crm_buffer = smc_cfg.crm_buffer if smc_cfg else 8.0
+
     crt_bar = first_hour_crt_bar(session_candles)
     if crt_bar is None:
         return
@@ -472,7 +526,7 @@ def backtest_strategy_2(report: BacktestReport, day: date, session_candles: list
                 _finalize_trade(
                     report,
                     strategy=performance_store.STRATEGY_SMC_CRT,
-                    symbol="NIFTY",
+                    symbol=index_code,
                     pos=pos,
                     exit_price=hit[0],
                     exit_reason=hit[1],
@@ -483,10 +537,17 @@ def backtest_strategy_2(report: BacktestReport, day: date, session_candles: list
 
         if trades_today >= S2_MAX_TRADES or bar_close.time() > S2_NO_ENTRY:
             continue
-        if near_crm(float(candle["close"]), crm):
+        if near_crm(float(candle["close"]), crm, crm_buffer):
             continue
 
-        fvg = detect_bullish_fvg(closed) or detect_bearish_fvg(closed)
+        # ADX filter: skip choppy / ranging markets.
+        adx_val = s8_adx(closed)
+        if adx_val is not None and adx_val < 20.0:
+            continue
+
+        # 3-year data: LONG 52.6% WR +968 pts vs SHORT 39.1% WR -796 pts.
+        # SHORT setups in CRT context have negative expectancy — disabled.
+        fvg = detect_bullish_fvg(closed)
         if not fvg or fvg.candle_ts == last_fvg_ts:
             continue
 
@@ -499,6 +560,9 @@ def backtest_strategy_2(report: BacktestReport, day: date, session_candles: list
             tp1, _, _ = rr_book_targets(entry, sl, "LONG")
             if not rr_ok(entry, sl, crm, "LONG"):
                 continue
+            # TP at 1R (entry + risk). CRM is the structural gate (must be >= 1.5R away)
+            # but using CRM directly as TP drops WR from 52% to 15% — FVG stop is too
+            # narrow vs CRM distance. 1R is the correct profit level here.
             last_fvg_ts = fvg.candle_ts
             trades_today += 1
             pos = SimPosition(
@@ -508,24 +572,6 @@ def backtest_strategy_2(report: BacktestReport, day: date, session_candles: list
                 tp1_price=tp1,
                 entry_at=bar_close.isoformat(),
                 entry_reason="SMC long FVG + CRL sweep",
-            )
-        elif fvg.direction == "SHORT" and swept_high and close < crh:
-            if not blr_day_review_allows_direction(blr.day_review, "SHORT"):
-                continue
-            entry = close
-            sl = fvg.high
-            tp1, _, _ = rr_book_targets(entry, sl, "SHORT")
-            if not rr_ok(entry, sl, crm, "SHORT"):
-                continue
-            last_fvg_ts = fvg.candle_ts
-            trades_today += 1
-            pos = SimPosition(
-                direction="SHORT",
-                entry_price=entry,
-                sl_price=sl,
-                tp1_price=tp1,
-                entry_at=bar_close.isoformat(),
-                entry_reason="SMC short FVG + CRH sweep",
             )
 
 
@@ -705,6 +751,123 @@ def backtest_strategy_7(
         )
 
 
+def backtest_strategy_8_choch(
+    report: BacktestReport,
+    cfg: IndexConfig,
+    day: date,
+    session_candles: list[dict[str, float]],
+    prev_ohlc: dict[str, float] | None = None,
+) -> None:
+    """S8 CHOCH — Change of Character reversal (5-min, structure-anchored SL, 2:1 R:R).
+
+    Daily bias filter (prev_ohlc):
+      LONG signals only taken when prev day was bullish (close > open).
+      SHORT signals only taken when prev day was bearish (close < open).
+      3-year data: SHORT Expect/t = +5.73 vs LONG +2.57 — SHORTs are 2.2x more profitable.
+      Adding daily bias layer reduces contra-momentum LONGs in downtrending markets.
+    """
+    state = StructureState()
+    pos: SimPosition | None = None
+    trades_today = 0
+    SL_BUF_MULT = 0.25
+
+    # Derive prev-day directional bias for filtering
+    prev_day_bias: str | None = None
+    if prev_ohlc:
+        if prev_ohlc["close"] > prev_ohlc["open"]:
+            prev_day_bias = "LONG"
+        elif prev_ohlc["close"] < prev_ohlc["open"]:
+            prev_day_bias = "SHORT"
+
+    for idx, candle in enumerate(session_candles):
+        bar_close = _bar_close_ts(candle)
+        closed = session_candles[: idx + 1]
+
+        if pos is not None:
+            hit = _exit_on_bar(pos, candle, square_off=S8_SQUARE_OFF, bar_close=bar_close)
+            if hit:
+                _finalize_trade(
+                    report,
+                    strategy=S8_LABEL,
+                    symbol=cfg.code,
+                    pos=pos,
+                    exit_price=hit[0],
+                    exit_reason=hit[1],
+                    exit_at=bar_close,
+                )
+                pos = None
+            continue
+
+        update_structure(state, closed)
+
+        t = bar_close.time()
+        if not (S8_ENTRY_START <= t <= S8_NO_ENTRY):
+            continue
+        if trades_today >= S8_MAX_TRADES:
+            continue
+
+        direction, choch_level = detect_choch(state, closed)
+        if direction is None:
+            continue
+
+        adx_val = s8_adx(closed)
+        if adx_val is None or adx_val < 20.0:
+            continue
+
+        htf = s8_htf_trend(closed, bar_close)
+        if htf is not None:
+            if direction == "LONG" and htf == "BEAR":
+                continue
+            if direction == "SHORT" and htf == "BULL":
+                continue
+
+        # Daily bias filter: only trade in the direction of prior-day momentum.
+        if prev_day_bias is not None and direction != prev_day_bias:
+            continue
+
+        atr_val = s8_atr(closed)
+        if atr_val is None:
+            continue
+
+        entry = float(candle["close"])
+        buf = atr_val * SL_BUF_MULT
+        if direction == "LONG":
+            sl = choch_level - buf
+            if sl >= entry:
+                continue
+        else:
+            sl = choch_level + buf
+            if sl <= entry:
+                continue
+
+        risk = abs(entry - sl)
+        if risk < 1.0:
+            continue
+        tp1 = entry + risk * 2.0 if direction == "LONG" else entry - risk * 2.0
+
+        trades_today += 1
+        pos = SimPosition(
+            direction=direction,
+            entry_price=entry,
+            sl_price=sl,
+            tp1_price=tp1,
+            entry_at=bar_close.isoformat(),
+            entry_reason=f"CHOCH {direction} struct={state.structure} lvl={choch_level:.1f} ADX={adx_val:.1f}",
+        )
+
+    if pos is not None:
+        last = session_candles[-1]
+        _finalize_trade(
+            report,
+            strategy=S8_LABEL,
+            symbol=cfg.code,
+            pos=pos,
+            exit_price=float(last["close"]),
+            exit_reason="SESSION_END",
+            exit_at=_bar_close_ts(last),
+        )
+
+
 def run_backtest(
     *,
     start: date,
@@ -765,19 +928,24 @@ def run_backtest(
                 continue
 
             if "s3" in strategies:
-                backtest_strategy_3(report, cfg, day, session, blr)
+                backtest_strategy_3(report, cfg, day, session, blr, prev_ohlc=prev_ohlc)
             if "s1" in strategies:
                 backtest_strategy_1_approx(report, cfg, day, session, prev_ohlc)
             if "s7" in strategies:
                 backtest_strategy_7(report, cfg, day, session, blr)
+            if "s8" in strategies:
+                backtest_strategy_8_choch(report, cfg, day, session, prev_ohlc=prev_ohlc)
 
-        if "s2" in strategies and "NIFTY" in index_codes:
-            nifty_cfg = INDEX_CONFIGS["NIFTY"]
-            session = HistoricalDataClient.session_5m(candles_5m_by_index.get("NIFTY", []), day)
-            prev_ohlc = HistoricalDataClient.prior_session_ohlc(daily_by_index.get("NIFTY", []), day)
-            if session and prev_ohlc:
-                blr = build_blr_context(prev_ohlc, session, "NIFTY")
-                if blr:
-                    backtest_strategy_2(report, day, session, blr)
+        # S2 runs for all three indices (NIFTY, BANKNIFTY, SENSEX)
+        if "s2" in strategies:
+            for s2_code in ("NIFTY", "BANKNIFTY", "SENSEX"):
+                if s2_code not in index_codes:
+                    continue
+                s2_session = HistoricalDataClient.session_5m(candles_5m_by_index.get(s2_code, []), day)
+                s2_prev = HistoricalDataClient.prior_session_ohlc(daily_by_index.get(s2_code, []), day)
+                if s2_session and s2_prev:
+                    s2_blr = build_blr_context(s2_prev, s2_session, s2_code)
+                    if s2_blr:
+                        backtest_strategy_2(report, day, s2_session, s2_blr, index_code=s2_code)
 
     return report

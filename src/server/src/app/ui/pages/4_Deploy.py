@@ -33,15 +33,16 @@ COMPOSE_FILE = str(REPO / "configs" / "docker-compose.yml")
 COMPOSE_PROJECT = "configs"
 
 SERVICES = {
-    "All services":          None,
-    "engine  (S1)":          "engine",
-    "s7_engine  (S7 ORB+)":  "s7_engine",
-    "smc_crt_engine  (S2)":  "smc_crt_engine",
-    "breakout_engine  (S3)": "breakout_engine",
-    "api  (FastAPI)":        "api",
-    "cockpit  (Dashboard)":  "cockpit",
-    "mcp":                   "mcp",
-    "redis":                 "redis",
+    "All services":           None,
+    "engine  (S1)":           "engine",
+    "s7_engine  (S7 ORB+)":   "s7_engine",
+    "choch_engine  (S8 CHOCH)": "choch_engine",
+    "smc_crt_engine  (S2)":   "smc_crt_engine",
+    "breakout_engine  (S3)":  "breakout_engine",
+    "api  (FastAPI)":         "api",
+    "cockpit  (Dashboard)":   "cockpit",
+    "mcp":                    "mcp",
+    "redis":                  "redis",
 }
 
 

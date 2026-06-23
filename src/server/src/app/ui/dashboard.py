@@ -204,6 +204,65 @@ def render_s7_strategy_panel(index_code: str) -> None:
                 st.markdown(f'<p class="ak07-signal-line">{line}</p>', unsafe_allow_html=True)
 
 
+def render_choch_strategy_panel(index_code: str) -> None:
+    """Strategy 8 — CHOCH reversal block."""
+    st.markdown("---")
+    st.markdown("#### Strategy 8 — CHOCH (Change of Character)")
+
+    choch = cache_manager.get_json(cache_manager.CHOCH_STATE_KEY)
+
+    if not choch:
+        st.caption("CHOCH engine offline — start `choch_engine` service.")
+        return
+
+    updated = str(choch.get("timestamp", ""))[:19].replace("T", " ")
+    total_pnl = choch.get("total_daily_pnl_inr")
+    pnl_str = f"\u20b9{total_pnl:+,.0f}" if total_pnl is not None else "\u2014"
+    st.caption(f"CHOCH state updated {updated} \u00b7 total daily P&L {pnl_str}")
+
+    indices: dict = choch.get("indices") or {}
+    idx = indices.get(index_code)
+
+    if not idx:
+        st.info(f"No CHOCH state for {index_code} yet — waiting for market open.")
+        return
+
+    c1, c2, c3, c4, c5 = st.columns(5)
+    c1.metric("Spot", fmt(float(idx["spot"])) if idx.get("spot") is not None else "\u2014")
+    c2.metric("Structure", str(idx.get("structure") or "NEUTRAL"))
+    c3.metric("Last SH", fmt(idx.get("last_sh")))
+    c4.metric("Last SL", fmt(idx.get("last_sl")))
+    c5.metric("Trades Today", f"{idx.get('trades_today', 0)}/2")
+
+    setup = str(idx.get("setup_label") or "\u2014")
+    st.markdown(f'<p class="ak07-muted-line">{setup}</p>', unsafe_allow_html=True)
+
+    pos = idx.get("position")
+    if pos:
+        st.markdown("##### CHOCH \u2014 Active Position")
+        p1, p2, p3, p4, p5 = st.columns(5)
+        p1.metric("Direction", pos.get("direction", "\u2014"))
+        p2.metric("Entry", fmt(float(pos.get("entry", 0))))
+        p3.metric("Stop-Loss", fmt(float(pos.get("sl", 0))))
+        p4.metric("Target", fmt(float(pos.get("tp", 0))))
+        p5.metric("Lots", str(pos.get("lots", 1)))
+        if idx.get("spot") is not None and pos.get("entry") is not None:
+            live_pnl = (
+                float(idx["spot"]) - float(pos["entry"])
+                if pos.get("direction") == "LONG"
+                else float(pos["entry"]) - float(idx["spot"])
+            )
+            st.metric("Live P&L (pts)", f"{live_pnl:+.2f}")
+    else:
+        st.caption("Flat \u2014 watching for CHOCH + ADX + 1H alignment.")
+
+    signals = idx.get("signals") or []
+    if signals:
+        with st.expander("Recent CHOCH signals", expanded=False):
+            for line in reversed(signals):
+                st.markdown(f'<p class="ak07-signal-line">{line}</p>', unsafe_allow_html=True)
+
+
 def render_breakout_strategy_panel(index_code: str) -> None:
     """Strategy Type 3 — BLR Breakout block."""
     st.markdown("---")
@@ -304,7 +363,7 @@ meta_col, domain_col = st.columns([10, 2])
 with meta_col:
     st.caption(
         f"Updated {datetime.now(timezone.utc).astimezone().strftime('%H:%M:%S')} local · "
-        "S1 OI · S2 SMC · S3 BLR · S7 ORB+ · **Performance Review** in nav · "
+        "S1 OI · S2 SMC · S3 BLR · S7 ORB+ · S8 CHOCH · **Performance Review** in nav · "
         "collapse sidebar « for full width"
     )
 with domain_col:
@@ -403,6 +462,7 @@ for tab, (code, cfg) in zip(tabs, INDEX_CONFIGS.items()):
         render_smc_crt_strategy_panel(code)
         render_breakout_strategy_panel(code)
         render_s7_strategy_panel(code)
+        render_choch_strategy_panel(code)
 
 if auto_refresh:
     time.sleep(REFRESH_SECONDS)

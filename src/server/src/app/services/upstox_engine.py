@@ -492,6 +492,66 @@ class UpstoxClient:
             )
         return _scan(restrict_to_band=False)
 
+    def get_oi_extended(self, instrument_key: str, spot: float | None = None) -> dict | None:
+        """Extended OI scan: walls + PCR + intraday velocity hotspots.
+
+        Returns a dict with keys:
+          call_wall, put_floor, pcr,
+          max_ce_writing_strike (highest intraday CE OI change),
+          max_pe_writing_strike (highest intraday PE OI change)
+
+        These additional signals align with the AK07 OI Scanner pattern:
+          - PCR < 0.75 → bearish regime (prefer SHORT)
+          - PCR > 1.25 → bullish regime (prefer LONG)
+          - max_ce_writing_strike == call_wall → wall is actively defended (SHORT confirmation)
+          - max_pe_writing_strike == put_floor  → floor is actively defended (LONG confirmation)
+        """
+        data = self._fetch_nearest_expiry_chain(instrument_key)
+        if not data:
+            return None
+
+        total_ce_oi = 0.0
+        total_pe_oi = 0.0
+        best_call_oi: tuple[float, int] | None = None
+        best_put_oi: tuple[float, int] | None = None
+        best_ce_chg: tuple[float, int] | None = None
+        best_pe_chg: tuple[float, int] | None = None
+
+        for row in data:
+            try:
+                strike = int(float(row.get("strike_price", 0)))
+            except (TypeError, ValueError):
+                continue
+            if spot is not None and abs(strike - spot) > OI_BAND_POINTS:
+                continue
+            call_md = ((row.get("call_options") or {}).get("market_data") or {})
+            put_md  = ((row.get("put_options")  or {}).get("market_data") or {})
+            c_oi  = float(call_md.get("oi") or 0)
+            p_oi  = float(put_md.get("oi")  or 0)
+            c_chg = float(call_md.get("oi_change") or 0)
+            p_chg = float(put_md.get("oi_change")  or 0)
+            total_ce_oi += c_oi
+            total_pe_oi += p_oi
+            if best_call_oi is None or c_oi > best_call_oi[0]:
+                best_call_oi = (c_oi, strike)
+            if best_put_oi is None or p_oi > best_put_oi[0]:
+                best_put_oi = (p_oi, strike)
+            if best_ce_chg is None or c_chg > best_ce_chg[0]:
+                best_ce_chg = (c_chg, strike)
+            if best_pe_chg is None or p_chg > best_pe_chg[0]:
+                best_pe_chg = (p_chg, strike)
+
+        if not best_call_oi or not best_put_oi:
+            return None
+        pcr = total_pe_oi / total_ce_oi if total_ce_oi > 0 else 0.0
+        return {
+            "call_wall": best_call_oi[1],
+            "put_floor": best_put_oi[1],
+            "pcr": pcr,
+            "max_ce_writing_strike": best_ce_chg[1] if best_ce_chg else None,
+            "max_pe_writing_strike": best_pe_chg[1] if best_pe_chg else None,
+        }
+
     def place_market_order(self, instrument_key: str, quantity: int, transaction_type: str) -> bool:
         """Market order via the standard then HFT endpoint."""
         payload = {
@@ -590,6 +650,18 @@ class MockUpstoxClient(UpstoxClient):
             return None
         return self._walls[code]
 
+    def get_oi_extended(self, instrument_key: str, spot: float | None = None) -> dict | None:
+        walls = self.get_oi_walls(instrument_key, spot)
+        if not walls:
+            return None
+        return {
+            "call_wall": walls[0],
+            "put_floor": walls[1],
+            "pcr": None,
+            "max_ce_writing_strike": None,
+            "max_pe_writing_strike": None,
+        }
+
     def get_itm_option_contract(
         self, instrument_key: str, spot: float, direction: str
     ) -> dict[str, Any] | None:
@@ -673,25 +745,47 @@ def detect_setup(
     put_floor: int,
     comp_bias: str,
     system_bias: str,
+    pcr: float | None = None,
+    max_ce_writing_strike: int | None = None,
+    max_pe_writing_strike: int | None = None,
 ) -> str | None:
-    """Evaluate SETUP 1 (LONG) and SETUP 2 (SHORT) on a closed 5-min candle."""
+    """Evaluate SETUP 1 (LONG) and SETUP 2 (SHORT) on a closed 5-min candle.
+
+    Enhanced with two additional gates from the AK07 OI Scanner pattern:
+      1. PCR regime filter: skip LONG in bearish regime (PCR < 0.75) or SHORT in bullish (PCR > 1.25).
+      2. OI velocity confirmation: for SHORT, require max CE writing strike == call_wall (wall actively
+         defended); for LONG, require max PE writing strike == put_floor (floor actively defended).
+         Falls back to wall-only check when velocity data is unavailable.
+    """
     spot = candle["close"]
 
+    # PCR regime thresholds (derived from AK07 OI Scanner decision tree)
+    pcr_bearish = pcr < 0.75 if pcr is not None else False
+    pcr_bullish = pcr > 1.25 if pcr is not None else False
+
     in_support_pocket = put_floor <= spot <= put_floor + SUPPORT_POCKET_POINTS
+    # Velocity gate: floor must be the most actively written PE strike right now.
+    floor_velocity_ok = (max_pe_writing_strike is None or max_pe_writing_strike == put_floor)
     if (
         in_support_pocket
         and lower_wick_ratio(candle) >= WICK_REJECTION_RATIO
         and comp_bias in ("BULLISH", "NEUTRAL")
         and system_bias != "SHORT_ONLY"
+        and not pcr_bearish
+        and floor_velocity_ok
     ):
         return "LONG"
 
     in_resistance_pocket = call_wall - RESISTANCE_POCKET_POINTS <= spot <= call_wall
+    # Velocity gate: wall must be the most actively written CE strike right now.
+    wall_velocity_ok = (max_ce_writing_strike is None or max_ce_writing_strike == call_wall)
     if (
         in_resistance_pocket
         and upper_wick_ratio(candle) >= WICK_REJECTION_RATIO
         and comp_bias in ("BEARISH", "NEUTRAL")
         and system_bias != "LONG_ONLY"
+        and not pcr_bullish
+        and wall_velocity_ok
     ):
         return "SHORT"
 
@@ -738,6 +832,10 @@ class IndexState:
     position: Position | None = None
     last_candle_ts: str = ""
     day_volume: int = 0
+    # AK07 OI Scanner extensions: PCR regime + intraday OI velocity
+    pcr: float | None = None
+    max_ce_writing_strike: int | None = None
+    max_pe_writing_strike: int | None = None
 
 
 def reset_index_live_cache(state: IndexState) -> None:
@@ -749,6 +847,9 @@ def reset_index_live_cache(state: IndexState) -> None:
     state.changes = {}
     state.comp_bias = "NEUTRAL"
     state.last_candle_ts = ""
+    state.pcr = None
+    state.max_ce_writing_strike = None
+    state.max_pe_writing_strike = None
 
 
 # ---------------------------------------------------------------------------
@@ -950,16 +1051,33 @@ class AK07Engine:
                 state.comp_bias = component_bias(state.changes)
 
             if time.monotonic() - state.walls_refreshed_at > WALL_REFRESH_SECONDS:
-                walls = self.client.get_oi_walls(cfg.spot_instrument_key, state.spot)
-                if walls:
-                    state.call_wall, state.put_floor = walls
+                ext = self.client.get_oi_extended(cfg.spot_instrument_key, state.spot)
+                if ext:
+                    state.call_wall = ext["call_wall"]
+                    state.put_floor = ext["put_floor"]
+                    state.pcr = ext["pcr"]
+                    state.max_ce_writing_strike = ext["max_ce_writing_strike"]
+                    state.max_pe_writing_strike = ext["max_pe_writing_strike"]
+                    logger.info(
+                        "[%s] walls refreshed call=%d put=%d PCR=%.2f ce_velocity=%s pe_velocity=%s",
+                        cfg.code,
+                        state.call_wall,
+                        state.put_floor,
+                        state.pcr or 0.0,
+                        state.max_ce_writing_strike,
+                        state.max_pe_writing_strike,
+                    )
                 state.walls_refreshed_at = time.monotonic()
         except Exception as exc:
             logger.exception("[%s] live V3 feed read failed; resetting index cache: %s", cfg.code, exc)
             reset_index_live_cache(state)
-            walls = self.client.get_oi_walls(cfg.spot_instrument_key, state.spot)
-            if walls:
-                state.call_wall, state.put_floor = walls
+            ext = self.client.get_oi_extended(cfg.spot_instrument_key, state.spot)
+            if ext:
+                state.call_wall = ext["call_wall"]
+                state.put_floor = ext["put_floor"]
+                state.pcr = ext["pcr"]
+                state.max_ce_writing_strike = ext["max_ce_writing_strike"]
+                state.max_pe_writing_strike = ext["max_pe_writing_strike"]
                 state.walls_refreshed_at = time.monotonic()
 
         if state.spot is not None:
@@ -1008,9 +1126,13 @@ class AK07Engine:
                 state.config.code,
             )
             reset_index_live_cache(state)
-            walls = self.client.get_oi_walls(state.config.spot_instrument_key, state.spot)
-            if walls:
-                state.call_wall, state.put_floor = walls
+            ext = self.client.get_oi_extended(state.config.spot_instrument_key, state.spot)
+            if ext:
+                state.call_wall = ext["call_wall"]
+                state.put_floor = ext["put_floor"]
+                state.pcr = ext["pcr"]
+                state.max_ce_writing_strike = ext["max_ce_writing_strike"]
+                state.max_pe_writing_strike = ext["max_pe_writing_strike"]
             return
         if not candles:
             return
@@ -1027,6 +1149,9 @@ class AK07Engine:
                 state.put_floor,
                 state.comp_bias,
                 system_bias,
+                pcr=state.pcr,
+                max_ce_writing_strike=state.max_ce_writing_strike,
+                max_pe_writing_strike=state.max_pe_writing_strike,
             )
             if direction is not None:
                 self._enter_trade(state, direction, candle["close"], now)
@@ -1355,6 +1480,9 @@ class AK07Engine:
                 "spot": state.spot,
                 "call_wall": state.call_wall,
                 "put_floor": state.put_floor,
+                "pcr": round(state.pcr, 2) if state.pcr is not None else None,
+                "max_ce_writing_strike": state.max_ce_writing_strike,
+                "max_pe_writing_strike": state.max_pe_writing_strike,
                 "component_bias": state.comp_bias,
                 "components": state.changes,
                 "trades_today": state.trades_today,
