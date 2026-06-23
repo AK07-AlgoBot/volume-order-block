@@ -488,14 +488,14 @@ def backtest_strategy_3(
 
 
 def backtest_strategy_2(report: BacktestReport, day: date, session_candles: list[dict[str, float]], blr: BLRDayContext, index_code: str = "NIFTY") -> None:
-    """S2 SMC+CRT backtest — BANKNIFTY only.
+    """S2 SMC+CRT backtest — BANKNIFTY only (LONG signals only).
 
     Disabled indices:
-      SENSEX: -1,193 pts over 3 years (wide CRT ranges, negative expectancy).
       NIFTY:  +1.82 Expect/t over 3 years — barely covers live options commissions.
-              Only 87 trades over 3 years = 29/year, too infrequent to be reliable.
+      SENSEX: -589 pts LONG-only over 3 years. CRT range too wide for reliable FVG
+              signals — price slips through stop before reaching 1R target.
     """
-    if index_code in ("SENSEX", "NIFTY"):
+    if index_code in ("NIFTY", "SENSEX"):
         return
     smc_cfg = SMC_CRT_INSTRUMENTS.get(index_code)
     crm_buffer = smc_cfg.crm_buffer if smc_cfg else 8.0
