@@ -44,6 +44,7 @@ from app.services.choch_engine import (
     StructureState,
     update_structure,
     detect_choch,
+    detect_bos_trend,
     _atr as s8_atr,
     _adx as s8_adx,
     _htf_trend as s8_htf_trend,
@@ -806,7 +807,12 @@ def backtest_strategy_8_choch(
         if trades_today >= S8_MAX_TRADES:
             continue
 
-        direction, choch_level = detect_choch(state, closed)
+        # Try CHOCH+BOS reversal first, then BOS trend continuation.
+        direction, signal_level = detect_choch(state, closed)
+        signal_type = "CHOCH+BOS"
+        if direction is None:
+            direction, signal_level = detect_bos_trend(state, closed)
+            signal_type = "BOS_TREND"
         if direction is None:
             continue
 
@@ -831,14 +837,25 @@ def backtest_strategy_8_choch(
 
         entry = float(candle["close"])
         buf = atr_val * SL_BUF_MULT
-        if direction == "LONG":
-            sl = choch_level - buf
-            if sl >= entry:
-                continue
+        if signal_type == "BOS_TREND":
+            # Trend BOS: SL at the opposite structural swing (last_sl for LONG, last_sh for SHORT)
+            if direction == "LONG":
+                sl_anchor = state.last_sl if state.last_sl is not None else signal_level * 0.998
+                sl = sl_anchor - buf
+            else:
+                sl_anchor = state.last_sh if state.last_sh is not None else signal_level * 1.002
+                sl = sl_anchor + buf
         else:
-            sl = choch_level + buf
-            if sl <= entry:
-                continue
+            # CHOCH+BOS: SL just beyond the BOS level
+            if direction == "LONG":
+                sl = signal_level - buf
+            else:
+                sl = signal_level + buf
+
+        if direction == "LONG" and sl >= entry:
+            continue
+        if direction == "SHORT" and sl <= entry:
+            continue
 
         risk = abs(entry - sl)
         if risk < 1.0:
@@ -852,7 +869,7 @@ def backtest_strategy_8_choch(
             sl_price=sl,
             tp1_price=tp1,
             entry_at=bar_close.isoformat(),
-            entry_reason=f"CHOCH {direction} struct={state.structure} lvl={choch_level:.1f} ADX={adx_val:.1f}",
+            entry_reason=f"{signal_type} {direction} struct={state.structure} lvl={signal_level:.1f} ADX={adx_val:.1f}",
         )
 
     if pos is not None:

@@ -201,10 +201,15 @@ class StructureState:
     prev_sh: float | None = None
     prev_sl: float | None = None
     structure: str = "NEUTRAL"  # BULL | BEAR | NEUTRAL
+    # BOS confirmation state — set after CHOCH, cleared on BOS entry or invalidation
+    choch_pending: str | None = None   # 'LONG' | 'SHORT'
+    bos_level: float = 0.0            # level that must be broken to confirm BOS entry
 
     def reset(self) -> None:
         self.last_sh = self.last_sl = self.prev_sh = self.prev_sl = None
         self.structure = "NEUTRAL"
+        self.choch_pending = None
+        self.bos_level = 0.0
 
 
 def update_structure(state: StructureState, closed: list[dict], lb: int = SWING_LOOKBACK) -> None:
@@ -239,16 +244,80 @@ def update_structure(state: StructureState, closed: list[dict], lb: int = SWING_
 
 
 def detect_choch(state: StructureState, closed: list[dict]) -> tuple[str | None, float]:
-    """Return ('LONG'|'SHORT', choch_level) or (None, 0)."""
+    """Two-step CHOCH + BOS detection.
+
+    Step 1 — CHOCH: price closes through last swing low (BULL structure) or swing
+             high (BEAR structure).  Sets choch_pending and bos_level; does NOT
+             return an entry yet.
+
+    Step 2 — BOS: after CHOCH is pending, price subsequently closes through the
+             *previous* swing low/high (the older structural level).  This
+             confirms the reversal has momentum and returns the entry signal.
+
+    Pending CHOCH is invalidated if price closes back above/below the CHOCH
+    level before the BOS fires (fakeout / stop hunt).
+    """
     if not closed:
         return None, 0.0
     close = float(closed[-1]["close"])
-    if state.structure == "BULL" and state.last_sl is not None:
-        if close < state.last_sl:
-            return "SHORT", state.last_sl
-    elif state.structure == "BEAR" and state.last_sh is not None:
+
+    # ── Step 2 first: check pending BOS ──────────────────────────────────────
+    if state.choch_pending == "SHORT":
+        if close < state.bos_level:
+            # BOS confirmed — clear pending and return entry
+            state.choch_pending = None
+            return "SHORT", state.bos_level
+        # Invalidate if price closes back above the CHOCH level (fakeout)
+        if state.last_sl is not None and close > state.last_sl:
+            state.choch_pending = None
+
+    elif state.choch_pending == "LONG":
+        if close > state.bos_level:
+            state.choch_pending = None
+            return "LONG", state.bos_level
+        # Invalidate if price closes back below the CHOCH level (fakeout)
+        if state.last_sh is not None and close < state.last_sh:
+            state.choch_pending = None
+
+    # ── Step 1: detect fresh CHOCH ────────────────────────────────────────────
+    if state.choch_pending is None:
+        if state.structure == "BULL" and state.last_sl is not None:
+            if close < state.last_sl:
+                # CHOCH SHORT detected — wait for BOS at prev_sl
+                state.choch_pending = "SHORT"
+                state.bos_level = (
+                    state.prev_sl if state.prev_sl is not None
+                    else state.last_sl * 0.998  # fallback: 0.2% below CHOCH level
+                )
+        elif state.structure == "BEAR" and state.last_sh is not None:
+            if close > state.last_sh:
+                # CHOCH LONG detected — wait for BOS at prev_sh
+                state.choch_pending = "LONG"
+                state.bos_level = (
+                    state.prev_sh if state.prev_sh is not None
+                    else state.last_sh * 1.002
+                )
+
+    return None, 0.0
+
+
+def detect_bos_trend(state: StructureState, closed: list[dict]) -> tuple[str | None, float]:
+    """BOS in the direction of the current structure — trend continuation entry.
+
+    BULL structure: close > last_sh  → BOS LONG  (new HH confirms uptrend)
+    BEAR structure: close < last_sl  → BOS SHORT (new LL confirms downtrend)
+
+    The returned level is the broken swing point used for SL anchor by caller.
+    """
+    if not closed:
+        return None, 0.0
+    close = float(closed[-1]["close"])
+    if state.structure == "BULL" and state.last_sh is not None:
         if close > state.last_sh:
             return "LONG", state.last_sh
+    elif state.structure == "BEAR" and state.last_sl is not None:
+        if close < state.last_sl:
+            return "SHORT", state.last_sl
     return None, 0.0
 
 
@@ -375,8 +444,12 @@ class CHOCHEngine:
         if state.trades_today >= MAX_TRADES_PER_DAY:
             return
 
-        # CHOCH signal
-        direction, choch_level = detect_choch(state.structure, closed)
+        # CHOCH+BOS reversal signal, then BOS trend continuation
+        direction, signal_level = detect_choch(state.structure, closed)
+        signal_type = "CHOCH+BOS"
+        if direction is None:
+            direction, signal_level = detect_bos_trend(state.structure, closed)
+            signal_type = "BOS_TREND"
         if direction is None:
             return
 
@@ -384,7 +457,7 @@ class CHOCHEngine:
         adx_val = _adx(closed)
         if adx_val is None or adx_val < ADX_MIN:
             state.signal_log.append(
-                f"CHOCH {direction} @ {float(closed[-1]['close']):.0f} — ADX {adx_val or 0:.1f} < {ADX_MIN}"
+                f"{signal_type} {direction} @ {float(closed[-1]['close']):.0f} — ADX {adx_val or 0:.1f} < {ADX_MIN}"
             )
             return
 
@@ -392,10 +465,10 @@ class CHOCHEngine:
         htf = _htf_trend(closed, now)
         if htf is not None:
             if direction == "LONG" and htf == "BEAR":
-                state.signal_log.append(f"CHOCH LONG filtered (1H trend=BEAR)")
+                state.signal_log.append(f"{signal_type} LONG filtered (1H trend=BEAR)")
                 return
             if direction == "SHORT" and htf == "BULL":
-                state.signal_log.append(f"CHOCH SHORT filtered (1H trend=BULL)")
+                state.signal_log.append(f"{signal_type} SHORT filtered (1H trend=BULL)")
                 return
 
         # Sizing
@@ -405,14 +478,26 @@ class CHOCHEngine:
 
         entry = spot if spot else float(closed[-1]["close"])
         buf = atr_val * SL_ATR_BUFFER
-        if direction == "LONG":
-            sl = choch_level - buf
-            if sl >= entry:
-                return
+        struct = state.structure
+        if signal_type == "BOS_TREND":
+            # Trend BOS: SL at the opposite structural swing
+            if direction == "LONG":
+                sl_anchor = struct.last_sl if struct.last_sl is not None else signal_level * 0.998
+                sl = sl_anchor - buf
+            else:
+                sl_anchor = struct.last_sh if struct.last_sh is not None else signal_level * 1.002
+                sl = sl_anchor + buf
         else:
-            sl = choch_level + buf
-            if sl <= entry:
-                return
+            # CHOCH+BOS: SL just beyond the confirmed BOS level
+            if direction == "LONG":
+                sl = signal_level - buf
+            else:
+                sl = signal_level + buf
+
+        if direction == "LONG" and sl >= entry:
+            return
+        if direction == "SHORT" and sl <= entry:
+            return
 
         risk_pts = abs(entry - sl)
         if risk_pts < 1.0:
@@ -427,7 +512,7 @@ class CHOCHEngine:
         # Resolve option contract
         contract = self.client.resolve_option(state.config, entry, direction)
         if not contract and not (PAPER_TRADING or MOCK_MODE):
-            logger.warning("[%s] CHOCH no option found at %s", state.config.code, entry)
+            logger.warning("[%s] %s no option found at %s", state.config.code, signal_type, entry)
             return
 
         # Place order

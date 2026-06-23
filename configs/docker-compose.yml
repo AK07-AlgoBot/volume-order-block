@@ -6,6 +6,8 @@ services:
   redis:
     image: redis:7-alpine
     restart: unless-stopped
+    mem_limit: 256m
+    memswap_limit: 256m
     volumes:
       - ak07_redis_data:/data
     healthcheck:
@@ -21,6 +23,8 @@ services:
       context: ..
       dockerfile: configs/docker/Dockerfile.api
     restart: unless-stopped
+    mem_limit: 512m
+    memswap_limit: 512m
     env_file:
       - ../.env
     environment:
@@ -50,6 +54,8 @@ services:
       context: ..
       dockerfile: configs/docker/Dockerfile.api
     restart: unless-stopped
+    mem_limit: 512m
+    memswap_limit: 512m
     command: ["python", "-u", "src/server/src/app/services/upstox_engine.py"]
     env_file:
       - ../.env
@@ -70,6 +76,8 @@ services:
       context: ..
       dockerfile: configs/docker/Dockerfile.api
     restart: unless-stopped
+    mem_limit: 512m
+    memswap_limit: 512m
     command: ["python", "-u", "src/server/src/app/services/smc_crt_engine.py"]
     env_file:
       - ../.env
@@ -90,6 +98,8 @@ services:
       context: ..
       dockerfile: configs/docker/Dockerfile.api
     restart: unless-stopped
+    mem_limit: 512m
+    memswap_limit: 512m
     command: ["python", "-u", "src/server/src/app/services/breakout_engine.py"]
     env_file:
       - ../.env
@@ -110,6 +120,8 @@ services:
       context: ..
       dockerfile: configs/docker/Dockerfile.api
     restart: unless-stopped
+    mem_limit: 512m
+    memswap_limit: 512m
     command: ["python", "-u", "src/server/src/app/services/s7_vwap_breakout_engine.py"]
     env_file:
       - ../.env
@@ -130,6 +142,8 @@ services:
       context: ..
       dockerfile: configs/docker/Dockerfile.api
     restart: unless-stopped
+    mem_limit: 512m
+    memswap_limit: 512m
     command: ["python", "-u", "src/server/src/app/services/choch_engine.py"]
     env_file:
       - ../.env
@@ -153,6 +167,8 @@ services:
       context: ..
       dockerfile: configs/docker/Dockerfile.api
     restart: unless-stopped
+    mem_limit: 256m
+    memswap_limit: 256m
     command: ["python", "-u", "src/server/src/mcp_server.py", "--host", "0.0.0.0", "--port", "8765"]
     env_file:
       - ../.env
@@ -173,6 +189,8 @@ services:
       context: ..
       dockerfile: configs/docker/Dockerfile.api
     restart: unless-stopped
+    mem_limit: 1g
+    memswap_limit: 1g
     command: ["python", "-m", "streamlit", "run", "src/server/src/app/ui/dashboard.py", "--server.address", "0.0.0.0", "--server.port", "8501", "--server.headless", "true", "--browser.gatherUsageStats", "false"]
     env_file:
       - ../.env
