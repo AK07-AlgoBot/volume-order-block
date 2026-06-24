@@ -93,7 +93,84 @@ def record_completed_trade(
         )
 
 
-def ingest_strategy1_trade_log(
+def amend_completed_trade(
+    day: str,
+    *,
+    strategy_id: str | None = None,
+    symbol: str | None = None,
+    trade_index: int = -1,
+    entry_price: float | None = None,
+    exit_price: float | None = None,
+    exit_reason: str | None = None,
+    exit_at: str | None = None,
+) -> dict[str, Any] | None:
+    """Update one closed trade row in Redis (operator correction after manual exit)."""
+    key = COMPLETED_TRADES_KEY_TEMPLATE.format(day=day)
+    rows = cache_manager.get_json(key)
+    if not isinstance(rows, list) or not rows:
+        return None
+
+    matches = []
+    for i, row in enumerate(rows):
+        if not isinstance(row, dict):
+            continue
+        if strategy_id and str(row.get("strategy_id") or "") != strategy_id:
+            continue
+        if symbol and str(row.get("symbol") or "").upper() != symbol.upper():
+            continue
+        matches.append(i)
+
+    if not matches:
+        return None
+
+    idx = matches[trade_index] if -len(matches) <= trade_index < len(matches) else matches[-1]
+    row = dict(rows[idx])
+    direction = str(row.get("direction") or "LONG")
+
+    if entry_price is not None:
+        row["entry_price"] = round(float(entry_price), 2)
+    if exit_price is not None:
+        row["exit_price"] = round(float(exit_price), 2)
+    if exit_reason is not None:
+        row["exit_reason"] = exit_reason
+    if exit_at is not None:
+        row["exit_at"] = exit_at
+
+    entry = float(row.get("entry_price") or 0)
+    exit_p = float(row.get("exit_price") or 0)
+    pnl = (exit_p - entry) if direction == "LONG" else (entry - exit_p)
+    row["pnl_points"] = round(pnl, 2)
+    row["result"] = classify_result(pnl)
+
+    rows[idx] = row
+    if cache_manager.set_json(key, rows, ttl_seconds=TRADE_TTL_SECONDS):
+        logger.info(
+            "Amended trade %s [%s] %s exit=%.2f pnl=%+.2f (%s)",
+            day,
+            idx,
+            symbol or row.get("symbol"),
+            exit_p,
+            pnl,
+            row.get("exit_reason"),
+        )
+        return row
+    return None
+
+
+def list_completed_trades(day: str, *, strategy_id: str | None = None) -> list[dict[str, Any]]:
+    key = COMPLETED_TRADES_KEY_TEMPLATE.format(day=day)
+    rows = cache_manager.get_json(key)
+    if not isinstance(rows, list):
+        return []
+    out = []
+    for i, row in enumerate(rows):
+        if not isinstance(row, dict):
+            continue
+        if strategy_id and str(row.get("strategy_id") or "") != strategy_id:
+            continue
+        out.append({"index": i, **row})
+    return out
+
     day: str,
     trade_log: list[dict[str, Any]],
     *,

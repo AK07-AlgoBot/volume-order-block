@@ -30,7 +30,7 @@ Exit rules
   SL  = CHOCH structural level ± 0.25 × ATR(14)
   TP  = entry ± 2 × risk_distance  (R:R 2:1)
   Trail SL: ratchet to 3-bar swing after price moves 1R in our favour.
-  Force flat: 15:15 IST.
+  Force flat: 14:55 IST (same as S1/S2/S7).
 """
 
 from __future__ import annotations
@@ -65,11 +65,23 @@ logger = logging.getLogger("ak07.choch")
 IST: Final = ZoneInfo("Asia/Kolkata")
 CANDLE_5M: Final[int] = 5
 
+
+def _parse_ist_time(env_key: str, default_hour: int, default_minute: int) -> dtime:
+    raw = os.environ.get(env_key, "").strip()
+    if raw:
+        try:
+            h, m = raw.split(":", 1)
+            return dtime(int(h), int(m))
+        except ValueError:
+            logger.warning("Invalid %s=%r — using default %02d:%02d", env_key, raw, default_hour, default_minute)
+    return dtime(default_hour, default_minute)
+
+
 # ── timing ────────────────────────────────────────────────────────────────────
 SESSION_START: Final[dtime] = dtime(9, 15)
 ENTRY_START: Final[dtime] = dtime(9, 30)
 NO_ENTRY_AFTER: Final[dtime] = dtime(14, 0)
-SQUARE_OFF_TIME: Final[dtime] = dtime(15, 15)
+SQUARE_OFF_TIME: Final[dtime] = _parse_ist_time("CHOCH_SQUARE_OFF_IST", 14, 55)
 
 # ── signal parameters (env-overridable) ───────────────────────────────────────
 SWING_LOOKBACK: Final[int] = int(os.environ.get("CHOCH_SWING_LB", "3"))
@@ -370,19 +382,18 @@ def detect_choch(state: StructureState, closed: list[dict]) -> tuple[str | None,
 def detect_bos_trend(state: StructureState, closed: list[dict]) -> tuple[str | None, float]:
     """BOS in the direction of the current structure — trend continuation entry.
 
-    BULL structure: close > last_sh  → BOS LONG  (new HH confirms uptrend)
-    BEAR structure: close < last_sl  → BOS SHORT (new LL confirms downtrend)
-
-    The returned level is the broken swing point used for SL anchor by caller.
+    Edge-triggered: only fires on the bar that *breaks* the swing level, not every
+    subsequent bar while price remains beyond it (prevents duplicate entries on restart).
     """
-    if not closed:
+    if len(closed) < 2:
         return None, 0.0
     close = float(closed[-1]["close"])
+    prev_close = float(closed[-2]["close"])
     if state.structure == "BULL" and state.last_sh is not None:
-        if close > state.last_sh:
+        if prev_close <= state.last_sh and close > state.last_sh:
             return "LONG", state.last_sh
     elif state.structure == "BEAR" and state.last_sl is not None:
-        if close < state.last_sl:
+        if prev_close >= state.last_sl and close < state.last_sl:
             return "SHORT", state.last_sl
     return None, 0.0
 
@@ -418,6 +429,71 @@ class CHOCHIndexState:
     signal_log: list[str] = field(default_factory=list)
     candles: list[dict] = field(default_factory=list)
     struct_upto: int = 0  # next confirmable bar index for catch_up_structure
+    last_entry_fingerprint: str = ""  # dedup guard across container restarts
+
+
+def _entry_fingerprint(signal_type: str, direction: str, signal_level: float) -> str:
+    return f"{signal_type}|{direction}|{round(signal_level, 1)}"
+
+
+def _position_to_dict(pos: CHOCHPosition) -> dict[str, Any]:
+    return {
+        "direction": pos.direction,
+        "entry_price": pos.entry_price,
+        "sl_price": pos.sl_price,
+        "tp_price": pos.tp_price,
+        "trail_sl": pos.trail_sl,
+        "risk_pts": pos.risk_pts,
+        "opened_at": pos.opened_at,
+        "entry_reason": pos.entry_reason,
+        "instrument_key": pos.instrument_key,
+        "option_strike": pos.option_strike,
+        "option_type": pos.option_type,
+        "lots": pos.lots,
+        "lot_size": pos.lot_size,
+    }
+
+
+def _position_from_dict(raw: dict[str, Any], lot_size: int) -> CHOCHPosition:
+    return CHOCHPosition(
+        direction=str(raw["direction"]),
+        entry_price=float(raw["entry_price"]),
+        sl_price=float(raw["sl_price"]),
+        tp_price=float(raw["tp_price"]),
+        trail_sl=float(raw.get("trail_sl") or raw["sl_price"]),
+        risk_pts=float(raw["risk_pts"]),
+        opened_at=str(raw.get("opened_at") or ""),
+        entry_reason=str(raw.get("entry_reason") or ""),
+        instrument_key=str(raw.get("instrument_key") or ""),
+        option_strike=int(raw.get("option_strike") or 0),
+        option_type=str(raw.get("option_type") or ""),
+        lots=int(raw.get("lots") or 1),
+        lot_size=int(raw.get("lot_size") or lot_size),
+    )
+
+
+def _structure_to_dict(struct: StructureState) -> dict[str, Any]:
+    return {
+        "last_sh": struct.last_sh,
+        "last_sl": struct.last_sl,
+        "prev_sh": struct.prev_sh,
+        "prev_sl": struct.prev_sl,
+        "structure": struct.structure,
+        "choch_pending": struct.choch_pending,
+        "bos_level": struct.bos_level,
+    }
+
+
+def _structure_from_dict(raw: dict[str, Any]) -> StructureState:
+    struct = StructureState()
+    struct.last_sh = raw.get("last_sh")
+    struct.last_sl = raw.get("last_sl")
+    struct.prev_sh = raw.get("prev_sh")
+    struct.prev_sl = raw.get("prev_sl")
+    struct.structure = str(raw.get("structure") or "NEUTRAL")
+    struct.choch_pending = raw.get("choch_pending")
+    struct.bos_level = float(raw.get("bos_level") or 0.0)
+    return struct
 
 
 # ── market client ─────────────────────────────────────────────────────────────
@@ -502,6 +578,14 @@ class CHOCHMarketClient:
             return self._upstox.place_market_order(instrument_key, quantity, "SELL")
         return False
 
+    def broker_net_qty(self, instrument_key: str) -> int | None:
+        """Live broker net qty; None if check skipped or API failed."""
+        if PAPER_TRADING or MOCK_MODE or not instrument_key:
+            return None
+        if self._upstox:
+            return self._upstox.get_net_position_qty(instrument_key)
+        return None
+
 
 # ── live engine ───────────────────────────────────────────────────────────────
 
@@ -516,9 +600,104 @@ class CHOCHEngine:
             if code in CHOCH_INSTRUMENTS
         }
         self._daily_loss_paused: str = ""
+        self._restore_session_from_redis(datetime.now(IST))
         logger.info(
             "CHOCH engine started | paper=%s mock=%s | capital=%.0f risk=%.1f%% daily_limit=%.1f%%",
             PAPER_TRADING, MOCK_MODE, CAPITAL_INR, RISK_PCT * 100, DAILY_LOSS_LIMIT_PCT * 100,
+        )
+
+    def _restore_session_from_redis(self, now: datetime) -> None:
+        """Reload open positions and trade counts after container restart."""
+        day = now.date().isoformat()
+        session = cache_manager.get_json(cache_manager.CHOCH_SESSION_KEY_TEMPLATE.format(day=day))
+        if not isinstance(session, dict):
+            # Fall back to last published dashboard state (short TTL but often still present)
+            session = cache_manager.get_json(cache_manager.CHOCH_STATE_KEY)
+            if not isinstance(session, dict):
+                return
+            session = {"indices": session.get("indices") or {}}
+
+        self._daily_loss_paused = str(session.get("daily_loss_paused") or "")
+        indices = session.get("indices") if isinstance(session.get("indices"), dict) else {}
+
+        for code, state in self.states.items():
+            raw = indices.get(code)
+            if not isinstance(raw, dict):
+                continue
+            try:
+                state.trades_today = int(raw.get("trades_today") or 0)
+                state.daily_pnl_inr = float(raw.get("daily_pnl_inr") or 0.0)
+                state.struct_upto = int(raw.get("struct_upto") or SWING_LOOKBACK)
+                state.setup_label = str(raw.get("setup_label") or state.setup_label)
+                state.last_entry_fingerprint = str(raw.get("last_entry_fingerprint") or "")
+                signals = raw.get("signals")
+                if isinstance(signals, list):
+                    state.signal_log = [str(s) for s in signals[-20:]]
+
+                struct_raw = raw.get("structure") or raw.get("structure_state")
+                if isinstance(struct_raw, dict):
+                    state.structure = _structure_from_dict(struct_raw)
+
+                pos_raw = raw.get("position")
+                if isinstance(pos_raw, dict) and pos_raw:
+                    # Dashboard state uses short keys (entry/sl/tp); session uses full names
+                    if "entry_price" not in pos_raw and "entry" in pos_raw:
+                        pos_raw = {
+                            "direction": pos_raw.get("direction"),
+                            "entry_price": pos_raw.get("entry"),
+                            "sl_price": pos_raw.get("sl"),
+                            "tp_price": pos_raw.get("tp"),
+                            "trail_sl": pos_raw.get("sl"),
+                            "risk_pts": abs(float(pos_raw.get("entry") or 0) - float(pos_raw.get("sl") or 0)),
+                            "opened_at": raw.get("timestamp") or "",
+                            "entry_reason": state.setup_label,
+                            "instrument_key": "",
+                            "option_strike": pos_raw.get("strike") or 0,
+                            "option_type": pos_raw.get("option_type") or "",
+                            "lots": pos_raw.get("lots") or 1,
+                            "lot_size": state.config.lot_size,
+                        }
+                    state.position = _position_from_dict(pos_raw, state.config.lot_size)
+                    logger.info(
+                        "[%s] restored CHOCH position from Redis (%s @ %.2f · SL %.2f · TP %.2f · %d lot(s))",
+                        code,
+                        state.position.direction,
+                        state.position.entry_price,
+                        state.position.sl_price,
+                        state.position.tp_price,
+                        state.position.lots,
+                    )
+            except (KeyError, TypeError, ValueError) as exc:
+                logger.warning("[%s] CHOCH session restore failed: %s", code, exc)
+
+        restored = sum(1 for s in self.states.values() if s.position)
+        if restored:
+            logger.info("CHOCH session restore: %d open position(s)", restored)
+
+    def _persist_session(self, now: datetime) -> None:
+        day = now.date().isoformat()
+        payload: dict[str, Any] = {
+            "day": day,
+            "daily_loss_paused": self._daily_loss_paused,
+            "indices": {},
+        }
+        for code, s in self.states.items():
+            idx: dict[str, Any] = {
+                "trades_today": s.trades_today,
+                "daily_pnl_inr": round(s.daily_pnl_inr, 2),
+                "struct_upto": s.struct_upto,
+                "setup_label": s.setup_label,
+                "last_entry_fingerprint": s.last_entry_fingerprint,
+                "signals": s.signal_log[-20:],
+                "structure": _structure_to_dict(s.structure),
+            }
+            if s.position:
+                idx["position"] = _position_to_dict(s.position)
+            payload["indices"][code] = idx
+        cache_manager.set_json(
+            cache_manager.CHOCH_SESSION_KEY_TEMPLATE.format(day=day),
+            payload,
+            ttl_seconds=86_400,
         )
 
     def run(self) -> None:
@@ -606,6 +785,10 @@ class CHOCHEngine:
             direction, signal_level = detect_bos_trend(state.structure, closed)
             signal_type = "BOS_TREND"
         if direction is None:
+            return
+
+        fp = _entry_fingerprint(signal_type, direction, signal_level)
+        if fp == state.last_entry_fingerprint:
             return
 
         # ADX filter
@@ -697,9 +880,11 @@ class CHOCHEngine:
             lot_size=state.config.lot_size,
         )
         state.trades_today += 1
+        state.last_entry_fingerprint = fp
         state.setup_label = f"CHOCH {direction} @ {entry:.0f}"
         state.signal_log.append(reason)
         logger.info("[%s] %s", state.config.code, reason)
+        self._persist_session(now)
         telegram_notifier.notify_trade_execution(
             index_name=f"{state.config.display} CHOCH"
             + (f" ({state.position.option_strike}{state.position.option_type} x{lots})" if contract else ""),
@@ -718,8 +903,19 @@ class CHOCHEngine:
             return
         spot = state.spot
 
+        # Sync if user flattened manually on Upstox (engine would otherwise stay "open")
+        if pos.instrument_key:
+            net = self.client.broker_net_qty(pos.instrument_key)
+            if net is not None and net <= 0:
+                logger.info(
+                    "[%s] CHOCH broker flat detected (manual exit?) — clearing engine state",
+                    state.config.code,
+                )
+                self._exit(state, spot, "BROKER_FLAT", now, skip_broker_order=True)
+                return
+
         if now.time() >= SQUARE_OFF_TIME:
-            self._exit(state, spot, "INTRADAY_SQUARE_OFF_1515", now)
+            self._exit(state, spot, "INTRADAY_SQUARE_OFF_1455", now)
             return
 
         # Ratchet SL to latest confirmed structural swing (last_sl / last_sh)
@@ -765,16 +961,30 @@ class CHOCHEngine:
             elif spot <= pos.tp_price:
                 self._exit(state, pos.tp_price, "TP_HIT_2R", now)
 
-    def _exit(self, state: CHOCHIndexState, exit_price: float, reason: str, now: datetime) -> None:
+    def _exit(
+        self,
+        state: CHOCHIndexState,
+        exit_price: float,
+        reason: str,
+        now: datetime,
+        *,
+        skip_broker_order: bool = False,
+    ) -> None:
         pos = state.position
         if pos is None:
             return
-        if pos.instrument_key and not PAPER_TRADING and not MOCK_MODE:
+        if (
+            pos.instrument_key
+            and not skip_broker_order
+            and not PAPER_TRADING
+            and not MOCK_MODE
+        ):
             self.client.place_exit(pos.instrument_key, pos.lots * pos.lot_size)
         pnl_pts = (exit_price - pos.entry_price) if pos.direction == "LONG" else (pos.entry_price - exit_price)
         pnl_inr = pnl_pts * pos.lots * pos.lot_size
         state.daily_pnl_inr += pnl_inr
         state.position = None
+        state.last_entry_fingerprint = ""
         state.setup_label = f"Flat — {reason} ({pnl_pts:+.1f} pts)"
         state.signal_log.append(f"EXIT {reason} @ {exit_price:.1f} | {pnl_pts:+.2f} pts")
         performance_store.record_completed_trade(
@@ -812,6 +1022,7 @@ class CHOCHEngine:
                 f"Total daily loss {total_daily_loss:+.0f} INR exceeds "
                 f"{DAILY_LOSS_LIMIT_PCT * 100:.1f}% limit. Engine paused.",
             )
+        self._persist_session(now)
 
     def _publish_state(self, now: datetime) -> None:
         payload: dict[str, Any] = {
@@ -830,6 +1041,9 @@ class CHOCHEngine:
                 "setup_label": s.setup_label,
                 "signals": s.signal_log[-5:],
                 "daily_pnl_inr": round(s.daily_pnl_inr, 2),
+                "struct_upto": s.struct_upto,
+                "last_entry_fingerprint": s.last_entry_fingerprint,
+                "structure_state": _structure_to_dict(s.structure),
             }
             if s.position:
                 idx["position"] = {
@@ -843,6 +1057,7 @@ class CHOCHEngine:
                 }
             payload["indices"][code] = idx
         cache_manager.set_json(cache_manager.CHOCH_STATE_KEY, payload, ttl_seconds=120)
+        self._persist_session(now)
 
 
 def main() -> None:

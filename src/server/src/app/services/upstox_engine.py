@@ -582,6 +582,25 @@ class UpstoxClient:
         logger.error("Order FAILED on all endpoints: %s %d x %s", transaction_type, quantity, instrument_key)
         return False
 
+    def get_net_position_qty(self, instrument_key: str) -> int | None:
+        """Net intraday qty for one instrument. 0 = flat. None = lookup failed."""
+        if not instrument_key:
+            return None
+        data = self._get(f"{self.base_url}/portfolio/short-term-positions")
+        if not isinstance(data, list):
+            return None
+        for row in data:
+            if not isinstance(row, dict):
+                continue
+            key = str(row.get("instrument_token") or row.get("instrument_key") or "")
+            if key != instrument_key:
+                continue
+            try:
+                return int(row.get("quantity") or 0)
+            except (TypeError, ValueError):
+                return 0
+        return 0
+
 
 class MockUpstoxClient(UpstoxClient):
     """Simulated V3 feed for AK07_MOCK cockpit/engine verification (no broker I/O)."""
@@ -678,6 +697,9 @@ class MockUpstoxClient(UpstoxClient):
     def place_market_order(self, instrument_key: str, quantity: int, transaction_type: str) -> bool:
         logger.info("MOCK order: %s %d x %s", transaction_type, quantity, instrument_key or "paper")
         return True
+
+    def get_net_position_qty(self, instrument_key: str) -> int | None:
+        return None
 
     def advance_tick(self) -> None:
         self._tick += 1
