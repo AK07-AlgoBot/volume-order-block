@@ -1,0 +1,21 @@
+﻿S3 Day Review filter comparison (2023-06-23 -> 2026-06-22)
+
+S2 ΓÇö day review ON (current backtest)
+  S2: 240 trades | WR 52.5% | +2090.0 pts
+  S8: 0 trades | WR 0.0% | +0.0 pts
+
+S2 ΓÇö day review OFF
+  S2: 516 trades | WR 46.5% | +1149.6 pts
+  S8: 0 trades | WR 0.0% | +0.0 pts
+
+S8 ΓÇö prev-day ON, day review OFF (current backtest)
+  S2: 0 trades | WR 0.0% | +0.0 pts
+  S8: 2964 trades | WR 45.5% | +52125.5 pts
+
+S8 ΓÇö prev-day ON + day review ON
+  S2: 0 trades | WR 0.0% | +0.0 pts
+  S8: 1362 trades | WR 39.9% | +4251.8 pts
+
+S8 ΓÇö day review ON only (no prev-day)
+  S2: 0 trades | WR 0.0% | +0.0 pts
+  S8: 2988 trades | WR 38.7% | -5726.5 pts

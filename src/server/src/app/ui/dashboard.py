@@ -271,6 +271,19 @@ def render_breakout_strategy_panel(index_code: str) -> None:
     bo = cache_manager.get_json(cache_manager.BREAKOUT_STATE_KEY_TEMPLATE.format(index=index_code))
     bo_hb = cache_manager.get_json(cache_manager.BREAKOUT_HEARTBEAT_KEY)
 
+    entries_enabled = None
+    if bo:
+        entries_enabled = bo.get("entries_enabled")
+    elif bo_hb:
+        entries_enabled = bo_hb.get("entries_enabled")
+    if entries_enabled is False or (
+        bo and bo.get("entries_blocked") and "disabled" in str(bo.get("block_reason", "")).lower()
+    ):
+        st.warning(
+            "S3 trading **disabled** (3-year backtest: no edge). "
+            "Engine publishes BLR levels + Day Review for S2 only."
+        )
+
     if not bo and not bo_hb:
         st.caption("Breakout engine offline — start `breakout_engine` service or MOCK mode.")
         return

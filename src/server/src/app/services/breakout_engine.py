@@ -3,8 +3,9 @@
 Daily Green / Mid / Red from 9:15 session open + instrument band half-width
 (Pine v6: Nifty 0.25%, BankNifty 0.125%, Sensex 0.14% of price). Day-review filter
 from 9:20 first 5m close vs Mid: Review LONG → longs only, Review SHORT → shorts only.
-Breakout on 5m close through Green/Red. Options only, 1 lot, book @ fixed spot target,
-max 2 trades/day per index, flat 14:55 IST.
+
+**Trading disabled by default** (BREAKOUT_ENTRIES_ENABLED=0) after 3-year backtest
+showed no edge. Engine still runs to publish BLR levels + day_review for S2 SMC+CRT.
 
 Run: python -u src/server/src/app/services/breakout_engine.py
 """
@@ -85,6 +86,16 @@ ENTRY_START: Final[dtime] = _parse_ist_time("BREAKOUT_ENTRY_START_IST", 9, 20)
 NO_ENTRY_AFTER: Final[dtime] = _parse_ist_time("BREAKOUT_NO_ENTRY_AFTER_IST", 13, 0)
 SQUARE_OFF_TIME: Final[dtime] = _parse_ist_time("BREAKOUT_SQUARE_OFF_IST", 14, 55)
 SESSION_END: Final[dtime] = _parse_ist_time("BREAKOUT_SESSION_END_IST", 15, 30)
+
+# S3 disabled for trading after 3-year backtest showed no edge (-1,663 pts).
+# Engine still runs to publish BLR levels + day_review for S2 SMC+CRT.
+# Set BREAKOUT_ENTRIES_ENABLED=1 to re-enable live S3 entries.
+ENTRIES_ENABLED: Final[bool] = os.environ.get("BREAKOUT_ENTRIES_ENABLED", "0").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+)
 
 
 @dataclass(frozen=True)
@@ -497,12 +508,18 @@ class BreakoutEngine:
             state.trade_day = now.date().isoformat()
             self._restore_frozen_levels(state, now.date().isoformat())
         logger.info(
-            "Breakout engine started (paper=%s mock=%s max_trades=%d lot=%d)",
+            "Breakout engine started (paper=%s mock=%s entries=%s max_trades=%d lot=%d)",
             PAPER_TRADING,
             MOCK_MODE,
+            ENTRIES_ENABLED,
             MAX_TRADES_PER_DAY,
             LOTS_PER_TRADE,
         )
+        if not ENTRIES_ENABLED:
+            logger.warning(
+                "S3 BLR Breakout entries DISABLED — publishing BLR/day-review only (S2 filter). "
+                "Set BREAKOUT_ENTRIES_ENABLED=1 to trade."
+            )
 
     def run(self) -> None:
         while True:
@@ -535,6 +552,10 @@ class BreakoutEngine:
 
         kill = self._kill_switch_engaged()
         entries_blocked = kill or now.time() >= NO_ENTRY_AFTER or now.time() < SESSION_START
+        block_reason = ""
+        if not ENTRIES_ENABLED:
+            entries_blocked = True
+            block_reason = "S3 disabled (backtest: no edge) — BLR/day-review publish only"
         if kill:
             self._square_off_all("KILL_SWITCH", now)
 
@@ -543,7 +564,7 @@ class BreakoutEngine:
             entries_blocked = True
 
         for state in self.states.values():
-            self._process_index(state, now, entries_blocked)
+            self._process_index(state, now, entries_blocked, block_reason)
         self._publish_heartbeat(now)
 
     def _roll_trade_day(self, now: datetime) -> None:
@@ -570,7 +591,13 @@ class BreakoutEngine:
                 state.last_candle_ts = ""
                 state.setup_label = "New session — building BLR levels"
 
-    def _process_index(self, state: IndexBreakoutState, now: datetime, entries_blocked: bool) -> None:
+    def _process_index(
+        self,
+        state: IndexBreakoutState,
+        now: datetime,
+        entries_blocked: bool,
+        block_reason: str = "",
+    ) -> None:
         cfg = state.config
         if now.time() < SESSION_START:
             state.setup_label = f"Pre-market — session from {SESSION_START.strftime('%H:%M')} IST"
@@ -596,7 +623,7 @@ class BreakoutEngine:
         ):
             self._seek_entry(state, candles, now)
 
-        self._publish_state(state, now, entries_blocked)
+        self._publish_state(state, now, entries_blocked, block_reason)
 
     def _resolve_session_open(
         self,
@@ -1037,6 +1064,7 @@ class BreakoutEngine:
             "trades_today": state.trades_today,
             "max_trades": MAX_TRADES_PER_DAY,
             "entries_blocked": entries_blocked,
+            "entries_enabled": ENTRIES_ENABLED,
             "block_reason": block_reason,
             "paper_trading": PAPER_TRADING,
             "signals": state.signal_log[-10:],
@@ -1072,6 +1100,7 @@ class BreakoutEngine:
                 "square_off_ist": SQUARE_OFF_TIME.strftime("%H:%M"),
                 "no_entry_after_ist": NO_ENTRY_AFTER.strftime("%H:%M"),
                 "indices": list(INDEX_CONFIGS.keys()),
+                "entries_enabled": ENTRIES_ENABLED,
             },
             ttl_seconds=60,
         )
