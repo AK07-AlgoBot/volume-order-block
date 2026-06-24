@@ -916,7 +916,7 @@ class S7Engine:
                     "lots": s.position.lots,
                 }
             payload["indices"][code] = idx
-        cache_manager.set_json("ak07:s7_state", payload, ttl=120)
+        cache_manager.set_json(cache_manager.S7_STATE_KEY, payload, ttl_seconds=120)
 
 
 def main() -> None:

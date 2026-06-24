@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import logging
 import os
+import random
 import sys
 import time
 from dataclasses import dataclass, field
@@ -51,11 +52,12 @@ from app.services import cache_manager, performance_store, telegram_notifier
 from app.services.backtest_data import parse_candle_ts
 from app.services.upstox_engine import (
     INDEX_CONFIGS,
+    ITM_OFFSET_POINTS,
+    IndexConfig,
     MOCK_MODE,
     PAPER_TRADING,
     UpstoxClient,
     build_upstox_client,
-    parse_v3_intraday_candles,
 )
 
 logger = logging.getLogger("ak07.choch")
@@ -86,9 +88,14 @@ DAILY_LOSS_LIMIT_PCT: Final[float] = float(os.environ.get("CHOCH_DAILY_LOSS_LIMI
 MAX_LOTS: Final[int] = int(os.environ.get("CHOCH_MAX_LOTS", "2"))
 
 STRATEGY_LABEL: Final[str] = "Strategy 8 — CHOCH"
-REDIS_STATE_KEY: Final[str] = "ak07:choch_state"
 
 CHOCH_INSTRUMENTS: Final[list[str]] = ["NIFTY", "BANKNIFTY", "SENSEX"]
+
+_MOCK_BASELINE: Final[dict[str, float]] = {
+    "NIFTY": 24_500.0,
+    "BANKNIFTY": 55_000.0,
+    "SENSEX": 82_000.0,
+}
 
 
 # ── indicators ────────────────────────────────────────────────────────────────
@@ -353,13 +360,96 @@ class CHOCHIndexState:
     candles: list[dict] = field(default_factory=list)
 
 
+# ── market client ─────────────────────────────────────────────────────────────
+
+class CHOCHMarketClient:
+    """Thin Upstox wrapper — same pattern as SMC+CRT / S7 engines."""
+
+    def __init__(self) -> None:
+        self._upstox: UpstoxClient | None = None if MOCK_MODE else build_upstox_client()
+        self._mock_spots: dict[str, float] = dict(_MOCK_BASELINE)
+
+    def refresh_token(self) -> None:
+        if self._upstox:
+            self._upstox.refresh_access_token_from_disk()
+
+    def get_spot(self, cfg: IndexConfig) -> float | None:
+        if MOCK_MODE:
+            return self._mock_spot(cfg)
+        if self._upstox:
+            ltp = self._upstox.get_ltp(cfg.spot_instrument_key)
+            if ltp is not None:
+                self._mock_spots[cfg.code] = ltp
+                return ltp
+            logger.warning("Upstox LTP failed for %s", cfg.code)
+        return self._mock_spot(cfg)
+
+    def _mock_spot(self, cfg: IndexConfig) -> float:
+        base = self._mock_spots.get(cfg.code, _MOCK_BASELINE.get(cfg.code, 24_500.0))
+        value = round(base + base * random.uniform(-0.0008, 0.0008), 2)
+        self._mock_spots[cfg.code] = value
+        return value
+
+    def get_5m_candles(self, cfg: IndexConfig) -> list[dict[str, float]]:
+        if MOCK_MODE:
+            return self._mock_candles(cfg)
+        if self._upstox:
+            raw = self._upstox.get_closed_5min_candles(cfg.spot_instrument_key)
+            if raw is not None:
+                return raw
+            logger.warning("Upstox 5m candles failed for %s", cfg.code)
+        return self._mock_candles(cfg)
+
+    def _mock_candles(self, cfg: IndexConfig) -> list[dict[str, float]]:
+        now = datetime.now(IST)
+        spot = self._mock_spot(cfg)
+        ts = now - timedelta(minutes=CANDLE_5M)
+        return [
+            {
+                "timestamp": ts.isoformat(),
+                "open": spot - 5,
+                "high": spot + 8,
+                "low": spot - 8,
+                "close": spot,
+                "volume": 50_000,
+            }
+        ]
+
+    def resolve_option(self, cfg: IndexConfig, spot: float, direction: str) -> dict[str, Any] | None:
+        if self._upstox and not MOCK_MODE:
+            contract = self._upstox.get_itm_option_contract(cfg.spot_instrument_key, spot, direction)
+            if contract:
+                return contract
+        desired = spot - ITM_OFFSET_POINTS if direction == "LONG" else spot + ITM_OFFSET_POINTS
+        strike = int(round(desired / cfg.strike_step) * cfg.strike_step)
+        return {
+            "instrument_key": "",
+            "strike": strike,
+            "option_type": "CE" if direction == "LONG" else "PE",
+        }
+
+    def place_entry(self, instrument_key: str, quantity: int) -> bool:
+        if PAPER_TRADING or not instrument_key:
+            return True
+        if self._upstox:
+            return self._upstox.place_market_order(instrument_key, quantity, "BUY")
+        return False
+
+    def place_exit(self, instrument_key: str, quantity: int) -> bool:
+        if PAPER_TRADING or not instrument_key:
+            return True
+        if self._upstox:
+            return self._upstox.place_market_order(instrument_key, quantity, "SELL")
+        return False
+
+
 # ── live engine ───────────────────────────────────────────────────────────────
 
 class CHOCHEngine:
     """Live intraday CHOCH reversal engine (Upstox V2/V3)."""
 
     def __init__(self) -> None:
-        self.client: UpstoxClient = build_upstox_client()
+        self.client = CHOCHMarketClient()
         self.states: dict[str, CHOCHIndexState] = {
             code: CHOCHIndexState(config=cfg)
             for code, cfg in INDEX_CONFIGS.items()
@@ -381,8 +471,12 @@ class CHOCHEngine:
                 continue
             # Publish state every bar whether active or not
             if dtime(9, 0) <= t <= dtime(15, 45):
+                self.client.refresh_token()
                 self._tick(now)
-                self._publish_state(now)
+                try:
+                    self._publish_state(now)
+                except Exception:
+                    logger.exception("CHOCH publish_state failed")
             time.sleep(10)
 
     def _tick(self, now: datetime) -> None:
@@ -401,10 +495,8 @@ class CHOCHEngine:
         if spot:
             state.spot = spot
 
-        # Fetch 5-min candles for today
-        candles = parse_v3_intraday_candles(
-            self.client.get_intraday_candles(state.config, interval="5minute")
-        )
+        # Fetch today's 5-min candles
+        candles = self.client.get_5m_candles(state.config)
         if not candles:
             return
 
@@ -523,8 +615,8 @@ class CHOCHEngine:
                 return
 
         reason = (
-            f"CHOCH {direction} | struct={state.structure.structure} "
-            f"| choch_lvl={choch_level:.1f} | ADX={adx_val:.1f} | 1H={htf or 'N/A'}"
+            f"{signal_type} {direction} | struct={state.structure.structure} "
+            f"| lvl={signal_level:.1f} | ADX={adx_val:.1f} | 1H={htf or 'N/A'}"
         )
         state.position = CHOCHPosition(
             direction=direction,
@@ -671,7 +763,7 @@ class CHOCHEngine:
                     "option_type": s.position.option_type,
                 }
             payload["indices"][code] = idx
-        cache_manager.set_json(REDIS_STATE_KEY, payload, ttl=120)
+        cache_manager.set_json(cache_manager.CHOCH_STATE_KEY, payload, ttl_seconds=120)
 
 
 def main() -> None:
