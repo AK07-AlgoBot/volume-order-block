@@ -399,11 +399,32 @@ class UpstoxClient:
         return parse_v3_intraday_candles(data, datetime.now(IST))
 
     def _nearest_expiry(self, instrument_key: str) -> str | None:
+        expiries = self.list_expiries(instrument_key)
+        return expiries[0] if expiries else None
+
+    def list_expiries(self, instrument_key: str) -> list[str]:
         data = self._get(f"{self.base_url}/option/contract", {"instrument_key": instrument_key})
         if not isinstance(data, list):
-            return None
+            return []
         today = date.today().isoformat()
-        expiries = sorted({str(c.get("expiry")) for c in data if str(c.get("expiry", "")) >= today})
+        return sorted({str(c.get("expiry")) for c in data if str(c.get("expiry", "")) >= today})
+
+    def get_option_chain_for_expiry(self, instrument_key: str, expiry_date: str) -> list[dict[str, Any]]:
+        data = self._get(
+            f"{self.base_url}/option/chain",
+            {"instrument_key": instrument_key, "expiry_date": expiry_date},
+        )
+        return data if isinstance(data, list) else []
+
+    def resolve_expiry_on_date(self, instrument_key: str, on_date: date) -> str | None:
+        """Pick chain expiry matching calendar day (or nearest same-week)."""
+        target = on_date.isoformat()
+        expiries = self.list_expiries(instrument_key)
+        if target in expiries:
+            return target
+        for exp in expiries:
+            if exp.startswith(target[:7]):
+                return exp
         return expiries[0] if expiries else None
 
     def _fetch_nearest_expiry_chain(self, instrument_key: str) -> list[dict[str, Any]]:
@@ -411,11 +432,7 @@ class UpstoxClient:
         expiry = self._nearest_expiry(instrument_key)
         if not expiry:
             return []
-        data = self._get(
-            f"{self.base_url}/option/chain",
-            {"instrument_key": instrument_key, "expiry_date": expiry},
-        )
-        return data if isinstance(data, list) else []
+        return self.get_option_chain_for_expiry(instrument_key, expiry)
 
     def get_itm_option_contract(
         self, instrument_key: str, spot: float, direction: str

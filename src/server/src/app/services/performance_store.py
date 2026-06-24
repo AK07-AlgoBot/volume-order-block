@@ -31,11 +31,13 @@ STRATEGY_AK07_OI: Final[str] = "Strategy 1 — AK07 OI"
 STRATEGY_SMC_CRT: Final[str] = "Strategy 2 — SMC+CRT"
 STRATEGY_BREAKOUT: Final[str] = "Strategy 3 — BLR Breakout"
 STRATEGY_CHOCH: Final[str] = "Strategy 8 — CHOCH"
+STRATEGY_GAMMA: Final[str] = "Gamma Expiry Observer"
 STRATEGY_ORDER: Final[tuple[str, ...]] = (
     STRATEGY_AK07_OI,
     STRATEGY_SMC_CRT,
     STRATEGY_BREAKOUT,
     STRATEGY_CHOCH,
+    STRATEGY_GAMMA,
 )
 
 
@@ -171,6 +173,8 @@ def list_completed_trades(day: str, *, strategy_id: str | None = None) -> list[d
         out.append({"index": i, **row})
     return out
 
+
+def ingest_strategy1_trade_log(
     day: str,
     trade_log: list[dict[str, Any]],
     *,

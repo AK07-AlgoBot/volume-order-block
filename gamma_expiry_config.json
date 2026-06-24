@@ -1,0 +1,19 @@
+{
+  "start": "2023-06-23",
+  "end": "2026-06-24",
+  "refined_config": {
+    "pin_distance_pct": 0.25,
+    "min_idr_pct": 0.55,
+    "otm_strikes": 3,
+    "hero_tp_mult": 2.5,
+    "min_blast_score": 55,
+    "iv_assumption": 0.22
+  },
+  "refined_trades": 157,
+  "wins": 29,
+  "losses": 128,
+  "win_rate_pct": 18.5,
+  "total_premium_pts": -69.89,
+  "expectancy_premium": -0.45,
+  "note": "Spot-only BS proxy \u2014 indicative, not exact option fills."
+}

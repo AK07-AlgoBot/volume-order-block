@@ -1,0 +1,8 @@
+{
+  "pin_distance_pct": 0.25,
+  "min_idr_pct": 0.55,
+  "otm_strikes": 3,
+  "hero_tp_mult": 2.5,
+  "min_blast_score": 55,
+  "iv_assumption": 0.22
+}

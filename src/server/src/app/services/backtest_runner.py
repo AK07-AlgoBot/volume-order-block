@@ -420,28 +420,13 @@ def backtest_strategy_3(
     blr: BLRDayContext,
     prev_ohlc: dict[str, float] | None = None,
 ) -> None:
-    # S3 disabled: -1,663 pts loss over 3 years across all variants. No valid edge detected.
-    # NIFTY: 42.1% WR break-even is 42.9%; BANKNIFTY: 36.7% WR. SHORT signals especially weak.
-    return
-
-    # BANKNIFTY + NIFTY: skip opening volatility (09:20-09:30).
-    effective_entry_start = dtime(9, 35) if cfg.code == "BANKNIFTY" else S3_ENTRY_START
-
-    # Prev-day direction filter: LONG signals only on bullish prior day, SHORT on bearish.
-    prev_day_bias: str | None = None
-    if prev_ohlc:
-        if prev_ohlc["close"] > prev_ohlc["open"]:
-            prev_day_bias = "LONG"
-        elif prev_ohlc["close"] < prev_ohlc["open"]:
-            prev_day_bias = "SHORT"
+    """S3 BLR breakout — mirrors live breakout_engine (no ADX / prev-day filters)."""
+    del day, prev_ohlc  # kept for runner signature compatibility
 
     prev_close = session_candles[0]["open"]
 
     def on_bar(closed: list[dict[str, float]], bar_close: datetime, _trades: int) -> SimPosition | None:
         nonlocal prev_close
-        if bar_close.time() < effective_entry_start:
-            prev_close = float(closed[-1]["close"])
-            return None
         candle = closed[-1]
         close = float(candle["close"])
         direction, reason = detect_breakout_signal(
@@ -456,15 +441,6 @@ def backtest_strategy_3(
         if direction is None or not reason:
             return None
 
-        # ADX filter: skip on choppy/ranging days (ADX < 20).
-        adx_val = s8_adx(closed)
-        if adx_val is not None and adx_val < 20.0:
-            return None
-
-        # Prev-day direction filter: skip signals that go against prior-day momentum.
-        if prev_day_bias is not None and direction != prev_day_bias:
-            return None
-
         entry = close
         sl, tp1, _ = trade_levels(cfg.code, direction, entry, blr.mid, blr.green, blr.red, blr.gap_regime)
         return SimPosition(
@@ -473,7 +449,7 @@ def backtest_strategy_3(
             sl_price=sl,
             tp1_price=tp1,
             entry_at=bar_close.isoformat(),
-            entry_reason=f"{reason} | ADX={adx_val:.1f}" if adx_val else reason,
+            entry_reason=reason,
         )
 
     _simulate_day_bars(

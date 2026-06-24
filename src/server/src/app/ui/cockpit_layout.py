@@ -19,18 +19,22 @@ def render_top_status_bar(
     heartbeat = cache_manager.get_json(cache_manager.ENGINE_HEARTBEAT_KEY)
     smc_hb = cache_manager.get_json(cache_manager.SMC_CRT_HEARTBEAT_KEY)
     bo_hb = cache_manager.get_json(cache_manager.BREAKOUT_HEARTBEAT_KEY)
+    gamma_hb = cache_manager.get_json(cache_manager.GAMMA_HEARTBEAT_KEY)
     system_bias = cache_manager.get_system_bias()
 
     s1_mode = "PAPER" if (heartbeat or {}).get("paper_trading") else "LIVE"
     s1_detail = s1_mode if heartbeat else "offline"
     smc_detail = f"→{smc_hb.get('session_end_ist', '15:30')}" if smc_hb else "offline"
     bo_detail = f"→{bo_hb.get('session_end_ist', '15:30')}" if bo_hb else "offline"
+    gamma_detail = "expiry" if (gamma_hb or {}).get("expiry_today") else "idle"
+    gamma_detail = gamma_detail if gamma_hb else "offline"
 
     pills = " ".join(
         [
             status_pill("S1 OI", bool(heartbeat), s1_detail),
             status_pill("S2 SMC", bool(smc_hb), smc_detail),
             status_pill("S3 BLR", bool(bo_hb), bo_detail),
+            status_pill("Gamma", bool(gamma_hb), gamma_detail),
             f'<span class="ak07-pill">AI {system_bias}</span>',
         ]
     )

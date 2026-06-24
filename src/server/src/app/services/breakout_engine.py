@@ -65,8 +65,9 @@ BAND_HALF_PCT: Final[dict[str, float]] = {
 }
 GAP_EXTRA_PCT: Final[float] = float(os.environ.get("BREAKOUT_GAP_EXTRA_PCT", "0.0"))
 FLAT_GAP_PCT: Final[float] = 0.10
-GREEN_OFFSET: Final[float] = 0.0
-RED_OFFSET: Final[float] = 0.0
+# Pine BLR line tweaks (index points). RED=-3 lowers red line; GREEN=+3 raises green.
+GREEN_OFFSET: Final[float] = float(os.environ.get("BREAKOUT_GREEN_OFFSET", "0"))
+RED_OFFSET: Final[float] = float(os.environ.get("BREAKOUT_RED_OFFSET", "0"))
 
 
 def _parse_ist_time(env_key: str, default_hour: int, default_minute: int) -> dtime:

@@ -1,0 +1,80 @@
+[
+  {
+    "label": "baseline (0/0)",
+    "green_offset": "0",
+    "red_offset": "0",
+    "total_trades": 2543,
+    "win_rate_pct": 28.5,
+    "total_pts": -26678.76,
+    "by_index": {
+      "NIFTY": {
+        "trades": 611,
+        "wins": 264,
+        "pts": 21.410000000001126
+      },
+      "BANKNIFTY": {
+        "trades": 1013,
+        "wins": 373,
+        "pts": -6522.259999999998
+      },
+      "SENSEX": {
+        "trades": 919,
+        "wins": 87,
+        "pts": -20177.909999999996
+      }
+    },
+    "json_out": "C:\\Users\\pavan\\arun\\volume-order-block\\backtest_s3_baseline.json"
+  },
+  {
+    "label": "BLR red -3",
+    "green_offset": "0",
+    "red_offset": "-3",
+    "total_trades": 2526,
+    "win_rate_pct": 28.5,
+    "total_pts": -27097.4,
+    "by_index": {
+      "NIFTY": {
+        "trades": 596,
+        "wins": 266,
+        "pts": 1018.9600000000002
+      },
+      "SENSEX": {
+        "trades": 916,
+        "wins": 83,
+        "pts": -21440.54999999999
+      },
+      "BANKNIFTY": {
+        "trades": 1014,
+        "wins": 372,
+        "pts": -6675.809999999999
+      }
+    },
+    "json_out": "C:\\Users\\pavan\\arun\\volume-order-block\\backtest_s3_blr.json"
+  },
+  {
+    "label": "BLR green +3 / red -3",
+    "green_offset": "3",
+    "red_offset": "-3",
+    "total_trades": 2496,
+    "win_rate_pct": 28.4,
+    "total_pts": -27502.74,
+    "by_index": {
+      "NIFTY": {
+        "trades": 576,
+        "wins": 260,
+        "pts": 1202.6599999999999
+      },
+      "BANKNIFTY": {
+        "trades": 1005,
+        "wins": 367,
+        "pts": -7254.819999999998
+      },
+      "SENSEX": {
+        "trades": 915,
+        "wins": 82,
+        "pts": -21450.579999999987
+      }
+    },
+    "json_out": "C:\\Users\\pavan\\arun\\volume-order-block\\backtest_s3_blr.json"
+  }
+]

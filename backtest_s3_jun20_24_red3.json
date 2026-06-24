@@ -1,0 +1,76 @@
+{
+  "summary": {
+    "start": "2026-06-20",
+    "end": "2026-06-24",
+    "total_trades": 4,
+    "wins": 1,
+    "losses": 2,
+    "breakeven": 1,
+    "total_pts": -75.86,
+    "win_rate_pct": 25.0,
+    "by_strategy": {
+      "Strategy 3 \u2014 BLR Breakout": {
+        "trades": 4,
+        "wins": 1,
+        "losses": 2,
+        "pts": -75.85999999999997
+      }
+    },
+    "notes": [],
+    "skipped_strategies": []
+  },
+  "trades": [
+    {
+      "strategy": "Strategy 3 \u2014 BLR Breakout",
+      "symbol": "BANKNIFTY",
+      "direction": "SHORT",
+      "entry_price": 57806.0,
+      "exit_price": 57880.383625,
+      "pnl_points": -74.38,
+      "exit_reason": "SL hit",
+      "entry_at": "2026-06-22T09:20:00+05:30",
+      "exit_at": "2026-06-22T10:35:00+05:30",
+      "entry_reason": "red breakdown (Review SHORT)",
+      "result": "LOSS"
+    },
+    {
+      "strategy": "Strategy 3 \u2014 BLR Breakout",
+      "symbol": "SENSEX",
+      "direction": "LONG",
+      "entry_price": 77275.77,
+      "exit_price": 77165.745062,
+      "pnl_points": -110.02,
+      "exit_reason": "SL hit",
+      "entry_at": "2026-06-22T10:55:00+05:30",
+      "exit_at": "2026-06-22T12:15:00+05:30",
+      "entry_reason": "green breakout (Review LONG)",
+      "result": "LOSS"
+    },
+    {
+      "strategy": "Strategy 3 \u2014 BLR Breakout",
+      "symbol": "BANKNIFTY",
+      "direction": "SHORT",
+      "entry_price": 57762.6,
+      "exit_price": 57654.06234375,
+      "pnl_points": 108.54,
+      "exit_reason": "TP1 booked (1R)",
+      "entry_at": "2026-06-23T11:45:00+05:30",
+      "exit_at": "2026-06-23T11:50:00+05:30",
+      "entry_reason": "red breakdown (Review SHORT)",
+      "result": "WIN"
+    },
+    {
+      "strategy": "Strategy 3 \u2014 BLR Breakout",
+      "symbol": "SENSEX",
+      "direction": "SHORT",
+      "entry_price": 76848.89,
+      "exit_price": 76848.89,
+      "pnl_points": 0.0,
+      "exit_reason": "Cost SL (breakeven)",
+      "entry_at": "2026-06-23T11:50:00+05:30",
+      "exit_at": "2026-06-23T12:00:00+05:30",
+      "entry_reason": "red breakdown (Review SHORT)",
+      "result": "BREAKEVEN"
+    }
+  ]
+}

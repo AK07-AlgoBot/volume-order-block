@@ -263,6 +263,75 @@ def render_choch_strategy_panel(index_code: str) -> None:
                 st.markdown(f'<p class="ak07-signal-line">{line}</p>', unsafe_allow_html=True)
 
 
+def render_gamma_expiry_panel(index_code: str) -> None:
+    """Gamma Expiry Observer — paper hero-zero signals on expiry days only."""
+    st.markdown("---")
+    st.markdown("#### Gamma Expiry Observer (paper · observer only)")
+
+    gamma = cache_manager.get_json(cache_manager.GAMMA_STATE_KEY)
+    hb = cache_manager.get_json(cache_manager.GAMMA_HEARTBEAT_KEY)
+
+    if not gamma and not hb:
+        st.caption("Gamma observer offline — start `gamma_expiry_engine` service.")
+        return
+
+    if hb:
+        exp_today = hb.get("expiry_today") or []
+        mode = "PAPER · no orders"
+        st.caption(
+            f"Heartbeat {str(hb.get('at', ''))[:19]} · {mode} · "
+            f"expiry today: {', '.join(exp_today) if exp_today else 'none'}"
+        )
+
+    indices: dict = (gamma or {}).get("indices") or {}
+    idx = indices.get(index_code) or {}
+
+    if not idx.get("is_expiry"):
+        rule = {"NIFTY": "Tue weekly", "BANKNIFTY": "last Thu monthly", "SENSEX": "Thu weekly"}.get(
+            index_code, ""
+        )
+        st.info(f"Not an expiry session for {index_code} ({rule}). Observer idle.")
+        bt = (gamma or {}).get("backtest_refined") or cache_manager.get_json(cache_manager.GAMMA_BACKTEST_KEY)
+        if bt and isinstance(bt, dict) and bt.get("refined_config"):
+            rc = bt["refined_config"]
+            st.caption(
+                f"Backtest refined: pin≤{rc.get('pin_distance_pct')}% · "
+                f"IDR≥{rc.get('min_idr_pct')}% · score≥{rc.get('min_blast_score', 55)}"
+            )
+        return
+
+    c1, c2, c3, c4, c5, c6 = st.columns(6)
+    c1.metric("Spot", fmt(float(idx["spot"])) if idx.get("spot") is not None else "—")
+    c2.metric("Pin strike", str(idx.get("pin_strike") or "—"))
+    c3.metric("Pin dist", f"{idx.get('pin_distance_pct', 0):.2f}%")
+    c4.metric("Blast score", str(idx.get("blast_score") or "—"))
+    c5.metric("Regime", str(idx.get("regime") or "—"))
+    c6.metric("Signal", str(idx.get("observer_signal") or "—"))
+
+    st.markdown(f"**Expiry:** {idx.get('expiry_date', '—')} · {idx.get('expiry_rule', '')}")
+    st.markdown(f"**Call wall / Put floor:** {idx.get('call_wall')} / {idx.get('put_floor')}")
+    st.markdown(f"**IDR:** {idx.get('idr_pct', 0):.2f}% · **PCR:** {idx.get('pcr_oi', '—')} · **Gamma flip:** {idx.get('gamma_flip') or '—'}")
+
+    blast_on = idx.get("blast_window_active")
+    if blast_on:
+        st.success(f"Blast window ACTIVE ({idx.get('blast_window', '13:30-15:00')})")
+    else:
+        st.warning(f"Pre/post blast window ({idx.get('blast_window', '13:30-15:00 IST')})")
+
+    st.markdown(f'<p class="ak07-muted-line">{idx.get("setup_label") or idx.get("observer_detail") or "—"}</p>', unsafe_allow_html=True)
+
+    hero = idx.get("paper_hero")
+    if hero:
+        st.markdown("##### Paper hero signal (not executed)")
+        st.json(hero)
+
+    signals = idx.get("signals") or []
+    if signals:
+        with st.expander("Gamma observer log (paper)", expanded=True):
+            for line in reversed(signals):
+                st.markdown(f'<p class="ak07-signal-line">{line}</p>', unsafe_allow_html=True)
+
+
 def render_breakout_strategy_panel(index_code: str) -> None:
     """Strategy Type 3 — BLR Breakout block."""
     st.markdown("---")
@@ -476,6 +545,7 @@ for tab, (code, cfg) in zip(tabs, INDEX_CONFIGS.items()):
         render_breakout_strategy_panel(code)
         render_s7_strategy_panel(code)
         render_choch_strategy_panel(code)
+        render_gamma_expiry_panel(code)
 
 if auto_refresh:
     time.sleep(REFRESH_SECONDS)
