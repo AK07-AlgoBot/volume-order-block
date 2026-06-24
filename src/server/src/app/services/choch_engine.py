@@ -219,21 +219,17 @@ class StructureState:
         self.bos_level = 0.0
 
 
-def update_structure(state: StructureState, closed: list[dict], lb: int = SWING_LOOKBACK) -> None:
-    needed = 2 * lb + 1
-    if len(closed) < needed:
-        return
-    idx = -(lb + 1)
-    bar = closed[idx]
+def _apply_swing_at(state: StructureState, closed: list[dict], i: int, lb: int) -> None:
+    bar = closed[i]
     h = float(bar["high"])
     lo = float(bar["low"])
     is_sh = (
-        all(h > float(closed[idx - j]["high"]) for j in range(1, lb + 1)) and
-        all(h >= float(closed[idx + j]["high"]) for j in range(1, lb + 1))
+        all(h > float(closed[i - j]["high"]) for j in range(1, lb + 1)) and
+        all(h >= float(closed[i + j]["high"]) for j in range(1, lb + 1))
     )
     is_sl = (
-        all(lo < float(closed[idx - j]["low"]) for j in range(1, lb + 1)) and
-        all(lo <= float(closed[idx + j]["low"]) for j in range(1, lb + 1))
+        all(lo < float(closed[i - j]["low"]) for j in range(1, lb + 1)) and
+        all(lo <= float(closed[i + j]["low"]) for j in range(1, lb + 1))
     )
     if is_sh:
         state.prev_sh = state.last_sh
@@ -241,6 +237,9 @@ def update_structure(state: StructureState, closed: list[dict], lb: int = SWING_
     if is_sl:
         state.prev_sl = state.last_sl
         state.last_sl = lo
+
+
+def _refresh_structure_label(state: StructureState) -> None:
     if state.last_sh and state.prev_sh and state.last_sl and state.prev_sl:
         hh = state.last_sh > state.prev_sh
         hl = state.last_sl > state.prev_sl
@@ -248,6 +247,33 @@ def update_structure(state: StructureState, closed: list[dict], lb: int = SWING_
             state.structure = "BULL"
         elif (not hh) and (not hl):
             state.structure = "BEAR"
+
+
+def update_structure(state: StructureState, closed: list[dict], lb: int = SWING_LOOKBACK) -> None:
+    """Backtest path: one newly confirmable bar per call (matches bar-by-bar replay)."""
+    needed = 2 * lb + 1
+    if len(closed) < needed:
+        return
+    _apply_swing_at(state, closed, len(closed) - lb - 1, lb)
+    _refresh_structure_label(state)
+
+
+def catch_up_structure(
+    state: StructureState,
+    closed: list[dict],
+    upto: int,
+    lb: int = SWING_LOOKBACK,
+) -> int:
+    """Live path: scan all confirmable bars from *upto* (for mid-session restarts)."""
+    needed = 2 * lb + 1
+    if len(closed) < needed:
+        return upto
+    end = len(closed) - lb
+    start = max(lb, upto)
+    for i in range(start, end):
+        _apply_swing_at(state, closed, i, lb)
+    _refresh_structure_label(state)
+    return end
 
 
 def detect_choch(state: StructureState, closed: list[dict]) -> tuple[str | None, float]:
@@ -358,6 +384,7 @@ class CHOCHIndexState:
     setup_label: str = "Waiting for setup..."
     signal_log: list[str] = field(default_factory=list)
     candles: list[dict] = field(default_factory=list)
+    struct_upto: int = 0  # next confirmable bar index for catch_up_structure
 
 
 # ── market client ─────────────────────────────────────────────────────────────
@@ -513,6 +540,7 @@ class CHOCHEngine:
                 state.structure.reset()
                 state.trades_today = 0
                 state.daily_pnl_inr = 0.0
+                state.struct_upto = SWING_LOOKBACK
                 setattr(state, "_last_reset_day", today)
 
         # Bars closed at or before now
@@ -521,13 +549,15 @@ class CHOCHEngine:
         if not closed:
             return
 
+        # Scan all confirmable swings (handles mid-session restarts; backtest uses update_structure)
+        if state.struct_upto <= 0:
+            state.struct_upto = SWING_LOOKBACK
+        state.struct_upto = catch_up_structure(state.structure, closed, state.struct_upto)
+
         # Manage open position
         if state.position:
             self._manage_position(state, closed, now)
             return
-
-        # Update market structure
-        update_structure(state.structure, closed)
 
         # Entry gate: time window
         t = now.time()
