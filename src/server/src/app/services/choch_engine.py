@@ -276,6 +276,39 @@ def catch_up_structure(
     return end
 
 
+def structural_stop_price(
+    direction: str,
+    structure: StructureState,
+    atr_buffer: float,
+) -> float | None:
+    """Stop anchored to the latest confirmed structural swing (+ ATR buffer)."""
+    if direction == "LONG":
+        if structure.last_sl is None:
+            return None
+        return structure.last_sl - atr_buffer
+    if structure.last_sh is None:
+        return None
+    return structure.last_sh + atr_buffer
+
+
+def ratchet_stop(
+    direction: str,
+    current_sl: float,
+    entry: float,
+    candidate: float | None,
+) -> float:
+    """Tighten stop only — never widen. LONG ratchets up; SHORT ratchets down."""
+    if candidate is None:
+        return current_sl
+    if direction == "LONG":
+        if candidate >= entry or candidate <= current_sl:
+            return current_sl
+        return candidate
+    if candidate <= entry or candidate >= current_sl:
+        return current_sl
+    return candidate
+
+
 def detect_choch(state: StructureState, closed: list[dict]) -> tuple[str | None, float]:
     """Two-step CHOCH + BOS detection.
 
@@ -689,21 +722,37 @@ class CHOCHEngine:
             self._exit(state, spot, "INTRADAY_SQUARE_OFF_1515", now)
             return
 
-        # Trail SL: ratchet once price moves 1R in our favour
+        # Ratchet SL to latest confirmed structural swing (last_sl / last_sh)
+        atr_val = _atr(closed)
+        if atr_val is not None:
+            buf = atr_val * SL_ATR_BUFFER
+            candidate = structural_stop_price(pos.direction, state.structure, buf)
+            new_sl = ratchet_stop(pos.direction, pos.sl_price, pos.entry_price, candidate)
+            if new_sl != pos.sl_price:
+                swing = state.structure.last_sl if pos.direction == "LONG" else state.structure.last_sh
+                logger.info(
+                    "[%s] CHOCH SL ratcheted %.2f → %.2f (swing=%.2f)",
+                    state.config.code, pos.sl_price, new_sl, swing or 0.0,
+                )
+                pos.sl_price = new_sl
+                pos.trail_sl = new_sl
+                state.setup_label = f"CHOCH {pos.direction} @ {pos.entry_price:.0f} | SL {new_sl:.0f}"
+
+        # Extra bar trail once price moves 1R in our favour
         profit_pts = (spot - pos.entry_price) if pos.direction == "LONG" else (pos.entry_price - spot)
         if profit_pts >= pos.risk_pts and closed:
             if pos.direction == "LONG":
                 swing_low = min(float(c["low"]) for c in closed[-3:])
                 new_trail = swing_low - pos.risk_pts * 0.2
-                if new_trail > pos.trail_sl:
+                if new_trail > pos.sl_price:
+                    pos.sl_price = new_trail
                     pos.trail_sl = new_trail
-                    pos.sl_price = pos.trail_sl
             else:
                 swing_high = max(float(c["high"]) for c in closed[-3:])
                 new_trail = swing_high + pos.risk_pts * 0.2
-                if new_trail < pos.trail_sl:
+                if new_trail < pos.sl_price:
+                    pos.sl_price = new_trail
                     pos.trail_sl = new_trail
-                    pos.sl_price = pos.trail_sl
 
         if pos.direction == "LONG":
             if spot <= pos.sl_price:

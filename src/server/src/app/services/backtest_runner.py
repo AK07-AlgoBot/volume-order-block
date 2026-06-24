@@ -43,6 +43,8 @@ from app.services.choch_engine import (
     STRATEGY_LABEL as S8_LABEL,
     StructureState,
     update_structure,
+    structural_stop_price,
+    ratchet_stop,
     detect_choch,
     detect_bos_trend,
     _atr as s8_atr,
@@ -785,6 +787,11 @@ def backtest_strategy_8_choch(
         closed = session_candles[: idx + 1]
 
         if pos is not None:
+            update_structure(state, closed)
+            atr_val = s8_atr(closed)
+            if atr_val is not None:
+                candidate = structural_stop_price(pos.direction, state, atr_val * SL_BUF_MULT)
+                pos.sl_price = ratchet_stop(pos.direction, pos.sl_price, pos.entry_price, candidate)
             hit = _exit_on_bar(pos, candle, square_off=S8_SQUARE_OFF, bar_close=bar_close)
             if hit:
                 _finalize_trade(
