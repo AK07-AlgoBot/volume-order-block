@@ -49,6 +49,7 @@ from zoneinfo import ZoneInfo
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from app.services import cache_manager, performance_store, telegram_notifier
+from app.services.choch_signal_log import log_rejected_signal
 from app.services.backtest_data import parse_candle_ts
 from app.services.upstox_engine import (
     INDEX_CONFIGS,
@@ -251,7 +252,8 @@ def _apply_swing_at(state: StructureState, closed: list[dict], i: int, lb: int) 
         state.last_sl = lo
 
 
-def _refresh_structure_label(state: StructureState) -> None:
+def _refresh_structure_label_strict(state: StructureState) -> None:
+    """Original rule: requires prev SH and prev SL before BULL/BEAR label."""
     if state.last_sh and state.prev_sh and state.last_sl and state.prev_sl:
         hh = state.last_sh > state.prev_sh
         hl = state.last_sl > state.prev_sl
@@ -259,6 +261,61 @@ def _refresh_structure_label(state: StructureState) -> None:
             state.structure = "BULL"
         elif (not hh) and (not hl):
             state.structure = "BEAR"
+        else:
+            state.structure = "NEUTRAL"
+    else:
+        state.structure = "NEUTRAL"
+
+
+def _refresh_structure_label_relaxed(state: StructureState) -> None:
+    """Relaxed: higher-high can label BULL before second swing low confirms."""
+    hh = bool(
+        state.last_sh is not None
+        and state.prev_sh is not None
+        and state.last_sh > state.prev_sh
+    )
+    lh = bool(
+        state.last_sh is not None
+        and state.prev_sh is not None
+        and state.last_sh < state.prev_sh
+    )
+    hl = bool(
+        state.last_sl is not None
+        and state.prev_sl is not None
+        and state.last_sl > state.prev_sl
+    )
+    ll = bool(
+        state.last_sl is not None
+        and state.prev_sl is not None
+        and state.last_sl < state.prev_sl
+    )
+
+    if hh and not ll:
+        state.structure = "BULL"
+    elif ll and not hh:
+        state.structure = "BEAR"
+    elif hh and hl:
+        state.structure = "BULL"
+    elif lh and ll:
+        state.structure = "BEAR"
+    else:
+        state.structure = "NEUTRAL"
+
+
+def _relaxed_structure_enabled() -> bool:
+    return os.environ.get("CHOCH_RELAXED_STRUCTURE", "1").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
+def _refresh_structure_label(state: StructureState) -> None:
+    if _relaxed_structure_enabled():
+        _refresh_structure_label_relaxed(state)
+    else:
+        _refresh_structure_label_strict(state)
 
 
 def update_structure(state: StructureState, closed: list[dict], lb: int = SWING_LOOKBACK) -> None:
@@ -286,6 +343,56 @@ def catch_up_structure(
         _apply_swing_at(state, closed, i, lb)
     _refresh_structure_label(state)
     return end
+
+
+def _refresh_setup_label(state: "CHOCHIndexState", now: datetime, closed: list[dict]) -> None:
+    """Live dashboard caption — replaces static 'Waiting for setup...'."""
+    if state.position:
+        return
+    struct = state.structure
+    if struct.choch_pending:
+        state.setup_label = (
+            f"CHOCH {struct.choch_pending} pending — need BOS @ {struct.bos_level:.0f}"
+        )
+        return
+    t = now.time()
+    if t < ENTRY_START:
+        state.setup_label = f"Pre-entry — structure {struct.structure} (entries from 09:30)"
+        return
+    if t > NO_ENTRY_AFTER:
+        state.setup_label = f"Entry window closed — structure {struct.structure}"
+        return
+    if struct.structure == "BULL":
+        state.setup_label = (
+            f"BULL · SH {struct.last_sh:.0f} SL {struct.last_sl:.0f} "
+            f"— SHORT CHOCH on 5m close < {struct.last_sl:.0f}, "
+            f"LONG BOS on break > {struct.last_sh:.0f}"
+        )
+    elif struct.structure == "BEAR":
+        state.setup_label = (
+            f"BEAR · SH {struct.last_sh:.0f} SL {struct.last_sl:.0f} "
+            f"— LONG CHOCH on close > {struct.last_sh:.0f}, "
+            f"SHORT BOS on break < {struct.last_sl:.0f}"
+        )
+    elif struct.last_sh is not None and struct.last_sl is not None:
+        missing = []
+        if struct.prev_sh is None:
+            missing.append("2nd swing high")
+        if struct.prev_sl is None:
+            missing.append("2nd swing low")
+        if missing:
+            state.setup_label = (
+                f"NEUTRAL — waiting for {', '.join(missing)} · "
+                f"SH {struct.last_sh:.0f} SL {struct.last_sl:.0f}"
+            )
+        else:
+            state.setup_label = (
+                f"NEUTRAL — mixed swings · SH {struct.last_sh:.0f} SL {struct.last_sl:.0f}"
+            )
+    elif closed:
+        state.setup_label = f"Building swings ({len(closed)} closed 5m bars · need 7+)"
+    else:
+        state.setup_label = "Waiting for 5m candles..."
 
 
 def structural_stop_price(
@@ -429,7 +536,8 @@ class CHOCHIndexState:
     signal_log: list[str] = field(default_factory=list)
     candles: list[dict] = field(default_factory=list)
     struct_upto: int = 0  # next confirmable bar index for catch_up_structure
-    last_entry_fingerprint: str = ""  # dedup guard across container restarts
+    last_entry_fingerprint: str = ""
+    rejected_signals: list[dict[str, Any]] = field(default_factory=list)  # dedup guard across container restarts
 
 
 def _entry_fingerprint(signal_type: str, direction: str, signal_level: float) -> str:
@@ -633,6 +741,9 @@ class CHOCHEngine:
                 signals = raw.get("signals")
                 if isinstance(signals, list):
                     state.signal_log = [str(s) for s in signals[-20:]]
+                rejected = raw.get("rejected_signals")
+                if isinstance(rejected, list):
+                    state.rejected_signals = [r for r in rejected if isinstance(r, dict)][-30:]
 
                 struct_raw = raw.get("structure") or raw.get("structure_state")
                 if isinstance(struct_raw, dict):
@@ -689,6 +800,7 @@ class CHOCHEngine:
                 "setup_label": s.setup_label,
                 "last_entry_fingerprint": s.last_entry_fingerprint,
                 "signals": s.signal_log[-20:],
+                "rejected_signals": s.rejected_signals[-20:],
                 "structure": _structure_to_dict(s.structure),
             }
             if s.position:
@@ -765,6 +877,7 @@ class CHOCHEngine:
         if state.struct_upto <= 0:
             state.struct_upto = SWING_LOOKBACK
         state.struct_upto = catch_up_structure(state.structure, closed, state.struct_upto)
+        _refresh_setup_label(state, now, closed)
 
         # Manage open position
         if state.position:
@@ -787,15 +900,33 @@ class CHOCHEngine:
         if direction is None:
             return
 
+        spot_val = spot if spot else float(closed[-1]["close"])
+
         fp = _entry_fingerprint(signal_type, direction, signal_level)
         if fp == state.last_entry_fingerprint:
+            self._reject_signal(
+                state,
+                now,
+                signal_type,
+                direction,
+                signal_level,
+                spot_val,
+                "duplicate fingerprint (already processed this BOS level)",
+            )
             return
 
         # ADX filter
         adx_val = _adx(closed)
         if adx_val is None or adx_val < ADX_MIN:
-            state.signal_log.append(
-                f"{signal_type} {direction} @ {float(closed[-1]['close']):.0f} — ADX {adx_val or 0:.1f} < {ADX_MIN}"
+            self._reject_signal(
+                state,
+                now,
+                signal_type,
+                direction,
+                signal_level,
+                spot_val,
+                f"ADX {adx_val or 0:.1f} < {ADX_MIN}",
+                extra={"adx": adx_val},
             )
             return
 
@@ -803,22 +934,48 @@ class CHOCHEngine:
         htf = _htf_trend(closed, now)
         if htf is not None:
             if direction == "LONG" and htf == "BEAR":
-                state.signal_log.append(f"{signal_type} LONG filtered (1H trend=BEAR)")
+                self._reject_signal(
+                    state,
+                    now,
+                    signal_type,
+                    direction,
+                    signal_level,
+                    spot_val,
+                    "1H trend BEAR blocks LONG",
+                    extra={"htf": htf},
+                )
                 return
             if direction == "SHORT" and htf == "BULL":
-                state.signal_log.append(f"{signal_type} SHORT filtered (1H trend=BULL)")
+                self._reject_signal(
+                    state,
+                    now,
+                    signal_type,
+                    direction,
+                    signal_level,
+                    spot_val,
+                    "1H trend BULL blocks SHORT",
+                    extra={"htf": htf},
+                )
                 return
 
         # Sizing
         atr_val = _atr(closed)
         if atr_val is None:
+            self._reject_signal(
+                state,
+                now,
+                signal_type,
+                direction,
+                signal_level,
+                spot_val,
+                "ATR unavailable",
+            )
             return
 
-        entry = spot if spot else float(closed[-1]["close"])
+        entry = spot_val
         buf = atr_val * SL_ATR_BUFFER
         struct = state.structure
         if signal_type == "BOS_TREND":
-            # Trend BOS: SL at the opposite structural swing
             if direction == "LONG":
                 sl_anchor = struct.last_sl if struct.last_sl is not None else signal_level * 0.998
                 sl = sl_anchor - buf
@@ -826,19 +983,48 @@ class CHOCHEngine:
                 sl_anchor = struct.last_sh if struct.last_sh is not None else signal_level * 1.002
                 sl = sl_anchor + buf
         else:
-            # CHOCH+BOS: SL just beyond the confirmed BOS level
             if direction == "LONG":
                 sl = signal_level - buf
             else:
                 sl = signal_level + buf
 
         if direction == "LONG" and sl >= entry:
+            self._reject_signal(
+                state,
+                now,
+                signal_type,
+                direction,
+                signal_level,
+                spot_val,
+                f"degenerate SL {sl:.1f} >= entry {entry:.1f}",
+                extra={"sl": sl, "entry": entry},
+            )
             return
         if direction == "SHORT" and sl <= entry:
+            self._reject_signal(
+                state,
+                now,
+                signal_type,
+                direction,
+                signal_level,
+                spot_val,
+                f"degenerate SL {sl:.1f} <= entry {entry:.1f}",
+                extra={"sl": sl, "entry": entry},
+            )
             return
 
         risk_pts = abs(entry - sl)
         if risk_pts < 1.0:
+            self._reject_signal(
+                state,
+                now,
+                signal_type,
+                direction,
+                signal_level,
+                spot_val,
+                f"risk {risk_pts:.2f} pts too tight",
+                extra={"risk_pts": risk_pts},
+            )
             return
 
         tp = entry + risk_pts * TP_RR if direction == "LONG" else entry - risk_pts * TP_RR
@@ -850,6 +1036,15 @@ class CHOCHEngine:
         # Resolve option contract
         contract = self.client.resolve_option(state.config, entry, direction)
         if not contract and not (PAPER_TRADING or MOCK_MODE):
+            self._reject_signal(
+                state,
+                now,
+                signal_type,
+                direction,
+                signal_level,
+                spot_val,
+                "no option contract resolved",
+            )
             logger.warning("[%s] %s no option found at %s", state.config.code, signal_type, entry)
             return
 
@@ -857,9 +1052,19 @@ class CHOCHEngine:
         if not PAPER_TRADING and not MOCK_MODE and contract:
             ok = self.client.place_entry(contract["instrument_key"], lots * state.config.lot_size)
             if not ok:
+                self._reject_signal(
+                    state,
+                    now,
+                    signal_type,
+                    direction,
+                    signal_level,
+                    spot_val,
+                    "broker entry order failed",
+                )
                 logger.error("[%s] CHOCH entry order failed", state.config.code)
                 return
 
+        state.last_entry_fingerprint = fp
         reason = (
             f"{signal_type} {direction} | struct={state.structure.structure} "
             f"| lvl={signal_level:.1f} | ADX={adx_val:.1f} | 1H={htf or 'N/A'}"
@@ -880,7 +1085,6 @@ class CHOCHEngine:
             lot_size=state.config.lot_size,
         )
         state.trades_today += 1
-        state.last_entry_fingerprint = fp
         state.setup_label = f"CHOCH {direction} @ {entry:.0f}"
         state.signal_log.append(reason)
         logger.info("[%s] %s", state.config.code, reason)
@@ -896,6 +1100,34 @@ class CHOCHEngine:
             timestamp=now.strftime("%Y-%m-%d %H:%M:%S IST"),
             candles=closed,
         )
+
+    def _reject_signal(
+        self,
+        state: CHOCHIndexState,
+        now: datetime,
+        signal_type: str,
+        direction: str,
+        signal_level: float,
+        spot: float,
+        reason: str,
+        extra: dict[str, Any] | None = None,
+    ) -> None:
+        msg = f"{signal_type} {direction} @ {spot:.0f} — {reason}"
+        state.signal_log.append(msg)
+        row = log_rejected_signal(
+            index_code=state.config.code,
+            signal_type=signal_type,
+            direction=direction,
+            signal_level=signal_level,
+            spot=spot,
+            reason=reason,
+            structure=state.structure.structure,
+            now=now,
+            extra=extra,
+        )
+        state.rejected_signals.append(row)
+        if len(state.rejected_signals) > 30:
+            state.rejected_signals = state.rejected_signals[-30:]
 
     def _manage_position(self, state: CHOCHIndexState, closed: list[dict], now: datetime) -> None:
         pos = state.position
@@ -1040,6 +1272,7 @@ class CHOCHEngine:
                 "trades_today": s.trades_today,
                 "setup_label": s.setup_label,
                 "signals": s.signal_log[-5:],
+                "rejected_signals": s.rejected_signals[-10:],
                 "daily_pnl_inr": round(s.daily_pnl_inr, 2),
                 "struct_upto": s.struct_upto,
                 "last_entry_fingerprint": s.last_entry_fingerprint,

@@ -234,6 +234,14 @@ def render_choch_strategy_panel(index_code: str) -> None:
     c4.metric("Last SL", fmt(idx.get("last_sl")))
     c5.metric("Trades Today", f"{idx.get('trades_today', 0)}/2")
 
+    ss = idx.get("structure_state") or {}
+    if ss.get("prev_sh") is not None or ss.get("prev_sl") is not None:
+        st.caption(
+            f"Prev SH {fmt(ss.get('prev_sh'))} · Prev SL {fmt(ss.get('prev_sl'))}"
+            + (f" · CHOCH pending {ss.get('choch_pending')} @ {fmt(ss.get('bos_level'))}"
+               if ss.get("choch_pending") else "")
+        )
+
     setup = str(idx.get("setup_label") or "\u2014")
     st.markdown(f'<p class="ak07-muted-line">{setup}</p>', unsafe_allow_html=True)
 
@@ -261,6 +269,21 @@ def render_choch_strategy_panel(index_code: str) -> None:
         with st.expander("Recent CHOCH signals", expanded=False):
             for line in reversed(signals):
                 st.markdown(f'<p class="ak07-signal-line">{line}</p>', unsafe_allow_html=True)
+
+    rejected = idx.get("rejected_signals") or []
+    if rejected:
+        with st.expander("Rejected CHOCH signals (triggered but not traded)", expanded=False):
+            for row in reversed(rejected):
+                if not isinstance(row, dict):
+                    continue
+                at = str(row.get("at", ""))[:16].replace("T", " ")
+                st.markdown(
+                    f'<p class="ak07-signal-line">'
+                    f'{at} · {row.get("signal_type", "?")} {row.get("direction", "?")} '
+                    f'@ {fmt(row.get("signal_level"))} · {row.get("reason", "?")}'
+                    f'</p>',
+                    unsafe_allow_html=True,
+                )
 
 
 def render_gamma_expiry_panel(index_code: str) -> None:
