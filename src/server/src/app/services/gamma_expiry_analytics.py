@@ -184,6 +184,74 @@ def observer_signal_from_snapshot(
     return "BLAST_WATCH", f"Pin {pin} · score {blast_score} · need directional break", None
 
 
+def _ltp_from_chain(chain_rows: list[dict[str, Any]], strike: int, option_type: str) -> float | None:
+    for row in chain_rows:
+        try:
+            row_strike = int(float(row.get("strike_price", 0)))
+        except (TypeError, ValueError):
+            continue
+        if row_strike != strike:
+            continue
+        leg = row.get("call_options") if option_type == "CE" else row.get("put_options")
+        ltp = ((leg or {}).get("market_data") or {}).get("ltp")
+        if ltp is not None:
+            return float(ltp)
+    return None
+
+
+def build_paper_hero_plan(
+    *,
+    cfg: IndexConfig,
+    spot: float,
+    pin: int,
+    hero: dict[str, Any],
+    chain_rows: list[dict[str, Any]],
+    expiry_date: str,
+    now: datetime,
+    params: GammaConfig,
+    blast_score: int,
+    regime: str,
+    signal: str,
+    detail: str,
+) -> dict[str, Any]:
+    """Enrich paper hero with strike, chain/BS premium, and TP/SL targets for logs."""
+    side = str(hero.get("side") or "CE")
+    otm_offset = params.otm_strikes * cfg.strike_step
+    strike = pin + otm_offset if side == "CE" else pin - otm_offset
+
+    entry_premium = _ltp_from_chain(chain_rows, strike, side)
+    premium_source = "chain_ltp"
+    if entry_premium is None or entry_premium <= 0:
+        t_years = years_to_expiry(expiry_date, now)
+        entry_premium = bs_price(spot, strike, t_years, params.iv_assumption, option_type=side)
+        premium_source = "bs_model"
+
+    entry_premium = round(float(entry_premium), 2)
+    tp_premium = round(entry_premium * params.hero_tp_mult, 2)
+    sl_premium = round(entry_premium * params.hero_sl_mult, 2)
+
+    return {
+        **hero,
+        "signal": signal,
+        "index": cfg.code,
+        "strike": strike,
+        "option_type": side,
+        "entry_premium": entry_premium,
+        "tp_premium": tp_premium,
+        "sl_premium": sl_premium,
+        "tp_mult": params.hero_tp_mult,
+        "sl_mult": params.hero_sl_mult,
+        "premium_source": premium_source,
+        "spot_at_signal": round(spot, 2),
+        "pin_strike": pin,
+        "blast_score": blast_score,
+        "regime": regime,
+        "expiry_date": expiry_date,
+        "detail": detail,
+        "otm_strikes": params.otm_strikes,
+    }
+
+
 def build_live_snapshot(
     *,
     cfg: IndexConfig,
@@ -226,6 +294,22 @@ def build_live_snapshot(
         cfg=cfg_params,
         prev_spot=prev_spot,
     )
+
+    if hero is not None:
+        hero = build_paper_hero_plan(
+            cfg=cfg,
+            spot=spot,
+            pin=pin,
+            hero=hero,
+            chain_rows=chain_rows,
+            expiry_date=expiry_date,
+            now=now,
+            params=cfg_params,
+            blast_score=score,
+            regime=analytics.regime if analytics else "UNKNOWN",
+            signal=signal,
+            detail=detail,
+        )
 
     return GammaSnapshot(
         index_code=cfg.code,

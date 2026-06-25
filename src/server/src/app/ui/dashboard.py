@@ -356,7 +356,20 @@ def render_gamma_expiry_panel(index_code: str) -> None:
     hero = idx.get("paper_hero")
     if hero:
         st.markdown("##### Paper hero signal (not executed)")
-        st.json(hero)
+        h1, h2, h3, h4 = st.columns(4)
+        h1.metric("Strike", f"{hero.get('strike')} {hero.get('option_type', '')}")
+        h2.metric("Entry prem", f"{hero.get('entry_premium', '—')}")
+        h3.metric("Target prem", f"{hero.get('tp_premium', '—')}")
+        h4.metric("SL prem", f"{hero.get('sl_premium', '—')}")
+        st.caption(
+            f"Spot @ signal {hero.get('spot_at_signal', '—')} · pin {hero.get('pin_strike', '—')} · "
+            f"source {hero.get('premium_source', '—')}"
+        )
+
+    last_log = idx.get("last_paper_log")
+    if last_log and isinstance(last_log, dict):
+        with st.expander("Last paper signal log row", expanded=False):
+            st.json(last_log)
 
     signals = idx.get("signals") or []
     if signals:

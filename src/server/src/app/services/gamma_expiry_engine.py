@@ -28,6 +28,7 @@ from app.services.gamma_expiry_analytics import (
     GammaConfig,
     build_live_snapshot,
 )
+from app.services.gamma_signal_log import log_gamma_paper_signal
 from app.services.upstox_engine import (
     INDEX_CONFIGS,
     IndexConfig,
@@ -245,25 +246,64 @@ class GammaExpiryEngine:
         state.setup_label = snap.observer_detail
 
         if snap.observer_signal.startswith("HERO_PAPER") and snap.paper_hero:
-            fp = f"{snap.observer_signal}:{snap.pin_strike}:{now.strftime('%H:%M')}"
+            fp = f"{snap.observer_signal}:{snap.paper_hero.get('strike')}:{now.strftime('%H:%M')}"
             if fp not in state.fired_signals and now.time() <= BLAST_WINDOW_END:
                 state.fired_signals.add(fp)
                 state.paper_signals_today += 1
+                hero = snap.paper_hero
                 line = (
                     f"{now.strftime('%H:%M')} {snap.observer_signal} "
-                    f"{snap.paper_hero.get('side')} pin={snap.pin_strike} "
-                    f"score={snap.blast_score} spot={spot:.0f} — {snap.observer_detail}"
+                    f"{hero.get('option_type')}{hero.get('strike')} "
+                    f"prem={hero.get('entry_premium')} TP={hero.get('tp_premium')} "
+                    f"SL={hero.get('sl_premium')} spot={spot:.0f} pin={snap.pin_strike} "
+                    f"score={snap.blast_score} {snap.regime}"
                 )
                 state.signal_log.append(line)
                 if len(state.signal_log) > 30:
                     state.signal_log = state.signal_log[-30:]
                 logger.info("[%s] %s", state.config.code, line)
-                telegram_notifier.send_message(
-                    f"📊 {state.config.display} GAMMA PAPER {snap.observer_signal}\n"
-                    f"Pin {snap.pin_strike} · score {snap.blast_score}\n"
-                    f"{snap.observer_detail}\n"
-                    f"(Observer only — no order placed)"
+
+                log_row = log_gamma_paper_signal(
+                    {
+                        "index": state.config.code,
+                        "display": state.config.display,
+                        "signal": snap.observer_signal,
+                        "strike": hero.get("strike"),
+                        "option_type": hero.get("option_type"),
+                        "entry_premium": hero.get("entry_premium"),
+                        "tp_premium": hero.get("tp_premium"),
+                        "sl_premium": hero.get("sl_premium"),
+                        "tp_mult": hero.get("tp_mult"),
+                        "sl_mult": hero.get("sl_mult"),
+                        "premium_source": hero.get("premium_source"),
+                        "spot_at_signal": hero.get("spot_at_signal"),
+                        "pin_strike": snap.pin_strike,
+                        "blast_score": snap.blast_score,
+                        "regime": snap.regime,
+                        "idr_pct": snap.idr_pct,
+                        "expiry_date": snap.expiry_date,
+                        "detail": snap.observer_detail,
+                    },
+                    now=now,
                 )
+                telegram_notifier.notify_gamma_paper_signal(
+                    index_name=state.config.display,
+                    signal=snap.observer_signal,
+                    pin_strike=snap.pin_strike,
+                    blast_score=snap.blast_score,
+                    regime=snap.regime,
+                    strike=int(hero.get("strike") or 0),
+                    option_type=str(hero.get("option_type") or ""),
+                    entry_premium=float(hero.get("entry_premium") or 0),
+                    tp_premium=float(hero.get("tp_premium") or 0),
+                    sl_premium=float(hero.get("sl_premium") or 0),
+                    spot=float(hero.get("spot_at_signal") or spot),
+                    detail=snap.observer_detail,
+                    timestamp=now.strftime("%Y-%m-%d %H:%M:%S IST"),
+                )
+                state.snapshot = self._snapshot_dict(snap)
+                if state.snapshot:
+                    state.snapshot["last_paper_log"] = log_row
 
         state.prev_spot = spot
 
@@ -313,6 +353,7 @@ class GammaExpiryEngine:
                     "expiry_date": st.expiry_date,
                     "paper_signals_today": st.paper_signals_today,
                     "signals": st.signal_log[-15:],
+                    "last_paper_log": (st.snapshot or {}).get("last_paper_log"),
                     **(st.snapshot or {}),
                 }
                 for code, st in self.states.items()

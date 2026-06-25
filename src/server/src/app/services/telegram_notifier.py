@@ -340,6 +340,39 @@ def notify_position_followup(
     return _enqueue(_TextMsg(text=text))
 
 
+def notify_gamma_paper_signal(
+    *,
+    index_name: str,
+    signal: str,
+    pin_strike: int,
+    blast_score: int,
+    regime: str,
+    strike: int,
+    option_type: str,
+    entry_premium: float,
+    tp_premium: float,
+    sl_premium: float,
+    spot: float,
+    detail: str,
+    timestamp: str,
+) -> bool:
+    """Paper hero alert with strike, premium entry, and TP/SL for post-market tracking."""
+    text = (
+        "\U0001f4ca *AK07 GAMMA PAPER "
+        f"{_escape_markdown(signal.replace('_', ' '))}*\n"
+        f"Pin {pin_strike} · score {blast_score} · {_escape_markdown(regime)}\n"
+        f"\u2022 *Strike:* {strike} {_escape_markdown(option_type)}\n"
+        f"\u2022 *Entry premium:* {entry_premium:.2f}\n"
+        f"\u2022 *Target premium:* {tp_premium:.2f}\n"
+        f"\u2022 *SL premium:* {sl_premium:.2f}\n"
+        f"\u2022 *Spot:* {spot:.2f}\n"
+        f"\u2022 *Note:* {_escape_markdown(detail)}\n"
+        f"\u2022 *Time:* {_escape_markdown(timestamp)}\n"
+        "_Observer only — no order placed_"
+    )
+    return _enqueue(_TextMsg(text=text))
+
+
 def notify_trade_execution(
     index_name: str,
     trade_type: str,
