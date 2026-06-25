@@ -29,8 +29,24 @@ def render_top_status_bar(
     gamma_detail = "expiry" if (gamma_hb or {}).get("expiry_today") else "idle"
     gamma_detail = gamma_detail if gamma_hb else "offline"
 
+    upstox_pnl = cache_manager.get_json(cache_manager.UPSTOX_DAILY_PNL_KEY) or {}
+    profit_guard = cache_manager.get_json(cache_manager.DAILY_PROFIT_TARGET_KEY) or {}
+    upstox_total = upstox_pnl.get("total_pnl_inr")
+    target_inr = profit_guard.get("target_inr", 5000)
+    if profit_guard.get("engaged"):
+        target_pill = status_pill("BOT", False, f"entries OFF @ Rs.{target_inr:,.0f}")
+    elif upstox_total is not None:
+        target_pill = status_pill(
+            "Upstox P&L",
+            True,
+            f"Rs.{float(upstox_total):+,.0f} / {float(target_inr):,.0f}",
+        )
+    else:
+        target_pill = status_pill("Upstox P&L", False, "pending")
+
     pills = " ".join(
         [
+            target_pill,
             status_pill("S1 OI", bool(heartbeat), s1_detail),
             status_pill("S2 SMC", bool(smc_hb), smc_detail),
             status_pill("S3 BLR", bool(bo_hb), bo_detail),
@@ -59,6 +75,17 @@ def render_compact_sidebar(*, mock_mode: bool) -> None:
 
         kill_flag = cache_manager.get_json(cache_manager.KILL_SWITCH_KEY)
         kill_engaged = bool(kill_flag and kill_flag.get("engaged"))
+        profit_guard = cache_manager.get_json(cache_manager.DAILY_PROFIT_TARGET_KEY) or {}
+        profit_engaged = bool(profit_guard.get("engaged"))
+
+        if profit_engaged:
+            st.success(
+                f"AK07 bot target hit — Rs.{float(profit_guard.get('upstox_pnl_inr', 0)):,.0f}\n"
+                f"{profit_guard.get('engaged_reason', '')}\n"
+                "Bot new entries blocked. Telegram signals continue. Manual trades unaffected."
+            )
+        elif profit_guard.get("expiry_day"):
+            st.info(f"Expiry day — target Rs.{float(profit_guard.get('target_inr', 3000)):,.0f} (Upstox P&L)")
 
         if kill_engaged:
             st.error(f"KILL SWITCH ON\n{str(kill_flag.get('at', ''))[:19]}")

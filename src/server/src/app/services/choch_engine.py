@@ -50,6 +50,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from app.services import cache_manager, performance_store, telegram_notifier
 from app.services.choch_signal_log import log_rejected_signal
+from app.services.engine_intraday import entries_globally_blocked, profit_target_engaged
 from app.services.backtest_data import parse_candle_ts
 from app.services.upstox_engine import (
     INDEX_CONFIGS,
@@ -537,7 +538,8 @@ class CHOCHIndexState:
     candles: list[dict] = field(default_factory=list)
     struct_upto: int = 0  # next confirmable bar index for catch_up_structure
     last_entry_fingerprint: str = ""
-    rejected_signals: list[dict[str, Any]] = field(default_factory=list)  # dedup guard across container restarts
+    last_rejected_fingerprint: str = ""
+    rejected_signals: list[dict[str, Any]] = field(default_factory=list)
 
 
 def _entry_fingerprint(signal_type: str, direction: str, signal_level: float) -> str:
@@ -738,6 +740,7 @@ class CHOCHEngine:
                 state.struct_upto = int(raw.get("struct_upto") or SWING_LOOKBACK)
                 state.setup_label = str(raw.get("setup_label") or state.setup_label)
                 state.last_entry_fingerprint = str(raw.get("last_entry_fingerprint") or "")
+                state.last_rejected_fingerprint = str(raw.get("last_rejected_fingerprint") or "")
                 signals = raw.get("signals")
                 if isinstance(signals, list):
                     state.signal_log = [str(s) for s in signals[-20:]]
@@ -799,6 +802,7 @@ class CHOCHEngine:
                 "struct_upto": s.struct_upto,
                 "setup_label": s.setup_label,
                 "last_entry_fingerprint": s.last_entry_fingerprint,
+                "last_rejected_fingerprint": s.last_rejected_fingerprint,
                 "signals": s.signal_log[-20:],
                 "rejected_signals": s.rejected_signals[-20:],
                 "structure": _structure_to_dict(s.structure),
@@ -865,6 +869,7 @@ class CHOCHEngine:
                 state.trades_today = 0
                 state.daily_pnl_inr = 0.0
                 state.struct_upto = SWING_LOOKBACK
+                state.last_rejected_fingerprint = ""
                 setattr(state, "_last_reset_day", today)
 
         # Bars closed at or before now
@@ -890,6 +895,8 @@ class CHOCHEngine:
             return
         if state.trades_today >= MAX_TRADES_PER_DAY:
             return
+        if entries_globally_blocked():
+            return
 
         # CHOCH+BOS reversal signal, then BOS trend continuation
         direction, signal_level = detect_choch(state.structure, closed)
@@ -898,21 +905,13 @@ class CHOCHEngine:
             direction, signal_level = detect_bos_trend(state.structure, closed)
             signal_type = "BOS_TREND"
         if direction is None:
+            state.last_rejected_fingerprint = ""
             return
 
         spot_val = spot if spot else float(closed[-1]["close"])
 
         fp = _entry_fingerprint(signal_type, direction, signal_level)
         if fp == state.last_entry_fingerprint:
-            self._reject_signal(
-                state,
-                now,
-                signal_type,
-                direction,
-                signal_level,
-                spot_val,
-                "duplicate fingerprint (already processed this BOS level)",
-            )
             return
 
         # ADX filter
@@ -927,6 +926,7 @@ class CHOCHEngine:
                 spot_val,
                 f"ADX {adx_val or 0:.1f} < {ADX_MIN}",
                 extra={"adx": adx_val},
+                fingerprint=fp,
             )
             return
 
@@ -1048,7 +1048,34 @@ class CHOCHEngine:
             logger.warning("[%s] %s no option found at %s", state.config.code, signal_type, entry)
             return
 
-        # Place order
+        # Place order (or signal-only when daily target hit)
+        reason = (
+            f"{signal_type} {direction} | struct={state.structure.structure} "
+            f"| lvl={signal_level:.1f} | ADX={adx_val:.1f} | 1H={htf or 'N/A'}"
+        )
+        ts = now.strftime("%Y-%m-%d %H:%M:%S IST")
+        opt_label = (
+            f" ({contract['strike']}{contract['option_type']} x{lots})"
+            if contract else ""
+        )
+
+        if profit_target_engaged():
+            state.last_entry_fingerprint = fp
+            state.signal_log.append(f"SIGNAL ONLY {reason} — daily target hit")
+            logger.info("[%s] SIGNAL ONLY (target hit): %s", state.config.code, reason)
+            telegram_notifier.notify_trade_signal_instruction(
+                index_name=f"{state.config.display} CHOCH{opt_label}",
+                trade_type=direction,
+                entry_price=entry,
+                target_price=tp,
+                sl_price=sl,
+                note=reason,
+                timestamp=ts,
+                strategy=signal_type,
+                candles=closed,
+            )
+            return
+
         if not PAPER_TRADING and not MOCK_MODE and contract:
             ok = self.client.place_entry(contract["instrument_key"], lots * state.config.lot_size)
             if not ok:
@@ -1065,10 +1092,6 @@ class CHOCHEngine:
                 return
 
         state.last_entry_fingerprint = fp
-        reason = (
-            f"{signal_type} {direction} | struct={state.structure.structure} "
-            f"| lvl={signal_level:.1f} | ADX={adx_val:.1f} | 1H={htf or 'N/A'}"
-        )
         state.position = CHOCHPosition(
             direction=direction,
             entry_price=entry,
@@ -1111,7 +1134,14 @@ class CHOCHEngine:
         spot: float,
         reason: str,
         extra: dict[str, Any] | None = None,
+        *,
+        fingerprint: str = "",
     ) -> None:
+        fp = fingerprint or _entry_fingerprint(signal_type, direction, signal_level)
+        if fp == state.last_rejected_fingerprint:
+            return
+        state.last_rejected_fingerprint = fp
+
         msg = f"{signal_type} {direction} @ {spot:.0f} — {reason}"
         state.signal_log.append(msg)
         row = log_rejected_signal(
@@ -1162,9 +1192,19 @@ class CHOCHEngine:
                     "[%s] CHOCH SL ratcheted %.2f → %.2f (swing=%.2f)",
                     state.config.code, pos.sl_price, new_sl, swing or 0.0,
                 )
+                old_sl = pos.sl_price
                 pos.sl_price = new_sl
                 pos.trail_sl = new_sl
                 state.setup_label = f"CHOCH {pos.direction} @ {pos.entry_price:.0f} | SL {new_sl:.0f}"
+                if profit_target_engaged():
+                    telegram_notifier.notify_position_followup(
+                        index_name=f"{state.config.display} CHOCH",
+                        message=(
+                            f"{pos.direction} open @ {pos.entry_price:.0f} — "
+                            f"trail SL {old_sl:.0f} → {new_sl:.0f} · TP {pos.tp_price:.0f}"
+                        ),
+                        timestamp=now.strftime("%Y-%m-%d %H:%M:%S IST"),
+                    )
 
         # Extra bar trail once price moves 1R in our favour
         profit_pts = (spot - pos.entry_price) if pos.direction == "LONG" else (pos.entry_price - spot)

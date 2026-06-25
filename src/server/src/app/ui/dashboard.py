@@ -157,9 +157,14 @@ def render_s7_strategy_panel(index_code: str) -> None:
         return
 
     updated = str(s7.get("timestamp", ""))[:19].replace("T", " ")
-    total_pnl = s7.get("total_daily_pnl_inr")
-    pnl_str = f"₹{total_pnl:+,.0f}" if total_pnl is not None else "—"
-    st.caption(f"S7 state updated {updated} · total daily P&L {pnl_str}")
+    upstox = cache_manager.get_json(cache_manager.UPSTOX_DAILY_PNL_KEY) or {}
+    upstox_total = upstox.get("total_pnl_inr")
+    if upstox_total is not None:
+        pnl_str = f"₹{float(upstox_total):+,.0f} (Upstox)"
+    else:
+        total_pnl = s7.get("total_daily_pnl_inr")
+        pnl_str = f"₹{total_pnl:+,.0f}" if total_pnl is not None else "—"
+    st.caption(f"S7 state updated {updated} · day P&L {pnl_str}")
 
     indices: dict = s7.get("indices") or {}
     idx = indices.get(index_code)
@@ -216,9 +221,14 @@ def render_choch_strategy_panel(index_code: str) -> None:
         return
 
     updated = str(choch.get("timestamp", ""))[:19].replace("T", " ")
-    total_pnl = choch.get("total_daily_pnl_inr")
-    pnl_str = f"\u20b9{total_pnl:+,.0f}" if total_pnl is not None else "\u2014"
-    st.caption(f"CHOCH state updated {updated} \u00b7 total daily P&L {pnl_str}")
+    upstox = cache_manager.get_json(cache_manager.UPSTOX_DAILY_PNL_KEY) or {}
+    upstox_total = upstox.get("total_pnl_inr")
+    if upstox_total is not None:
+        pnl_str = f"\u20b9{float(upstox_total):+,.0f} (Upstox)"
+    else:
+        total_pnl = choch.get("total_daily_pnl_inr")
+        pnl_str = f"\u20b9{total_pnl:+,.0f}" if total_pnl is not None else "\u2014"
+    st.caption(f"CHOCH state updated {updated} \u00b7 day P&L {pnl_str}")
 
     indices: dict = choch.get("indices") or {}
     idx = indices.get(index_code)

@@ -29,6 +29,22 @@ def kill_switch_engaged() -> bool:
     return bool(flag and flag.get("engaged"))
 
 
+def profit_target_engaged() -> bool:
+    from app.services.daily_profit_guard import profit_target_engaged as _engaged  # noqa: PLC0415
+
+    return _engaged()
+
+
+def entries_globally_blocked() -> bool:
+    """True when cockpit kill switch is engaged (hard stop)."""
+    return kill_switch_engaged()
+
+
+def bot_new_entries_blocked() -> bool:
+    """True when bot must not punch new BUY orders to Upstox."""
+    return kill_switch_engaged() or profit_target_engaged()
+
+
 def rr_book_targets(entry: float, sl: float, direction: str) -> tuple[float, float, float]:
     risk = max(abs(entry - sl), 0.05)
     if direction == "LONG":

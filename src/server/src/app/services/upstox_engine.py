@@ -569,8 +569,30 @@ class UpstoxClient:
             "max_pe_writing_strike": best_pe_chg[1] if best_pe_chg else None,
         }
 
-    def place_market_order(self, instrument_key: str, quantity: int, transaction_type: str) -> bool:
+    def place_market_order(
+        self,
+        instrument_key: str,
+        quantity: int,
+        transaction_type: str,
+        *,
+        bypass_profit_guard: bool = False,
+    ) -> bool:
         """Market order via the standard then HFT endpoint."""
+        if (
+            not bypass_profit_guard
+            and transaction_type.upper() == "BUY"
+            and not PAPER_TRADING
+        ):
+            from app.services.daily_profit_guard import profit_target_engaged  # noqa: PLC0415
+
+            if profit_target_engaged():
+                logger.warning(
+                    "BUY blocked — AK07 daily target hit (%s x %d); signal-only mode",
+                    instrument_key,
+                    quantity,
+                )
+                return False
+
         payload = {
             "quantity": quantity,
             "product": "I",
@@ -590,6 +612,10 @@ class UpstoxClient:
                 body = response.json() if response.text else {}
                 if response.status_code == 200 and body.get("status") == "success":
                     logger.info("Order placed: %s %d x %s", transaction_type, quantity, instrument_key)
+                    if transaction_type.upper() == "BUY" and not bypass_profit_guard:
+                        from app.services.daily_profit_guard import record_broker_entry  # noqa: PLC0415
+
+                        record_broker_entry()
                     return True
                 logger.warning(
                     "Order rejected at %s: HTTP %d %s", url, response.status_code, str(body)[:250]
@@ -617,6 +643,67 @@ class UpstoxClient:
             except (TypeError, ValueError):
                 return 0
         return 0
+
+    def get_short_term_positions(self) -> list[dict[str, Any]]:
+        data = self._get(f"{self.base_url}/portfolio/short-term-positions")
+        return data if isinstance(data, list) else []
+
+    def get_portfolio_day_pnl(self) -> dict[str, float] | None:
+        data = self._get(f"{self.base_url}/portfolio/short-term-positions")
+        if not isinstance(data, list):
+            return None
+        total_pnl = realised = unrealised = 0.0
+        open_positions = 0
+        for row in data:
+            if not isinstance(row, dict):
+                continue
+            try:
+                qty = int(row.get("quantity") or 0)
+            except (TypeError, ValueError):
+                qty = 0
+            if qty != 0:
+                open_positions += 1
+            total_pnl += float(row.get("pnl") or 0.0)
+            realised += float(row.get("realised") or 0.0)
+            unrealised += float(row.get("unrealised") or 0.0)
+        return {
+            "total_pnl": total_pnl,
+            "realised": realised,
+            "unrealised": unrealised,
+            "open_positions": float(open_positions),
+        }
+
+    def square_off_all_open_positions(self, *, bypass_profit_guard: bool = True) -> list[dict[str, Any]]:
+        """Market-exit every non-flat short-term position."""
+        results: list[dict[str, Any]] = []
+        for row in self.get_short_term_positions():
+            if not isinstance(row, dict):
+                continue
+            try:
+                qty = int(row.get("quantity") or 0)
+            except (TypeError, ValueError):
+                continue
+            if qty == 0:
+                continue
+            key = str(row.get("instrument_token") or row.get("instrument_key") or "")
+            symbol = str(row.get("trading_symbol") or row.get("symbol") or key)
+            side = "SELL" if qty > 0 else "BUY"
+            ok = self.place_market_order(
+                key,
+                abs(qty),
+                side,
+                bypass_profit_guard=bypass_profit_guard,
+            )
+            results.append(
+                {
+                    "instrument": key,
+                    "symbol": symbol,
+                    "qty": abs(qty),
+                    "side": side,
+                    "status": "square-off sent" if ok else "ORDER FAILED",
+                }
+            )
+        return results
 
 
 class MockUpstoxClient(UpstoxClient):
@@ -711,12 +798,25 @@ class MockUpstoxClient(UpstoxClient):
             "option_type": "CE" if direction == "LONG" else "PE",
         }
 
-    def place_market_order(self, instrument_key: str, quantity: int, transaction_type: str) -> bool:
+    def place_market_order(
+        self,
+        instrument_key: str,
+        quantity: int,
+        transaction_type: str,
+        *,
+        bypass_profit_guard: bool = False,
+    ) -> bool:
         logger.info("MOCK order: %s %d x %s", transaction_type, quantity, instrument_key or "paper")
         return True
 
     def get_net_position_qty(self, instrument_key: str) -> int | None:
         return None
+
+    def get_portfolio_day_pnl(self) -> dict[str, float] | None:
+        return {"total_pnl": 0.0, "realised": 0.0, "unrealised": 0.0, "open_positions": 0.0}
+
+    def square_off_all_open_positions(self, *, bypass_profit_guard: bool = True) -> list[dict[str, Any]]:
+        return []
 
     def advance_tick(self) -> None:
         self._tick += 1
@@ -1606,23 +1706,37 @@ def emergency_square_off_all() -> dict[str, str]:
     cache_manager.set_json(
         cache_manager.KILL_SWITCH_KEY, {"engaged": True, "at": now, "source": "dashboard"}
     )
-    results: dict[str, str] = {}
-    positions = cache_manager.get_json(cache_manager.POSITIONS_KEY) or {}
-    if not isinstance(positions, dict) or not positions:
-        return {"status": "kill switch engaged; no open positions found"}
+    results: dict[str, str] = {"status": "kill switch engaged"}
 
-    client = UpstoxClient()
-    for code, pos in positions.items():
-        try:
-            instrument = str(pos.get("instrument_key") or "")
-            if not instrument:
-                results[code] = "paper position flagged for engine square-off"
-                continue
-            ok = client.place_market_order(instrument, int(pos.get("quantity", 0)), "SELL")
-            results[code] = "square-off order sent" if ok else "ORDER FAILED - check broker"
-        except Exception as exc:
-            logger.exception("Emergency square-off failed for %s: %s", code, exc)
-            results[code] = "ERROR - see engine logs"
+    if PAPER_TRADING or MOCK_MODE:
+        return {**results, "note": "paper/mock — no broker orders sent"}
+
+    client = build_upstox_client()
+    client.refresh_access_token_from_disk()
+    square_offs = client.square_off_all_open_positions(bypass_profit_guard=True)
+    if not square_offs:
+        positions = cache_manager.get_json(cache_manager.POSITIONS_KEY) or {}
+        if isinstance(positions, dict):
+            for code, pos in positions.items():
+                try:
+                    instrument = str(pos.get("instrument_key") or "")
+                    if not instrument:
+                        results[code] = "paper position flagged for engine square-off"
+                        continue
+                    ok = client.place_market_order(
+                        instrument, int(pos.get("quantity", 0)), "SELL", bypass_profit_guard=True
+                    )
+                    results[code] = "square-off order sent" if ok else "ORDER FAILED - check broker"
+                except Exception as exc:
+                    logger.exception("Emergency square-off failed for %s: %s", code, exc)
+                    results[code] = "ERROR - see engine logs"
+        else:
+            results["note"] = "no open Upstox positions found"
+    else:
+        for row in square_offs:
+            sym = str(row.get("symbol") or row.get("instrument") or "?")
+            results[sym] = str(row.get("status") or "?")
+
     telegram_notifier.notify_system_event(
         "EMERGENCY KILL SWITCH", f"Cockpit kill switch engaged at {now}. Results: {results}"
     )

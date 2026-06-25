@@ -1,0 +1,28 @@
+{
+  "start": "2023-06-23",
+  "end": "2026-06-25",
+  "baseline": {
+    "start": "2023-06-23",
+    "end": "2026-06-23",
+    "trades": 1475,
+    "wr_pct": 34.1,
+    "total_pts": 6162.9
+  },
+  "strict": {
+    "trades": 591,
+    "wins": 249,
+    "losses": 341,
+    "wr_pct": 42.1,
+    "total_pts": 10909.6
+  },
+  "relaxed": {
+    "trades": 630,
+    "wins": 261,
+    "losses": 368,
+    "wr_pct": 41.4,
+    "total_pts": 10669.1
+  },
+  "delta_pts_strict": -240.5,
+  "delta_wr_strict": -0.7,
+  "warnings": []
+}

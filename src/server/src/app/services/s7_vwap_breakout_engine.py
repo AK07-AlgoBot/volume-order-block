@@ -90,7 +90,7 @@ from app.services.breakout_engine import (
     day_review_from_first_close,
     SESSION_START as BLR_SESSION_START,
 )
-from app.services.engine_intraday import session_vwap
+from app.services.engine_intraday import entries_globally_blocked, profit_target_engaged, session_vwap
 from app.services.upstox_engine import (
     INDEX_CONFIGS,
     ITM_OFFSET_POINTS,
@@ -718,6 +718,7 @@ class S7Engine:
             or state.day_review == "PENDING"
             or now.time() < ENTRY_START
             or now.time() > NO_ENTRY_AFTER
+            or entries_globally_blocked()
         )
         if entries_blocked:
             return
@@ -744,6 +745,25 @@ class S7Engine:
         lots = lot_size_from_risk(atr_val, state.config.lot_size)
         contract = self.client.resolve_option(state.config, entry, direction)
         if contract is None:
+            return
+
+        ts = now.strftime("%Y-%m-%d %H:%M:%S IST")
+        if profit_target_engaged():
+            state.last_candle_ts = last_ts
+            state.signal_log.append(f"SIGNAL ONLY {reason} — daily target hit")
+            state.setup_label = f"S7 SIGNAL {direction} @ {entry:.2f}"
+            logger.info("[%s] SIGNAL ONLY (target hit): %s", state.config.code, reason)
+            telegram_notifier.notify_trade_signal_instruction(
+                index_name=f"{state.config.display} VMB ({contract['strike']}{contract['option_type']} x{lots})",
+                trade_type=direction,
+                entry_price=entry,
+                target_price=tp1,
+                sl_price=sl,
+                note=reason,
+                timestamp=ts,
+                strategy="S7 ORB+",
+                candles=candles,
+            )
             return
 
         if not self.client.place_entry(str(contract.get("instrument_key") or ""), lots * state.config.lot_size):

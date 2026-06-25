@@ -273,8 +273,70 @@ def _generate_trade_chart(
 # Public API
 # ---------------------------------------------------------------------------
 
+def _escape_markdown(text: str) -> str:
+    """Escape dynamic text for Telegram legacy Markdown parse_mode."""
+    for ch in ("\\", "_", "*", "`", "["):
+        text = text.replace(ch, f"\\{ch}")
+    return text
+
+
 def send_message(text: str) -> bool:
     """Queue a raw Markdown message for async delivery (never blocks)."""
+    return _enqueue(_TextMsg(text=text))
+
+
+def notify_trade_signal_instruction(
+    index_name: str,
+    trade_type: str,
+    entry_price: float,
+    target_price: float,
+    sl_price: float,
+    note: str,
+    timestamp: str,
+    *,
+    strategy: str = "",
+    candles: list[dict] | None = None,
+) -> bool:
+    """Signal-only alert when daily target hit — instructions for manual / other traders."""
+    strat = f" ({_escape_markdown(strategy)})" if strategy else ""
+    text = (
+        "\U0001f4cb *AK07 SIGNAL ONLY* \U0001f4cb\n"
+        "_Daily target hit — not sent to Upstox_\n"
+        f"\u2022 *Strategy:* {_escape_markdown(index_name)}{strat}\n"
+        f"\u2022 *Type:* {_escape_markdown(trade_type)}\n"
+        f"\u2022 *Entry:* {entry_price:.2f}\n"
+        f"\u2022 *Target:* {target_price:.2f}\n"
+        f"\u2022 *Stop-Loss:* {sl_price:.2f}\n"
+        f"\u2022 *Note:* {_escape_markdown(note)}\n"
+        f"\u2022 *Time:* {_escape_markdown(timestamp)}"
+    )
+    if candles:
+        img = _generate_trade_chart(
+            candles=candles,
+            entry=entry_price,
+            sl=sl_price,
+            tp1=target_price,
+            tp2=None,
+            direction=trade_type,
+            index_name=index_name,
+        )
+        if img:
+            return _enqueue(_PhotoMsg(image_bytes=img, caption=text))
+    return _enqueue(_TextMsg(text=text))
+
+
+def notify_position_followup(
+    index_name: str,
+    message: str,
+    timestamp: str,
+) -> bool:
+    """Follow-on instruction for an open bot trade (SL trail, hold, exit hint)."""
+    text = (
+        "\U0001f4cc *AK07 TRADE FOLLOW-UP* \U0001f4cc\n"
+        f"\u2022 *Index:* {_escape_markdown(index_name)}\n"
+        f"\u2022 *Update:* {_escape_markdown(message)}\n"
+        f"\u2022 *Time:* {_escape_markdown(timestamp)}"
+    )
     return _enqueue(_TextMsg(text=text))
 
 
@@ -301,13 +363,13 @@ def notify_trade_execution(
 
     text = (
         "\U0001f6a8 *AK07 TRADE EXECUTION* \U0001f6a8\n"
-        f"\u2022 *Index:* {index_name}\n"
-        f"\u2022 *Type:* {trade_type}\n"
+        f"\u2022 *Index:* {_escape_markdown(index_name)}\n"
+        f"\u2022 *Type:* {_escape_markdown(trade_type)}\n"
         f"\u2022 *Entry:* {entry_price:.2f}\n"
         f"{target_block}"
         f"\u2022 *Stop-Loss:* {sl_price:.2f}\n"
-        f"\u2022 *Sentiment:* {component_sentiment}\n"
-        f"\u2022 *Time:* {timestamp}"
+        f"\u2022 *Sentiment:* {_escape_markdown(component_sentiment)}\n"
+        f"\u2022 *Time:* {_escape_markdown(timestamp)}"
     )
 
     if candles:
@@ -338,17 +400,20 @@ def notify_trade_exit(
     emoji = "\u2705" if pnl_points >= 0 else "\u274c"
     text = (
         f"{emoji} *AK07 TRADE CLOSED* {emoji}\n"
-        f"\u2022 *Index:* {index_name}\n"
-        f"\u2022 *Type:* {trade_type}\n"
+        f"\u2022 *Index:* {_escape_markdown(index_name)}\n"
+        f"\u2022 *Type:* {_escape_markdown(trade_type)}\n"
         f"\u2022 *Exit:* {exit_price:.2f}\n"
         f"\u2022 *P&L:* {pnl_points:+.2f} pts\n"
-        f"\u2022 *Reason:* {reason}\n"
-        f"\u2022 *Time:* {timestamp}"
+        f"\u2022 *Reason:* {_escape_markdown(reason)}\n"
+        f"\u2022 *Time:* {_escape_markdown(timestamp)}"
     )
     return _enqueue(_TextMsg(text=text))
 
 
 def notify_system_event(title: str, detail: str) -> bool:
     """Dispatch a system-level alert (kill switch, time gate, engine errors)."""
-    text = f"\u26a0\ufe0f *AK07 SYSTEM EVENT: {title}*\n{detail}"
+    text = (
+        f"\u26a0\ufe0f *AK07 SYSTEM EVENT: {_escape_markdown(title)}*\n"
+        f"{_escape_markdown(detail)}"
+    )
     return _enqueue(_TextMsg(text=text))
