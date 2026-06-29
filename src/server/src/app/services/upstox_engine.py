@@ -1576,6 +1576,22 @@ class AK07Engine:
             }
             ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
             out_path = ARCHIVE_DIR / f"performance_review_{today}.json"
+            performance_store.ingest_strategy1_trade_log(
+                today,
+                self.trade_log,
+                paper_trading=PAPER_TRADING,
+            )
+            day_summary = performance_store.build_day_summary(today)
+            payload["completed_trades_summary"] = {
+                "trade_count": day_summary["trade_count"],
+                "wins": day_summary["wins"],
+                "losses": day_summary["losses"],
+                "win_pct": day_summary["win_pct"],
+                "pnl_points_total": day_summary["pnl_points_total"],
+                "by_strategy": day_summary["by_strategy"],
+                "by_index": day_summary["by_index"],
+                "by_strategy_and_index": day_summary["by_strategy_and_index"],
+            }
             out_path.write_text(
                 json.dumps(payload, indent=2, ensure_ascii=False, default=str),
                 encoding="utf-8",
@@ -1584,16 +1600,20 @@ class AK07Engine:
                 os.chmod(out_path, 0o600)
             except OSError:
                 pass
-            logger.info("Performance review archived: %s", out_path.resolve())
-            performance_store.ingest_strategy1_trade_log(
-                today,
-                self.trade_log,
-                paper_trading=PAPER_TRADING,
+            logger.info(
+                "Performance review archived: %s (all strategies %+.2f pts, %d trades)",
+                out_path.resolve(),
+                day_summary["pnl_points_total"],
+                day_summary["trade_count"],
             )
             telegram_notifier.notify_system_event(
                 "15:30 DATA ARCHIVAL",
-                f"Session archived to `{out_path.resolve()}` "
-                f"(total {payload['pnl_points_total']:+.2f} pts, {len(self.trade_log)} events).",
+                performance_store.format_day_summary_telegram(
+                    out_path.resolve(),
+                    day=today,
+                    s1_pnl_by_index=dict(self.realized_pnl_points),
+                    s1_event_count=len(self.trade_log),
+                ),
             )
         except Exception as exc:
             logger.exception("Performance archival failed: %s", exc)

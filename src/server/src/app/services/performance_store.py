@@ -30,12 +30,21 @@ TRADE_TTL_SECONDS: Final[int] = 86_400 * 45
 STRATEGY_AK07_OI: Final[str] = "Strategy 1 — AK07 OI"
 STRATEGY_SMC_CRT: Final[str] = "Strategy 2 — SMC+CRT"
 STRATEGY_BREAKOUT: Final[str] = "Strategy 3 — BLR Breakout"
+STRATEGY_PRICE_ACTION: Final[str] = "Strategy 4 — Price Action"
+STRATEGY_GREEKS: Final[str] = "Strategy 5 — Greeks"
+STRATEGY_SR_REVERSAL: Final[str] = "Strategy 6 — S/R Reversal"
+STRATEGY_S7_ORB: Final[str] = "Strategy 7 — ORB+"
 STRATEGY_CHOCH: Final[str] = "Strategy 8 — CHOCH"
 STRATEGY_GAMMA: Final[str] = "Gamma Expiry Observer"
+INDEX_ORDER: Final[tuple[str, ...]] = ("NIFTY", "BANKNIFTY", "SENSEX")
 STRATEGY_ORDER: Final[tuple[str, ...]] = (
     STRATEGY_AK07_OI,
     STRATEGY_SMC_CRT,
     STRATEGY_BREAKOUT,
+    STRATEGY_PRICE_ACTION,
+    STRATEGY_GREEKS,
+    STRATEGY_SR_REVERSAL,
+    STRATEGY_S7_ORB,
     STRATEGY_CHOCH,
     STRATEGY_GAMMA,
 )
@@ -47,6 +56,37 @@ def classify_result(pnl_points: float) -> str:
     if pnl_points < -0.01:
         return "LOSS"
     return "BREAKEVEN"
+
+
+def _trade_stats(subset: list[dict[str, Any]]) -> dict[str, Any]:
+    wins = sum(1 for t in subset if float(t.get("pnl_points") or 0) > 0.01)
+    losses = sum(1 for t in subset if float(t.get("pnl_points") or 0) < -0.01)
+    total = len(subset)
+    profit = round(sum(float(t.get("pnl_points") or 0) for t in subset), 2)
+    win_pct = round(wins / total * 100, 1) if total else 0.0
+    return {
+        "Trades": total,
+        "Wins": wins,
+        "Losses": losses,
+        "Win %": win_pct,
+        "Profit (pts)": profit,
+    }
+
+
+def _ordered_strategies(present: set[str]) -> list[str]:
+    ordered = [s for s in STRATEGY_ORDER if s in present]
+    ordered.extend(sorted(present - set(STRATEGY_ORDER)))
+    return ordered
+
+
+def _ordered_indices(present: set[str]) -> list[str]:
+    ordered = [i for i in INDEX_ORDER if i in present]
+    ordered.extend(sorted(present - set(INDEX_ORDER)))
+    return ordered
+
+
+def _normalize_symbol(symbol: Any) -> str:
+    return str(symbol or "").strip().upper()
 
 
 def record_completed_trade(
@@ -509,43 +549,18 @@ def summarize_by_strategy(trades: list[dict[str, Any]]) -> list[dict[str, Any]]:
     grand_profit = 0.0
 
     present = {str(t.get("strategy")) for t in trades}
-    ordered = [s for s in STRATEGY_ORDER if s in present]
-    ordered.extend(sorted(present - set(STRATEGY_ORDER)))
-
-    for strategy in ordered:
+    for strategy in _ordered_strategies(present):
         subset = [t for t in trades if str(t.get("strategy")) == strategy]
-        wins = sum(1 for t in subset if float(t.get("pnl_points") or 0) > 0.01)
-        losses = sum(1 for t in subset if float(t.get("pnl_points") or 0) < -0.01)
-        total = len(subset)
-        profit = round(sum(float(t.get("pnl_points") or 0) for t in subset), 2)
-        win_pct = round(wins / total * 100, 1) if total else 0.0
-        rows.append(
-            {
-                "Strategy": strategy,
-                "Trades": total,
-                "Wins": wins,
-                "Losses": losses,
-                "Win %": win_pct,
-                "Profit (pts)": profit,
-            }
-        )
-        grand_trades += total
-        grand_wins += wins
-        grand_losses += losses
-        grand_profit += profit
+        stats = _trade_stats(subset)
+        rows.append({"Strategy": strategy, **stats})
+        grand_trades += int(stats["Trades"])
+        grand_wins += int(stats["Wins"])
+        grand_losses += int(stats["Losses"])
+        grand_profit += float(stats["Profit (pts)"])
 
     if not rows:
         for strategy in STRATEGY_ORDER:
-            rows.append(
-                {
-                    "Strategy": strategy,
-                    "Trades": 0,
-                    "Wins": 0,
-                    "Losses": 0,
-                    "Win %": 0.0,
-                    "Profit (pts)": 0.0,
-                }
-            )
+            rows.append({"Strategy": strategy, **_trade_stats([])})
 
     rows.append(
         {
@@ -558,6 +573,148 @@ def summarize_by_strategy(trades: list[dict[str, Any]]) -> list[dict[str, Any]]:
         }
     )
     return rows
+
+
+def summarize_by_index(trades: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Aggregate stats per index plus a TOTAL row."""
+    rows: list[dict[str, Any]] = []
+    grand_trades = grand_wins = grand_losses = 0
+    grand_profit = 0.0
+
+    present = {_normalize_symbol(t.get("symbol")) for t in trades if _normalize_symbol(t.get("symbol"))}
+    for index in _ordered_indices(present):
+        subset = [t for t in trades if _normalize_symbol(t.get("symbol")) == index]
+        stats = _trade_stats(subset)
+        rows.append({"Index": index, **stats})
+        grand_trades += int(stats["Trades"])
+        grand_wins += int(stats["Wins"])
+        grand_losses += int(stats["Losses"])
+        grand_profit += float(stats["Profit (pts)"])
+
+    if not rows and not trades:
+        return []
+
+    rows.append(
+        {
+            "Index": "TOTAL",
+            "Trades": grand_trades,
+            "Wins": grand_wins,
+            "Losses": grand_losses,
+            "Win %": round(grand_wins / grand_trades * 100, 1) if grand_trades else 0.0,
+            "Profit (pts)": round(grand_profit, 2),
+        }
+    )
+    return rows
+
+
+def summarize_by_strategy_and_index(trades: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """One row per strategy × index with trades, win rate, and profit."""
+    rows: list[dict[str, Any]] = []
+    strategies = _ordered_strategies({str(t.get("strategy")) for t in trades})
+    indices = _ordered_indices(
+        {_normalize_symbol(t.get("symbol")) for t in trades if _normalize_symbol(t.get("symbol"))}
+    )
+    if not strategies or not indices:
+        return rows
+
+    for strategy in strategies:
+        for index in indices:
+            subset = [
+                t
+                for t in trades
+                if str(t.get("strategy")) == strategy and _normalize_symbol(t.get("symbol")) == index
+            ]
+            if not subset:
+                continue
+            stats = _trade_stats(subset)
+            rows.append({"Strategy": strategy, "Index": index, **stats})
+
+    rows.sort(
+        key=lambda row: (
+            _ordered_strategies({str(row.get("Strategy"))}).index(str(row.get("Strategy"))),
+            _ordered_indices({str(row.get("Index"))}).index(str(row.get("Index"))),
+        )
+    )
+    return rows
+
+
+def build_day_summary(day: str) -> dict[str, Any]:
+    """Unified closed-trade summary for one session day (Redis + archive)."""
+    trades = _load_day_trades(day, set())
+    by_strategy = summarize_by_strategy(trades)
+    by_index = summarize_by_index(trades)
+    by_strategy_index = summarize_by_strategy_and_index(trades)
+    total_row = by_strategy[-1] if by_strategy else _trade_stats([])
+    return {
+        "day": day,
+        "trade_count": int(total_row.get("Trades") or 0),
+        "wins": int(total_row.get("Wins") or 0),
+        "losses": int(total_row.get("Losses") or 0),
+        "win_pct": float(total_row.get("Win %") or 0.0),
+        "pnl_points_total": float(total_row.get("Profit (pts)") or 0.0),
+        "by_strategy": by_strategy,
+        "by_index": by_index,
+        "by_strategy_and_index": by_strategy_index,
+        "trades": trades,
+    }
+
+
+def format_day_summary_telegram(
+    archive_path: Path | str,
+    *,
+    day: str,
+    s1_pnl_by_index: dict[str, float] | None = None,
+    s1_event_count: int = 0,
+) -> str:
+    """Human-readable 15:30 archival message with all-strategy and index splits."""
+    summary = build_day_summary(day)
+    total = float(summary["pnl_points_total"])
+    count = int(summary["trade_count"])
+    wins = int(summary["wins"])
+    losses = int(summary["losses"])
+
+    lines = [
+        f"Session archived to `{archive_path}`",
+        f"All strategies: **{total:+.2f} pts** · **{count}** closed trade(s) ({wins}W/{losses}L)",
+    ]
+
+    s1_total = round(sum((s1_pnl_by_index or {}).values()), 2)
+    if s1_event_count or abs(s1_total) >= 0.01:
+        lines.append(f"S1 session log: {s1_total:+.2f} pts · {s1_event_count} event(s)")
+
+    by_strategy = [row for row in summary["by_strategy"] if row.get("Strategy") != "TOTAL"]
+    active_strategies = [row for row in by_strategy if int(row.get("Trades") or 0) > 0]
+    if active_strategies:
+        lines.append("")
+        lines.append("By strategy:")
+        for row in active_strategies:
+            lines.append(
+                f"• {row['Strategy']}: {float(row['Profit (pts)']):+.2f} pts · "
+                f"{int(row['Trades'])} trade(s) ({int(row['Wins'])}W/{int(row['Losses'])}L)"
+            )
+
+    by_index = [row for row in summary["by_index"] if row.get("Index") != "TOTAL"]
+    active_indices = [row for row in by_index if int(row.get("Trades") or 0) > 0]
+    if active_indices:
+        lines.append("")
+        lines.append("By index:")
+        for row in active_indices:
+            lines.append(
+                f"• {row['Index']}: {float(row['Profit (pts)']):+.2f} pts · "
+                f"{int(row['Trades'])} trade(s) ({int(row['Wins'])}W/{int(row['Losses'])}L)"
+            )
+
+    matrix = summary["by_strategy_and_index"]
+    if matrix:
+        lines.append("")
+        lines.append("Strategy × index (pts):")
+        for row in matrix:
+            lines.append(
+                f"• {row['Strategy']} / {row['Index']}: "
+                f"{float(row['Profit (pts)']):+.2f} pts · {int(row['Trades'])} trade(s)"
+            )
+
+    return "\n".join(lines)
 
 
 def daily_pnl_series(trades: list[dict[str, Any]]) -> list[dict[str, Any]]:

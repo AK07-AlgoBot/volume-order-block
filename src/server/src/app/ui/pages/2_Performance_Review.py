@@ -80,7 +80,11 @@ elif paper_filter == "Live only":
     trades = [t for t in trades if not t.get("paper_trading")]
 
 summary_rows = performance_store.summarize_by_strategy(trades)
+index_rows = performance_store.summarize_by_index(trades)
+matrix_rows = performance_store.summarize_by_strategy_and_index(trades)
 summary_df = pd.DataFrame(summary_rows)
+index_df = pd.DataFrame(index_rows) if index_rows else pd.DataFrame()
+matrix_df = pd.DataFrame(matrix_rows) if matrix_rows else pd.DataFrame()
 daily_series = performance_store.daily_pnl_series(trades)
 daily_df = pd.DataFrame(daily_series) if daily_series else pd.DataFrame()
 
@@ -159,6 +163,12 @@ else:
         else:
             st.caption("No win-rate breakdown yet.")
 
+    if not index_df.empty:
+        st.markdown("#### Profit by index (points)")
+        idx_chart_df = index_df[index_df["Index"] != "TOTAL"].copy()
+        if not idx_chart_df.empty and idx_chart_df["Trades"].sum() > 0:
+            st.bar_chart(idx_chart_df.set_index("Index")[["Profit (pts)"]], height=240)
+
     with st.expander("Trade outcome mix", expanded=False):
         if trades:
             outcomes = pd.Series([t.get("result", "BREAKEVEN") for t in trades]).value_counts()
@@ -179,6 +189,49 @@ st.dataframe(
     use_container_width=True,
     hide_index=True,
 )
+
+st.markdown("## Index summary")
+
+if index_df.empty:
+    st.caption("No index-level trades in the selected range.")
+else:
+    display_index_df = index_df.copy()
+    display_index_df["Win %"] = display_index_df["Win %"].map(lambda v: f"{v:.1f}%")
+    display_index_df["Profit (pts)"] = display_index_df["Profit (pts)"].map(lambda v: f"{v:+.2f}")
+    st.dataframe(display_index_df, use_container_width=True, hide_index=True)
+
+st.markdown("## Strategy × index matrix")
+
+if matrix_df.empty:
+    st.caption("No strategy/index combinations in the selected range.")
+else:
+    pivot_profit = matrix_df.pivot_table(
+        index="Strategy",
+        columns="Index",
+        values="Profit (pts)",
+        aggfunc="sum",
+        fill_value=0.0,
+    )
+    pivot_trades = matrix_df.pivot_table(
+        index="Strategy",
+        columns="Index",
+        values="Trades",
+        aggfunc="sum",
+        fill_value=0,
+    )
+    st.markdown("#### Profit (points)")
+    st.dataframe(
+        pivot_profit.map(lambda v: f"{v:+.2f}"),
+        use_container_width=True,
+    )
+    st.markdown("#### Trade count")
+    st.dataframe(pivot_trades.astype(int), use_container_width=True)
+
+    with st.expander("Detailed strategy × index rows", expanded=False):
+        detail_df = matrix_df.copy()
+        detail_df["Win %"] = detail_df["Win %"].map(lambda v: f"{v:.1f}%")
+        detail_df["Profit (pts)"] = detail_df["Profit (pts)"].map(lambda v: f"{v:+.2f}")
+        st.dataframe(detail_df, use_container_width=True, hide_index=True)
 
 st.caption(
     f"Range: {start_date.isoformat()} → {today.isoformat()} · "
