@@ -1,0 +1,192 @@
+{
+  "start": "2023-06-27",
+  "end": "2026-06-26",
+  "symbols": [
+    "NIFTY",
+    "BANKNIFTY",
+    "SENSEX"
+  ],
+  "note": "Proxy backtest: prior-day high/low as OI walls, prior-day direction as PCR, entry requires 5m activity > 20-bar average (bar-range proxy when index volume=0), SENSEX targets 120/35 premium pts, premium P&L \u2248 0.5\u00d7 spot move. Not financial advice.",
+  "results": {
+    "NIFTY": {
+      "days_scanned": 784,
+      "signal_days_ce": 408,
+      "signal_days_pe": 289,
+      "wait_days": 38,
+      "trades": 479,
+      "wins": 148,
+      "losses": 331,
+      "win_rate_pct": 30.9,
+      "total_premium_pts": 508.06,
+      "inr_1_lot": 33023.9,
+      "avg_premium_pts": 1.06,
+      "sample_trades": [
+        {
+          "day": "2026-06-15",
+          "side": "CE",
+          "entry": 23965.7,
+          "exit": 23929.7,
+          "pnl_premium_pts": -18.0,
+          "reason": "PREMIUM_SL",
+          "mode": "MOMENTUM SQUEEZE (CALL BUYING)"
+        },
+        {
+          "day": "2026-06-17",
+          "side": "CE",
+          "entry": 24020.7,
+          "exit": 24081.45,
+          "pnl_premium_pts": 30.38,
+          "reason": "EOD",
+          "mode": "MOMENTUM SQUEEZE (CALL BUYING)"
+        },
+        {
+          "day": "2026-06-18",
+          "side": "CE",
+          "entry": 24108.9,
+          "exit": 24072.9,
+          "pnl_premium_pts": -18.0,
+          "reason": "PREMIUM_SL",
+          "mode": "MOMENTUM SQUEEZE (CALL BUYING)"
+        },
+        {
+          "day": "2026-06-22",
+          "side": "CE",
+          "entry": 24138.45,
+          "exit": 24102.45,
+          "pnl_premium_pts": -18.0,
+          "reason": "PREMIUM_SL",
+          "mode": "MOMENTUM SQUEEZE (CALL BUYING)"
+        },
+        {
+          "day": "2026-06-23",
+          "side": "PE",
+          "entry": 24021.85,
+          "exit": 23901.85,
+          "pnl_premium_pts": 60.0,
+          "reason": "PREMIUM_TARGET",
+          "mode": "MOMENTUM BREAKDOWN (PUT BUYING)"
+        }
+      ]
+    },
+    "BANKNIFTY": {
+      "days_scanned": 784,
+      "signal_days_ce": 372,
+      "signal_days_pe": 312,
+      "wait_days": 51,
+      "trades": 453,
+      "wins": 138,
+      "losses": 315,
+      "win_rate_pct": 30.5,
+      "total_premium_pts": 2817.55,
+      "inr_1_lot": 84526.5,
+      "avg_premium_pts": 6.22,
+      "sample_trades": [
+        {
+          "day": "2026-06-12",
+          "side": "CE",
+          "entry": 55804.45,
+          "exit": 56104.45,
+          "pnl_premium_pts": 150.0,
+          "reason": "PREMIUM_TARGET",
+          "mode": "MOMENTUM SQUEEZE (CALL BUYING)"
+        },
+        {
+          "day": "2026-06-15",
+          "side": "CE",
+          "entry": 57510.35,
+          "exit": 57420.35,
+          "pnl_premium_pts": -45.0,
+          "reason": "PREMIUM_SL",
+          "mode": "MOMENTUM SQUEEZE (CALL BUYING)"
+        },
+        {
+          "day": "2026-06-17",
+          "side": "CE",
+          "entry": 57456.25,
+          "exit": 57570.65,
+          "pnl_premium_pts": 57.2,
+          "reason": "EOD",
+          "mode": "MOMENTUM SQUEEZE (CALL BUYING)"
+        },
+        {
+          "day": "2026-06-18",
+          "side": "CE",
+          "entry": 57751.45,
+          "exit": 57661.45,
+          "pnl_premium_pts": -45.0,
+          "reason": "PREMIUM_SL",
+          "mode": "MOMENTUM SQUEEZE (CALL BUYING)"
+        },
+        {
+          "day": "2026-06-22",
+          "side": "CE",
+          "entry": 57821.65,
+          "exit": 57885.25,
+          "pnl_premium_pts": 31.8,
+          "reason": "EOD",
+          "mode": "MOMENTUM SQUEEZE (CALL BUYING)"
+        }
+      ]
+    },
+    "SENSEX": {
+      "days_scanned": 784,
+      "signal_days_ce": 407,
+      "signal_days_pe": 292,
+      "wait_days": 36,
+      "trades": 464,
+      "wins": 128,
+      "losses": 336,
+      "win_rate_pct": 27.6,
+      "total_premium_pts": 2379.24,
+      "inr_1_lot": 47584.8,
+      "avg_premium_pts": 5.13,
+      "sample_trades": [
+        {
+          "day": "2026-06-15",
+          "side": "CE",
+          "entry": 76578.34,
+          "exit": 76508.34,
+          "pnl_premium_pts": -35.0,
+          "reason": "PREMIUM_SL",
+          "mode": "MOMENTUM SQUEEZE (CALL BUYING)"
+        },
+        {
+          "day": "2026-06-17",
+          "side": "CE",
+          "entry": 76819.73,
+          "exit": 77059.73,
+          "pnl_premium_pts": 120.0,
+          "reason": "PREMIUM_TARGET",
+          "mode": "MOMENTUM SQUEEZE (CALL BUYING)"
+        },
+        {
+          "day": "2026-06-18",
+          "side": "CE",
+          "entry": 77202.53,
+          "exit": 77132.53,
+          "pnl_premium_pts": -35.0,
+          "reason": "PREMIUM_SL",
+          "mode": "MOMENTUM SQUEEZE (CALL BUYING)"
+        },
+        {
+          "day": "2026-06-22",
+          "side": "CE",
+          "entry": 77210.94,
+          "exit": 77140.94,
+          "pnl_premium_pts": -35.0,
+          "reason": "PREMIUM_SL",
+          "mode": "MOMENTUM SQUEEZE (CALL BUYING)"
+        },
+        {
+          "day": "2026-06-23",
+          "side": "PE",
+          "entry": 76848.89,
+          "exit": 76608.89,
+          "pnl_premium_pts": 120.0,
+          "reason": "PREMIUM_TARGET",
+          "mode": "MOMENTUM BREAKDOWN (PUT BUYING)"
+        }
+      ]
+    }
+  }
+}

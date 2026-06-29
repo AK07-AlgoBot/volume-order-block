@@ -1,0 +1,1373 @@
+{
+  "date": "2026-06-28",
+  "generated_at": "2026-06-28T15:30:02.974272+05:30",
+  "paper_trading": true,
+  "pnl_points_by_index": {
+    "NIFTY": 0.0,
+    "BANKNIFTY": 0.0,
+    "SENSEX": 0.0
+  },
+  "pnl_points_total": 0.0,
+  "trade_log": [],
+  "spot_tracking": {
+    "NIFTY": [
+      {
+        "at": "2026-06-28T02:34:31.734021+05:30",
+        "spot": 24056.0
+      },
+      {
+        "at": "2026-06-28T15:22:00.660803+05:30",
+        "spot": 24056.0
+      },
+      {
+        "at": "2026-06-28T15:22:20.291649+05:30",
+        "spot": 24056.0
+      },
+      {
+        "at": "2026-06-28T15:22:37.843459+05:30",
+        "spot": 24056.0
+      },
+      {
+        "at": "2026-06-28T15:22:57.506663+05:30",
+        "spot": 24056.0
+      },
+      {
+        "at": "2026-06-28T15:23:15.239448+05:30",
+        "spot": 24056.0
+      },
+      {
+        "at": "2026-06-28T15:23:32.905289+05:30",
+        "spot": 24056.0
+      },
+      {
+        "at": "2026-06-28T15:23:50.685511+05:30",
+        "spot": 24056.0
+      },
+      {
+        "at": "2026-06-28T15:24:08.392553+05:30",
+        "spot": 24056.0
+      },
+      {
+        "at": "2026-06-28T15:24:25.888513+05:30",
+        "spot": 24056.0
+      },
+      {
+        "at": "2026-06-28T15:24:43.545285+05:30",
+        "spot": 24056.0
+      },
+      {
+        "at": "2026-06-28T15:25:01.438965+05:30",
+        "spot": 24056.0
+      },
+      {
+        "at": "2026-06-28T15:25:19.156019+05:30",
+        "spot": 24056.0
+      },
+      {
+        "at": "2026-06-28T15:25:36.751437+05:30",
+        "spot": 24056.0
+      },
+      {
+        "at": "2026-06-28T15:25:54.482625+05:30",
+        "spot": 24056.0
+      },
+      {
+        "at": "2026-06-28T15:26:12.154458+05:30",
+        "spot": 24056.0
+      },
+      {
+        "at": "2026-06-28T15:26:30.008879+05:30",
+        "spot": 24056.0
+      },
+      {
+        "at": "2026-06-28T15:26:47.821351+05:30",
+        "spot": 24056.0
+      },
+      {
+        "at": "2026-06-28T15:27:05.844382+05:30",
+        "spot": 24056.0
+      },
+      {
+        "at": "2026-06-28T15:27:23.651231+05:30",
+        "spot": 24056.0
+      },
+      {
+        "at": "2026-06-28T15:27:41.270102+05:30",
+        "spot": 24056.0
+      },
+      {
+        "at": "2026-06-28T15:27:58.861502+05:30",
+        "spot": 24056.0
+      },
+      {
+        "at": "2026-06-28T15:28:16.569476+05:30",
+        "spot": 24056.0
+      },
+      {
+        "at": "2026-06-28T15:28:34.118683+05:30",
+        "spot": 24056.0
+      },
+      {
+        "at": "2026-06-28T15:28:51.942493+05:30",
+        "spot": 24056.0
+      },
+      {
+        "at": "2026-06-28T15:29:09.764858+05:30",
+        "spot": 24056.0
+      },
+      {
+        "at": "2026-06-28T15:29:27.468978+05:30",
+        "spot": 24056.0
+      },
+      {
+        "at": "2026-06-28T15:29:45.236709+05:30",
+        "spot": 24056.0
+      },
+      {
+        "at": "2026-06-28T15:30:02.974272+05:30",
+        "spot": 24056.0
+      }
+    ],
+    "BANKNIFTY": [
+      {
+        "at": "2026-06-28T02:34:31.734021+05:30",
+        "spot": 58177.05
+      },
+      {
+        "at": "2026-06-28T15:22:00.660803+05:30",
+        "spot": 58177.05
+      },
+      {
+        "at": "2026-06-28T15:22:20.291649+05:30",
+        "spot": 58177.05
+      },
+      {
+        "at": "2026-06-28T15:22:37.843459+05:30",
+        "spot": 58177.05
+      },
+      {
+        "at": "2026-06-28T15:22:57.506663+05:30",
+        "spot": 58177.05
+      },
+      {
+        "at": "2026-06-28T15:23:15.239448+05:30",
+        "spot": 58177.05
+      },
+      {
+        "at": "2026-06-28T15:23:32.905289+05:30",
+        "spot": 58177.05
+      },
+      {
+        "at": "2026-06-28T15:23:50.685511+05:30",
+        "spot": 58177.05
+      },
+      {
+        "at": "2026-06-28T15:24:08.392553+05:30",
+        "spot": 58177.05
+      },
+      {
+        "at": "2026-06-28T15:24:25.888513+05:30",
+        "spot": 58177.05
+      },
+      {
+        "at": "2026-06-28T15:24:43.545285+05:30",
+        "spot": 58177.05
+      },
+      {
+        "at": "2026-06-28T15:25:01.438965+05:30",
+        "spot": 58177.05
+      },
+      {
+        "at": "2026-06-28T15:25:19.156019+05:30",
+        "spot": 58177.05
+      },
+      {
+        "at": "2026-06-28T15:25:36.751437+05:30",
+        "spot": 58177.05
+      },
+      {
+        "at": "2026-06-28T15:25:54.482625+05:30",
+        "spot": 58177.05
+      },
+      {
+        "at": "2026-06-28T15:26:12.154458+05:30",
+        "spot": 58177.05
+      },
+      {
+        "at": "2026-06-28T15:26:30.008879+05:30",
+        "spot": 58177.05
+      },
+      {
+        "at": "2026-06-28T15:26:47.821351+05:30",
+        "spot": 58177.05
+      },
+      {
+        "at": "2026-06-28T15:27:05.844382+05:30",
+        "spot": 58177.05
+      },
+      {
+        "at": "2026-06-28T15:27:23.651231+05:30",
+        "spot": 58177.05
+      },
+      {
+        "at": "2026-06-28T15:27:41.270102+05:30",
+        "spot": 58177.05
+      },
+      {
+        "at": "2026-06-28T15:27:58.861502+05:30",
+        "spot": 58177.05
+      },
+      {
+        "at": "2026-06-28T15:28:16.569476+05:30",
+        "spot": 58177.05
+      },
+      {
+        "at": "2026-06-28T15:28:34.118683+05:30",
+        "spot": 58177.05
+      },
+      {
+        "at": "2026-06-28T15:28:51.942493+05:30",
+        "spot": 58177.05
+      },
+      {
+        "at": "2026-06-28T15:29:09.764858+05:30",
+        "spot": 58177.05
+      },
+      {
+        "at": "2026-06-28T15:29:27.468978+05:30",
+        "spot": 58177.05
+      },
+      {
+        "at": "2026-06-28T15:29:45.236709+05:30",
+        "spot": 58177.05
+      },
+      {
+        "at": "2026-06-28T15:30:02.974272+05:30",
+        "spot": 58177.05
+      }
+    ],
+    "SENSEX": [
+      {
+        "at": "2026-06-28T02:34:31.734021+05:30",
+        "spot": 77100.47
+      },
+      {
+        "at": "2026-06-28T15:22:00.660803+05:30",
+        "spot": 77100.47
+      },
+      {
+        "at": "2026-06-28T15:22:20.291649+05:30",
+        "spot": 77100.47
+      },
+      {
+        "at": "2026-06-28T15:22:37.843459+05:30",
+        "spot": 77100.47
+      },
+      {
+        "at": "2026-06-28T15:22:57.506663+05:30",
+        "spot": 77100.47
+      },
+      {
+        "at": "2026-06-28T15:23:15.239448+05:30",
+        "spot": 77100.47
+      },
+      {
+        "at": "2026-06-28T15:23:32.905289+05:30",
+        "spot": 77100.47
+      },
+      {
+        "at": "2026-06-28T15:23:50.685511+05:30",
+        "spot": 77100.47
+      },
+      {
+        "at": "2026-06-28T15:24:08.392553+05:30",
+        "spot": 77100.47
+      },
+      {
+        "at": "2026-06-28T15:24:25.888513+05:30",
+        "spot": 77100.47
+      },
+      {
+        "at": "2026-06-28T15:24:43.545285+05:30",
+        "spot": 77100.47
+      },
+      {
+        "at": "2026-06-28T15:25:01.438965+05:30",
+        "spot": 77100.47
+      },
+      {
+        "at": "2026-06-28T15:25:19.156019+05:30",
+        "spot": 77100.47
+      },
+      {
+        "at": "2026-06-28T15:25:36.751437+05:30",
+        "spot": 77100.47
+      },
+      {
+        "at": "2026-06-28T15:25:54.482625+05:30",
+        "spot": 77100.47
+      },
+      {
+        "at": "2026-06-28T15:26:12.154458+05:30",
+        "spot": 77100.47
+      },
+      {
+        "at": "2026-06-28T15:26:30.008879+05:30",
+        "spot": 77100.47
+      },
+      {
+        "at": "2026-06-28T15:26:47.821351+05:30",
+        "spot": 77100.47
+      },
+      {
+        "at": "2026-06-28T15:27:05.844382+05:30",
+        "spot": 77100.47
+      },
+      {
+        "at": "2026-06-28T15:27:23.651231+05:30",
+        "spot": 77100.47
+      },
+      {
+        "at": "2026-06-28T15:27:41.270102+05:30",
+        "spot": 77100.47
+      },
+      {
+        "at": "2026-06-28T15:27:58.861502+05:30",
+        "spot": 77100.47
+      },
+      {
+        "at": "2026-06-28T15:28:16.569476+05:30",
+        "spot": 77100.47
+      },
+      {
+        "at": "2026-06-28T15:28:34.118683+05:30",
+        "spot": 77100.47
+      },
+      {
+        "at": "2026-06-28T15:28:51.942493+05:30",
+        "spot": 77100.47
+      },
+      {
+        "at": "2026-06-28T15:29:09.764858+05:30",
+        "spot": 77100.47
+      },
+      {
+        "at": "2026-06-28T15:29:27.468978+05:30",
+        "spot": 77100.47
+      },
+      {
+        "at": "2026-06-28T15:29:45.236709+05:30",
+        "spot": 77100.47
+      },
+      {
+        "at": "2026-06-28T15:30:02.974272+05:30",
+        "spot": 77100.47
+      }
+    ]
+  },
+  "component_sentiment_tracking": {
+    "NIFTY": [
+      {
+        "at": "2026-06-28T02:34:31.734021+05:30",
+        "bias": "BEARISH",
+        "components": {
+          "RELIANCE": 0.01,
+          "HDFCBANK": -0.28,
+          "ICICIBANK": 0.41,
+          "INFY": -2.23,
+          "TCS": -1.82
+        }
+      },
+      {
+        "at": "2026-06-28T15:22:00.660803+05:30",
+        "bias": "BEARISH",
+        "components": {
+          "RELIANCE": 0.01,
+          "HDFCBANK": -0.28,
+          "ICICIBANK": 0.41,
+          "INFY": -2.23,
+          "TCS": -1.82
+        }
+      },
+      {
+        "at": "2026-06-28T15:22:20.291649+05:30",
+        "bias": "BEARISH",
+        "components": {
+          "RELIANCE": 0.01,
+          "HDFCBANK": -0.28,
+          "ICICIBANK": 0.41,
+          "INFY": -2.23,
+          "TCS": -1.82
+        }
+      },
+      {
+        "at": "2026-06-28T15:22:37.843459+05:30",
+        "bias": "BEARISH",
+        "components": {
+          "RELIANCE": 0.01,
+          "HDFCBANK": -0.28,
+          "ICICIBANK": 0.41,
+          "INFY": -2.23,
+          "TCS": -1.82
+        }
+      },
+      {
+        "at": "2026-06-28T15:22:57.506663+05:30",
+        "bias": "BEARISH",
+        "components": {
+          "RELIANCE": 0.01,
+          "HDFCBANK": -0.28,
+          "ICICIBANK": 0.41,
+          "INFY": -2.23,
+          "TCS": -1.82
+        }
+      },
+      {
+        "at": "2026-06-28T15:23:15.239448+05:30",
+        "bias": "BEARISH",
+        "components": {
+          "RELIANCE": 0.01,
+          "HDFCBANK": -0.28,
+          "ICICIBANK": 0.41,
+          "INFY": -2.23,
+          "TCS": -1.82
+        }
+      },
+      {
+        "at": "2026-06-28T15:23:32.905289+05:30",
+        "bias": "BEARISH",
+        "components": {
+          "RELIANCE": 0.01,
+          "HDFCBANK": -0.28,
+          "ICICIBANK": 0.41,
+          "INFY": -2.23,
+          "TCS": -1.82
+        }
+      },
+      {
+        "at": "2026-06-28T15:23:50.685511+05:30",
+        "bias": "BEARISH",
+        "components": {
+          "RELIANCE": 0.01,
+          "HDFCBANK": -0.28,
+          "ICICIBANK": 0.41,
+          "INFY": -2.23,
+          "TCS": -1.82
+        }
+      },
+      {
+        "at": "2026-06-28T15:24:08.392553+05:30",
+        "bias": "BEARISH",
+        "components": {
+          "RELIANCE": 0.01,
+          "HDFCBANK": -0.28,
+          "ICICIBANK": 0.41,
+          "INFY": -2.23,
+          "TCS": -1.82
+        }
+      },
+      {
+        "at": "2026-06-28T15:24:25.888513+05:30",
+        "bias": "BEARISH",
+        "components": {
+          "RELIANCE": 0.01,
+          "HDFCBANK": -0.28,
+          "ICICIBANK": 0.41,
+          "INFY": -2.23,
+          "TCS": -1.82
+        }
+      },
+      {
+        "at": "2026-06-28T15:24:43.545285+05:30",
+        "bias": "BEARISH",
+        "components": {
+          "RELIANCE": 0.01,
+          "HDFCBANK": -0.28,
+          "ICICIBANK": 0.41,
+          "INFY": -2.23,
+          "TCS": -1.82
+        }
+      },
+      {
+        "at": "2026-06-28T15:25:01.438965+05:30",
+        "bias": "BEARISH",
+        "components": {
+          "RELIANCE": 0.01,
+          "HDFCBANK": -0.28,
+          "ICICIBANK": 0.41,
+          "INFY": -2.23,
+          "TCS": -1.82
+        }
+      },
+      {
+        "at": "2026-06-28T15:25:19.156019+05:30",
+        "bias": "BEARISH",
+        "components": {
+          "RELIANCE": 0.01,
+          "HDFCBANK": -0.28,
+          "ICICIBANK": 0.41,
+          "INFY": -2.23,
+          "TCS": -1.82
+        }
+      },
+      {
+        "at": "2026-06-28T15:25:36.751437+05:30",
+        "bias": "BEARISH",
+        "components": {
+          "RELIANCE": 0.01,
+          "HDFCBANK": -0.28,
+          "ICICIBANK": 0.41,
+          "INFY": -2.23,
+          "TCS": -1.82
+        }
+      },
+      {
+        "at": "2026-06-28T15:25:54.482625+05:30",
+        "bias": "BEARISH",
+        "components": {
+          "RELIANCE": 0.01,
+          "HDFCBANK": -0.28,
+          "ICICIBANK": 0.41,
+          "INFY": -2.23,
+          "TCS": -1.82
+        }
+      },
+      {
+        "at": "2026-06-28T15:26:12.154458+05:30",
+        "bias": "BEARISH",
+        "components": {
+          "RELIANCE": 0.01,
+          "HDFCBANK": -0.28,
+          "ICICIBANK": 0.41,
+          "INFY": -2.23,
+          "TCS": -1.82
+        }
+      },
+      {
+        "at": "2026-06-28T15:26:30.008879+05:30",
+        "bias": "BEARISH",
+        "components": {
+          "RELIANCE": 0.01,
+          "HDFCBANK": -0.28,
+          "ICICIBANK": 0.41,
+          "INFY": -2.23,
+          "TCS": -1.82
+        }
+      },
+      {
+        "at": "2026-06-28T15:26:47.821351+05:30",
+        "bias": "BEARISH",
+        "components": {
+          "RELIANCE": 0.01,
+          "HDFCBANK": -0.28,
+          "ICICIBANK": 0.41,
+          "INFY": -2.23,
+          "TCS": -1.82
+        }
+      },
+      {
+        "at": "2026-06-28T15:27:05.844382+05:30",
+        "bias": "BEARISH",
+        "components": {
+          "RELIANCE": 0.01,
+          "HDFCBANK": -0.28,
+          "ICICIBANK": 0.41,
+          "INFY": -2.23,
+          "TCS": -1.82
+        }
+      },
+      {
+        "at": "2026-06-28T15:27:23.651231+05:30",
+        "bias": "BEARISH",
+        "components": {
+          "RELIANCE": 0.01,
+          "HDFCBANK": -0.28,
+          "ICICIBANK": 0.41,
+          "INFY": -2.23,
+          "TCS": -1.82
+        }
+      },
+      {
+        "at": "2026-06-28T15:27:41.270102+05:30",
+        "bias": "BEARISH",
+        "components": {
+          "RELIANCE": 0.01,
+          "HDFCBANK": -0.28,
+          "ICICIBANK": 0.41,
+          "INFY": -2.23,
+          "TCS": -1.82
+        }
+      },
+      {
+        "at": "2026-06-28T15:27:58.861502+05:30",
+        "bias": "BEARISH",
+        "components": {
+          "RELIANCE": 0.01,
+          "HDFCBANK": -0.28,
+          "ICICIBANK": 0.41,
+          "INFY": -2.23,
+          "TCS": -1.82
+        }
+      },
+      {
+        "at": "2026-06-28T15:28:16.569476+05:30",
+        "bias": "BEARISH",
+        "components": {
+          "RELIANCE": 0.01,
+          "HDFCBANK": -0.28,
+          "ICICIBANK": 0.41,
+          "INFY": -2.23,
+          "TCS": -1.82
+        }
+      },
+      {
+        "at": "2026-06-28T15:28:34.118683+05:30",
+        "bias": "BEARISH",
+        "components": {
+          "RELIANCE": 0.01,
+          "HDFCBANK": -0.28,
+          "ICICIBANK": 0.41,
+          "INFY": -2.23,
+          "TCS": -1.82
+        }
+      },
+      {
+        "at": "2026-06-28T15:28:51.942493+05:30",
+        "bias": "BEARISH",
+        "components": {
+          "RELIANCE": 0.01,
+          "HDFCBANK": -0.28,
+          "ICICIBANK": 0.41,
+          "INFY": -2.23,
+          "TCS": -1.82
+        }
+      },
+      {
+        "at": "2026-06-28T15:29:09.764858+05:30",
+        "bias": "BEARISH",
+        "components": {
+          "RELIANCE": 0.01,
+          "HDFCBANK": -0.28,
+          "ICICIBANK": 0.41,
+          "INFY": -2.23,
+          "TCS": -1.82
+        }
+      },
+      {
+        "at": "2026-06-28T15:29:27.468978+05:30",
+        "bias": "BEARISH",
+        "components": {
+          "RELIANCE": 0.01,
+          "HDFCBANK": -0.28,
+          "ICICIBANK": 0.41,
+          "INFY": -2.23,
+          "TCS": -1.82
+        }
+      },
+      {
+        "at": "2026-06-28T15:29:45.236709+05:30",
+        "bias": "BEARISH",
+        "components": {
+          "RELIANCE": 0.01,
+          "HDFCBANK": -0.28,
+          "ICICIBANK": 0.41,
+          "INFY": -2.23,
+          "TCS": -1.82
+        }
+      },
+      {
+        "at": "2026-06-28T15:30:02.974272+05:30",
+        "bias": "BEARISH",
+        "components": {
+          "RELIANCE": 0.01,
+          "HDFCBANK": -0.28,
+          "ICICIBANK": 0.41,
+          "INFY": -2.23,
+          "TCS": -1.82
+        }
+      }
+    ],
+    "BANKNIFTY": [
+      {
+        "at": "2026-06-28T02:34:31.734021+05:30",
+        "bias": "NEUTRAL",
+        "components": {
+          "HDFCBANK": -0.28,
+          "ICICIBANK": 0.41,
+          "SBIN": 0.52,
+          "AXISBANK": -0.7,
+          "KOTAKBANK": null
+        }
+      },
+      {
+        "at": "2026-06-28T15:22:00.660803+05:30",
+        "bias": "NEUTRAL",
+        "components": {
+          "HDFCBANK": -0.28,
+          "ICICIBANK": 0.41,
+          "SBIN": 0.52,
+          "AXISBANK": -0.7,
+          "KOTAKBANK": null
+        }
+      },
+      {
+        "at": "2026-06-28T15:22:20.291649+05:30",
+        "bias": "NEUTRAL",
+        "components": {
+          "HDFCBANK": -0.28,
+          "ICICIBANK": 0.41,
+          "SBIN": 0.52,
+          "AXISBANK": -0.7,
+          "KOTAKBANK": null
+        }
+      },
+      {
+        "at": "2026-06-28T15:22:37.843459+05:30",
+        "bias": "NEUTRAL",
+        "components": {
+          "HDFCBANK": -0.28,
+          "ICICIBANK": 0.41,
+          "SBIN": 0.52,
+          "AXISBANK": -0.7,
+          "KOTAKBANK": null
+        }
+      },
+      {
+        "at": "2026-06-28T15:22:57.506663+05:30",
+        "bias": "NEUTRAL",
+        "components": {
+          "HDFCBANK": -0.28,
+          "ICICIBANK": 0.41,
+          "SBIN": 0.52,
+          "AXISBANK": -0.7,
+          "KOTAKBANK": null
+        }
+      },
+      {
+        "at": "2026-06-28T15:23:15.239448+05:30",
+        "bias": "NEUTRAL",
+        "components": {
+          "HDFCBANK": -0.28,
+          "ICICIBANK": 0.41,
+          "SBIN": 0.52,
+          "AXISBANK": -0.7,
+          "KOTAKBANK": null
+        }
+      },
+      {
+        "at": "2026-06-28T15:23:32.905289+05:30",
+        "bias": "NEUTRAL",
+        "components": {
+          "HDFCBANK": -0.28,
+          "ICICIBANK": 0.41,
+          "SBIN": 0.52,
+          "AXISBANK": -0.7,
+          "KOTAKBANK": null
+        }
+      },
+      {
+        "at": "2026-06-28T15:23:50.685511+05:30",
+        "bias": "NEUTRAL",
+        "components": {
+          "HDFCBANK": -0.28,
+          "ICICIBANK": 0.41,
+          "SBIN": 0.52,
+          "AXISBANK": -0.7,
+          "KOTAKBANK": null
+        }
+      },
+      {
+        "at": "2026-06-28T15:24:08.392553+05:30",
+        "bias": "NEUTRAL",
+        "components": {
+          "HDFCBANK": -0.28,
+          "ICICIBANK": 0.41,
+          "SBIN": 0.52,
+          "AXISBANK": -0.7,
+          "KOTAKBANK": null
+        }
+      },
+      {
+        "at": "2026-06-28T15:24:25.888513+05:30",
+        "bias": "NEUTRAL",
+        "components": {
+          "HDFCBANK": -0.28,
+          "ICICIBANK": 0.41,
+          "SBIN": 0.52,
+          "AXISBANK": -0.7,
+          "KOTAKBANK": null
+        }
+      },
+      {
+        "at": "2026-06-28T15:24:43.545285+05:30",
+        "bias": "NEUTRAL",
+        "components": {
+          "HDFCBANK": -0.28,
+          "ICICIBANK": 0.41,
+          "SBIN": 0.52,
+          "AXISBANK": -0.7,
+          "KOTAKBANK": null
+        }
+      },
+      {
+        "at": "2026-06-28T15:25:01.438965+05:30",
+        "bias": "NEUTRAL",
+        "components": {
+          "HDFCBANK": -0.28,
+          "ICICIBANK": 0.41,
+          "SBIN": 0.52,
+          "AXISBANK": -0.7,
+          "KOTAKBANK": null
+        }
+      },
+      {
+        "at": "2026-06-28T15:25:19.156019+05:30",
+        "bias": "NEUTRAL",
+        "components": {
+          "HDFCBANK": -0.28,
+          "ICICIBANK": 0.41,
+          "SBIN": 0.52,
+          "AXISBANK": -0.7,
+          "KOTAKBANK": null
+        }
+      },
+      {
+        "at": "2026-06-28T15:25:36.751437+05:30",
+        "bias": "NEUTRAL",
+        "components": {
+          "HDFCBANK": -0.28,
+          "ICICIBANK": 0.41,
+          "SBIN": 0.52,
+          "AXISBANK": -0.7,
+          "KOTAKBANK": null
+        }
+      },
+      {
+        "at": "2026-06-28T15:25:54.482625+05:30",
+        "bias": "NEUTRAL",
+        "components": {
+          "HDFCBANK": -0.28,
+          "ICICIBANK": 0.41,
+          "SBIN": 0.52,
+          "AXISBANK": -0.7,
+          "KOTAKBANK": null
+        }
+      },
+      {
+        "at": "2026-06-28T15:26:12.154458+05:30",
+        "bias": "NEUTRAL",
+        "components": {
+          "HDFCBANK": -0.28,
+          "ICICIBANK": 0.41,
+          "SBIN": 0.52,
+          "AXISBANK": -0.7,
+          "KOTAKBANK": null
+        }
+      },
+      {
+        "at": "2026-06-28T15:26:30.008879+05:30",
+        "bias": "NEUTRAL",
+        "components": {
+          "HDFCBANK": -0.28,
+          "ICICIBANK": 0.41,
+          "SBIN": 0.52,
+          "AXISBANK": -0.7,
+          "KOTAKBANK": null
+        }
+      },
+      {
+        "at": "2026-06-28T15:26:47.821351+05:30",
+        "bias": "NEUTRAL",
+        "components": {
+          "HDFCBANK": -0.28,
+          "ICICIBANK": 0.41,
+          "SBIN": 0.52,
+          "AXISBANK": -0.7,
+          "KOTAKBANK": null
+        }
+      },
+      {
+        "at": "2026-06-28T15:27:05.844382+05:30",
+        "bias": "NEUTRAL",
+        "components": {
+          "HDFCBANK": -0.28,
+          "ICICIBANK": 0.41,
+          "SBIN": 0.52,
+          "AXISBANK": -0.7,
+          "KOTAKBANK": null
+        }
+      },
+      {
+        "at": "2026-06-28T15:27:23.651231+05:30",
+        "bias": "NEUTRAL",
+        "components": {
+          "HDFCBANK": -0.28,
+          "ICICIBANK": 0.41,
+          "SBIN": 0.52,
+          "AXISBANK": -0.7,
+          "KOTAKBANK": null
+        }
+      },
+      {
+        "at": "2026-06-28T15:27:41.270102+05:30",
+        "bias": "NEUTRAL",
+        "components": {
+          "HDFCBANK": -0.28,
+          "ICICIBANK": 0.41,
+          "SBIN": 0.52,
+          "AXISBANK": -0.7,
+          "KOTAKBANK": null
+        }
+      },
+      {
+        "at": "2026-06-28T15:27:58.861502+05:30",
+        "bias": "NEUTRAL",
+        "components": {
+          "HDFCBANK": -0.28,
+          "ICICIBANK": 0.41,
+          "SBIN": 0.52,
+          "AXISBANK": -0.7,
+          "KOTAKBANK": null
+        }
+      },
+      {
+        "at": "2026-06-28T15:28:16.569476+05:30",
+        "bias": "NEUTRAL",
+        "components": {
+          "HDFCBANK": -0.28,
+          "ICICIBANK": 0.41,
+          "SBIN": 0.52,
+          "AXISBANK": -0.7,
+          "KOTAKBANK": null
+        }
+      },
+      {
+        "at": "2026-06-28T15:28:34.118683+05:30",
+        "bias": "NEUTRAL",
+        "components": {
+          "HDFCBANK": -0.28,
+          "ICICIBANK": 0.41,
+          "SBIN": 0.52,
+          "AXISBANK": -0.7,
+          "KOTAKBANK": null
+        }
+      },
+      {
+        "at": "2026-06-28T15:28:51.942493+05:30",
+        "bias": "NEUTRAL",
+        "components": {
+          "HDFCBANK": -0.28,
+          "ICICIBANK": 0.41,
+          "SBIN": 0.52,
+          "AXISBANK": -0.7,
+          "KOTAKBANK": null
+        }
+      },
+      {
+        "at": "2026-06-28T15:29:09.764858+05:30",
+        "bias": "NEUTRAL",
+        "components": {
+          "HDFCBANK": -0.28,
+          "ICICIBANK": 0.41,
+          "SBIN": 0.52,
+          "AXISBANK": -0.7,
+          "KOTAKBANK": null
+        }
+      },
+      {
+        "at": "2026-06-28T15:29:27.468978+05:30",
+        "bias": "NEUTRAL",
+        "components": {
+          "HDFCBANK": -0.28,
+          "ICICIBANK": 0.41,
+          "SBIN": 0.52,
+          "AXISBANK": -0.7,
+          "KOTAKBANK": null
+        }
+      },
+      {
+        "at": "2026-06-28T15:29:45.236709+05:30",
+        "bias": "NEUTRAL",
+        "components": {
+          "HDFCBANK": -0.28,
+          "ICICIBANK": 0.41,
+          "SBIN": 0.52,
+          "AXISBANK": -0.7,
+          "KOTAKBANK": null
+        }
+      },
+      {
+        "at": "2026-06-28T15:30:02.974272+05:30",
+        "bias": "NEUTRAL",
+        "components": {
+          "HDFCBANK": -0.28,
+          "ICICIBANK": 0.41,
+          "SBIN": 0.52,
+          "AXISBANK": -0.7,
+          "KOTAKBANK": null
+        }
+      }
+    ],
+    "SENSEX": [
+      {
+        "at": "2026-06-28T02:34:31.734021+05:30",
+        "bias": "BEARISH",
+        "components": {
+          "RELIANCE": 0.01,
+          "HDFCBANK": -0.28,
+          "ICICIBANK": 0.41,
+          "INFY": -2.23,
+          "TCS": -1.82,
+          "ITC": -0.12
+        }
+      },
+      {
+        "at": "2026-06-28T15:22:00.660803+05:30",
+        "bias": "BEARISH",
+        "components": {
+          "RELIANCE": 0.01,
+          "HDFCBANK": -0.28,
+          "ICICIBANK": 0.41,
+          "INFY": -2.23,
+          "TCS": -1.82,
+          "ITC": -0.12
+        }
+      },
+      {
+        "at": "2026-06-28T15:22:20.291649+05:30",
+        "bias": "BEARISH",
+        "components": {
+          "RELIANCE": 0.01,
+          "HDFCBANK": -0.28,
+          "ICICIBANK": 0.41,
+          "INFY": -2.23,
+          "TCS": -1.82,
+          "ITC": -0.12
+        }
+      },
+      {
+        "at": "2026-06-28T15:22:37.843459+05:30",
+        "bias": "BEARISH",
+        "components": {
+          "RELIANCE": 0.01,
+          "HDFCBANK": -0.28,
+          "ICICIBANK": 0.41,
+          "INFY": -2.23,
+          "TCS": -1.82,
+          "ITC": -0.12
+        }
+      },
+      {
+        "at": "2026-06-28T15:22:57.506663+05:30",
+        "bias": "BEARISH",
+        "components": {
+          "RELIANCE": 0.01,
+          "HDFCBANK": -0.28,
+          "ICICIBANK": 0.41,
+          "INFY": -2.23,
+          "TCS": -1.82,
+          "ITC": -0.12
+        }
+      },
+      {
+        "at": "2026-06-28T15:23:15.239448+05:30",
+        "bias": "BEARISH",
+        "components": {
+          "RELIANCE": 0.01,
+          "HDFCBANK": -0.28,
+          "ICICIBANK": 0.41,
+          "INFY": -2.23,
+          "TCS": -1.82,
+          "ITC": -0.12
+        }
+      },
+      {
+        "at": "2026-06-28T15:23:32.905289+05:30",
+        "bias": "BEARISH",
+        "components": {
+          "RELIANCE": 0.01,
+          "HDFCBANK": -0.28,
+          "ICICIBANK": 0.41,
+          "INFY": -2.23,
+          "TCS": -1.82,
+          "ITC": -0.12
+        }
+      },
+      {
+        "at": "2026-06-28T15:23:50.685511+05:30",
+        "bias": "BEARISH",
+        "components": {
+          "RELIANCE": 0.01,
+          "HDFCBANK": -0.28,
+          "ICICIBANK": 0.41,
+          "INFY": -2.23,
+          "TCS": -1.82,
+          "ITC": -0.12
+        }
+      },
+      {
+        "at": "2026-06-28T15:24:08.392553+05:30",
+        "bias": "BEARISH",
+        "components": {
+          "RELIANCE": 0.01,
+          "HDFCBANK": -0.28,
+          "ICICIBANK": 0.41,
+          "INFY": -2.23,
+          "TCS": -1.82,
+          "ITC": -0.12
+        }
+      },
+      {
+        "at": "2026-06-28T15:24:25.888513+05:30",
+        "bias": "BEARISH",
+        "components": {
+          "RELIANCE": 0.01,
+          "HDFCBANK": -0.28,
+          "ICICIBANK": 0.41,
+          "INFY": -2.23,
+          "TCS": -1.82,
+          "ITC": -0.12
+        }
+      },
+      {
+        "at": "2026-06-28T15:24:43.545285+05:30",
+        "bias": "BEARISH",
+        "components": {
+          "RELIANCE": 0.01,
+          "HDFCBANK": -0.28,
+          "ICICIBANK": 0.41,
+          "INFY": -2.23,
+          "TCS": -1.82,
+          "ITC": -0.12
+        }
+      },
+      {
+        "at": "2026-06-28T15:25:01.438965+05:30",
+        "bias": "BEARISH",
+        "components": {
+          "RELIANCE": 0.01,
+          "HDFCBANK": -0.28,
+          "ICICIBANK": 0.41,
+          "INFY": -2.23,
+          "TCS": -1.82,
+          "ITC": -0.12
+        }
+      },
+      {
+        "at": "2026-06-28T15:25:19.156019+05:30",
+        "bias": "BEARISH",
+        "components": {
+          "RELIANCE": 0.01,
+          "HDFCBANK": -0.28,
+          "ICICIBANK": 0.41,
+          "INFY": -2.23,
+          "TCS": -1.82,
+          "ITC": -0.12
+        }
+      },
+      {
+        "at": "2026-06-28T15:25:36.751437+05:30",
+        "bias": "BEARISH",
+        "components": {
+          "RELIANCE": 0.01,
+          "HDFCBANK": -0.28,
+          "ICICIBANK": 0.41,
+          "INFY": -2.23,
+          "TCS": -1.82,
+          "ITC": -0.12
+        }
+      },
+      {
+        "at": "2026-06-28T15:25:54.482625+05:30",
+        "bias": "BEARISH",
+        "components": {
+          "RELIANCE": 0.01,
+          "HDFCBANK": -0.28,
+          "ICICIBANK": 0.41,
+          "INFY": -2.23,
+          "TCS": -1.82,
+          "ITC": -0.12
+        }
+      },
+      {
+        "at": "2026-06-28T15:26:12.154458+05:30",
+        "bias": "BEARISH",
+        "components": {
+          "RELIANCE": 0.01,
+          "HDFCBANK": -0.28,
+          "ICICIBANK": 0.41,
+          "INFY": -2.23,
+          "TCS": -1.82,
+          "ITC": -0.12
+        }
+      },
+      {
+        "at": "2026-06-28T15:26:30.008879+05:30",
+        "bias": "BEARISH",
+        "components": {
+          "RELIANCE": 0.01,
+          "HDFCBANK": -0.28,
+          "ICICIBANK": 0.41,
+          "INFY": -2.23,
+          "TCS": -1.82,
+          "ITC": -0.12
+        }
+      },
+      {
+        "at": "2026-06-28T15:26:47.821351+05:30",
+        "bias": "BEARISH",
+        "components": {
+          "RELIANCE": 0.01,
+          "HDFCBANK": -0.28,
+          "ICICIBANK": 0.41,
+          "INFY": -2.23,
+          "TCS": -1.82,
+          "ITC": -0.12
+        }
+      },
+      {
+        "at": "2026-06-28T15:27:05.844382+05:30",
+        "bias": "BEARISH",
+        "components": {
+          "RELIANCE": 0.01,
+          "HDFCBANK": -0.28,
+          "ICICIBANK": 0.41,
+          "INFY": -2.23,
+          "TCS": -1.82,
+          "ITC": -0.12
+        }
+      },
+      {
+        "at": "2026-06-28T15:27:23.651231+05:30",
+        "bias": "BEARISH",
+        "components": {
+          "RELIANCE": 0.01,
+          "HDFCBANK": -0.28,
+          "ICICIBANK": 0.41,
+          "INFY": -2.23,
+          "TCS": -1.82,
+          "ITC": -0.12
+        }
+      },
+      {
+        "at": "2026-06-28T15:27:41.270102+05:30",
+        "bias": "BEARISH",
+        "components": {
+          "RELIANCE": 0.01,
+          "HDFCBANK": -0.28,
+          "ICICIBANK": 0.41,
+          "INFY": -2.23,
+          "TCS": -1.82,
+          "ITC": -0.12
+        }
+      },
+      {
+        "at": "2026-06-28T15:27:58.861502+05:30",
+        "bias": "BEARISH",
+        "components": {
+          "RELIANCE": 0.01,
+          "HDFCBANK": -0.28,
+          "ICICIBANK": 0.41,
+          "INFY": -2.23,
+          "TCS": -1.82,
+          "ITC": -0.12
+        }
+      },
+      {
+        "at": "2026-06-28T15:28:16.569476+05:30",
+        "bias": "BEARISH",
+        "components": {
+          "RELIANCE": 0.01,
+          "HDFCBANK": -0.28,
+          "ICICIBANK": 0.41,
+          "INFY": -2.23,
+          "TCS": -1.82,
+          "ITC": -0.12
+        }
+      },
+      {
+        "at": "2026-06-28T15:28:34.118683+05:30",
+        "bias": "BEARISH",
+        "components": {
+          "RELIANCE": 0.01,
+          "HDFCBANK": -0.28,
+          "ICICIBANK": 0.41,
+          "INFY": -2.23,
+          "TCS": -1.82,
+          "ITC": -0.12
+        }
+      },
+      {
+        "at": "2026-06-28T15:28:51.942493+05:30",
+        "bias": "BEARISH",
+        "components": {
+          "RELIANCE": 0.01,
+          "HDFCBANK": -0.28,
+          "ICICIBANK": 0.41,
+          "INFY": -2.23,
+          "TCS": -1.82,
+          "ITC": -0.12
+        }
+      },
+      {
+        "at": "2026-06-28T15:29:09.764858+05:30",
+        "bias": "BEARISH",
+        "components": {
+          "RELIANCE": 0.01,
+          "HDFCBANK": -0.28,
+          "ICICIBANK": 0.41,
+          "INFY": -2.23,
+          "TCS": -1.82,
+          "ITC": -0.12
+        }
+      },
+      {
+        "at": "2026-06-28T15:29:27.468978+05:30",
+        "bias": "BEARISH",
+        "components": {
+          "RELIANCE": 0.01,
+          "HDFCBANK": -0.28,
+          "ICICIBANK": 0.41,
+          "INFY": -2.23,
+          "TCS": -1.82,
+          "ITC": -0.12
+        }
+      },
+      {
+        "at": "2026-06-28T15:29:45.236709+05:30",
+        "bias": "BEARISH",
+        "components": {
+          "RELIANCE": 0.01,
+          "HDFCBANK": -0.28,
+          "ICICIBANK": 0.41,
+          "INFY": -2.23,
+          "TCS": -1.82,
+          "ITC": -0.12
+        }
+      },
+      {
+        "at": "2026-06-28T15:30:02.974272+05:30",
+        "bias": "BEARISH",
+        "components": {
+          "RELIANCE": 0.01,
+          "HDFCBANK": -0.28,
+          "ICICIBANK": 0.41,
+          "INFY": -2.23,
+          "TCS": -1.82,
+          "ITC": -0.12
+        }
+      }
+    ]
+  },
+  "redis_cache_dump": {
+    "live_state": null,
+    "system_mode": "NEUTRAL",
+    "kill_switch": null,
+    "positions": null,
+    "index_states": {
+      "NIFTY": null,
+      "BANKNIFTY": null,
+      "SENSEX": null
+    }
+  }
+}

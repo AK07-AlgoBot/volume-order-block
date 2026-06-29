@@ -1,0 +1,190 @@
+{
+  "start": "2023-06-27",
+  "end": "2026-06-26",
+  "symbols": [
+    "NIFTY",
+    "BANKNIFTY",
+    "SENSEX"
+  ],
+  "sensitivity": 5,
+  "note": "Uses check_velocity_breakout() as-is: pivot breakout (18-bar high/low) + volume > 20-bar MA (bar-range proxy on index). Max 1 trade/day. Premium exit: NIFTY 60/18, BN 150/45, SENSEX 120/35 pts at 0.5 delta. Not financial advice.",
+  "results": {
+    "NIFTY": {
+      "days_scanned": 784,
+      "trades": 731,
+      "wins": 231,
+      "losses": 500,
+      "win_rate_pct": 31.6,
+      "total_premium_pts": 1084.24,
+      "inr_1_lot": 70475.6,
+      "avg_premium_pts": 1.48,
+      "signal_bars_ce": 360,
+      "signal_bars_pe": 371,
+      "sample_trades": [
+        {
+          "day": "2026-06-18",
+          "side": "CE",
+          "entry": 24118.7,
+          "exit": 24082.7,
+          "pnl_premium_pts": -18.0,
+          "reason": "PREMIUM_SL",
+          "signal": "\ud83d\udca5 VELOCITY SQUEEZE BREAKOUT"
+        },
+        {
+          "day": "2026-06-19",
+          "side": "PE",
+          "entry": 23917.35,
+          "exit": 23953.35,
+          "pnl_premium_pts": -18.0,
+          "reason": "PREMIUM_SL",
+          "signal": "\ud83d\udca5 VELOCITY BREAKDOWN"
+        },
+        {
+          "day": "2026-06-22",
+          "side": "PE",
+          "entry": 24134.1,
+          "exit": 24085.6,
+          "pnl_premium_pts": 24.25,
+          "reason": "EOD",
+          "signal": "\ud83d\udca5 VELOCITY BREAKDOWN"
+        },
+        {
+          "day": "2026-06-23",
+          "side": "PE",
+          "entry": 24083.1,
+          "exit": 23963.1,
+          "pnl_premium_pts": 60.0,
+          "reason": "PREMIUM_TARGET",
+          "signal": "\ud83d\udca5 VELOCITY BREAKDOWN"
+        },
+        {
+          "day": "2026-06-24",
+          "side": "CE",
+          "entry": 23987.55,
+          "exit": 24018.95,
+          "pnl_premium_pts": 15.7,
+          "reason": "EOD",
+          "signal": "\ud83d\udca5 VELOCITY SQUEEZE BREAKOUT"
+        }
+      ]
+    },
+    "BANKNIFTY": {
+      "days_scanned": 784,
+      "trades": 734,
+      "wins": 208,
+      "losses": 526,
+      "win_rate_pct": 28.3,
+      "total_premium_pts": -738.09,
+      "inr_1_lot": -22142.7,
+      "avg_premium_pts": -1.01,
+      "signal_bars_ce": 400,
+      "signal_bars_pe": 334,
+      "sample_trades": [
+        {
+          "day": "2026-06-18",
+          "side": "CE",
+          "entry": 57840.6,
+          "exit": 57750.6,
+          "pnl_premium_pts": -45.0,
+          "reason": "PREMIUM_SL",
+          "signal": "\ud83d\udca5 VELOCITY SQUEEZE BREAKOUT"
+        },
+        {
+          "day": "2026-06-19",
+          "side": "PE",
+          "entry": 57629.85,
+          "exit": 57719.85,
+          "pnl_premium_pts": -45.0,
+          "reason": "PREMIUM_SL",
+          "signal": "\ud83d\udca5 VELOCITY BREAKDOWN"
+        },
+        {
+          "day": "2026-06-22",
+          "side": "CE",
+          "entry": 57943.5,
+          "exit": 57853.5,
+          "pnl_premium_pts": -45.0,
+          "reason": "PREMIUM_SL",
+          "signal": "\ud83d\udca5 VELOCITY SQUEEZE BREAKOUT"
+        },
+        {
+          "day": "2026-06-23",
+          "side": "PE",
+          "entry": 57762.6,
+          "exit": 57462.6,
+          "pnl_premium_pts": 150.0,
+          "reason": "PREMIUM_TARGET",
+          "signal": "\ud83d\udca5 VELOCITY BREAKDOWN"
+        },
+        {
+          "day": "2026-06-24",
+          "side": "CE",
+          "entry": 57451.25,
+          "exit": 57361.25,
+          "pnl_premium_pts": -45.0,
+          "reason": "PREMIUM_SL",
+          "signal": "\ud83d\udca5 VELOCITY SQUEEZE BREAKOUT"
+        }
+      ]
+    },
+    "SENSEX": {
+      "days_scanned": 784,
+      "trades": 731,
+      "wins": 205,
+      "losses": 526,
+      "win_rate_pct": 28.0,
+      "total_premium_pts": 4061.62,
+      "inr_1_lot": 81232.4,
+      "avg_premium_pts": 5.56,
+      "signal_bars_ce": 368,
+      "signal_bars_pe": 363,
+      "sample_trades": [
+        {
+          "day": "2026-06-18",
+          "side": "CE",
+          "entry": 77265.33,
+          "exit": 77195.33,
+          "pnl_premium_pts": -35.0,
+          "reason": "PREMIUM_SL",
+          "signal": "\ud83d\udca5 VELOCITY SQUEEZE BREAKOUT"
+        },
+        {
+          "day": "2026-06-19",
+          "side": "CE",
+          "entry": 76659.71,
+          "exit": 76589.71,
+          "pnl_premium_pts": -35.0,
+          "reason": "PREMIUM_SL",
+          "signal": "\ud83d\udca5 VELOCITY SQUEEZE BREAKOUT"
+        },
+        {
+          "day": "2026-06-22",
+          "side": "CE",
+          "entry": 77304.44,
+          "exit": 77234.44,
+          "pnl_premium_pts": -35.0,
+          "reason": "PREMIUM_SL",
+          "signal": "\ud83d\udca5 VELOCITY SQUEEZE BREAKOUT"
+        },
+        {
+          "day": "2026-06-23",
+          "side": "PE",
+          "entry": 77050.53,
+          "exit": 76810.53,
+          "pnl_premium_pts": 120.0,
+          "reason": "PREMIUM_TARGET",
+          "signal": "\ud83d\udca5 VELOCITY BREAKDOWN"
+        },
+        {
+          "day": "2026-06-24",
+          "side": "CE",
+          "entry": 76859.48,
+          "exit": 76789.48,
+          "pnl_premium_pts": -35.0,
+          "reason": "PREMIUM_SL",
+          "signal": "\ud83d\udca5 VELOCITY SQUEEZE BREAKOUT"
+        }
+      ]
+    }
+  }
+}

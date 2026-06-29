@@ -1,0 +1,85 @@
+{
+  "date": "2026-06-25",
+  "generated_at": "2026-06-25T20:55:56.433763+05:30",
+  "paper_trading": true,
+  "pnl_points_by_index": {
+    "NIFTY": 0.0,
+    "BANKNIFTY": 0.0,
+    "SENSEX": 0.0
+  },
+  "pnl_points_total": 0.0,
+  "trade_log": [],
+  "spot_tracking": {
+    "NIFTY": [
+      {
+        "at": "2026-06-25T20:55:56.433763+05:30",
+        "spot": 24056.0
+      }
+    ],
+    "BANKNIFTY": [
+      {
+        "at": "2026-06-25T20:55:56.433763+05:30",
+        "spot": 58177.05
+      }
+    ],
+    "SENSEX": [
+      {
+        "at": "2026-06-25T20:55:56.433763+05:30",
+        "spot": 77100.47
+      }
+    ]
+  },
+  "component_sentiment_tracking": {
+    "NIFTY": [
+      {
+        "at": "2026-06-25T20:55:56.433763+05:30",
+        "bias": "BEARISH",
+        "components": {
+          "RELIANCE": 0.01,
+          "HDFCBANK": -0.28,
+          "ICICIBANK": 0.41,
+          "INFY": -2.23,
+          "TCS": -1.82
+        }
+      }
+    ],
+    "BANKNIFTY": [
+      {
+        "at": "2026-06-25T20:55:56.433763+05:30",
+        "bias": "NEUTRAL",
+        "components": {
+          "HDFCBANK": -0.28,
+          "ICICIBANK": 0.41,
+          "SBIN": 0.52,
+          "AXISBANK": -0.7,
+          "KOTAKBANK": null
+        }
+      }
+    ],
+    "SENSEX": [
+      {
+        "at": "2026-06-25T20:55:56.433763+05:30",
+        "bias": "BEARISH",
+        "components": {
+          "RELIANCE": 0.01,
+          "HDFCBANK": -0.28,
+          "ICICIBANK": 0.41,
+          "INFY": -2.23,
+          "TCS": -1.82,
+          "ITC": -0.12
+        }
+      }
+    ]
+  },
+  "redis_cache_dump": {
+    "live_state": null,
+    "system_mode": "NEUTRAL",
+    "kill_switch": null,
+    "positions": null,
+    "index_states": {
+      "NIFTY": null,
+      "BANKNIFTY": null,
+      "SENSEX": null
+    }
+  }
+}
