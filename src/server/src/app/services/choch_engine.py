@@ -94,6 +94,8 @@ ADX_PERIOD: Final[int] = int(os.environ.get("CHOCH_ADX_PERIOD", "14"))
 ADX_MIN: Final[float] = float(os.environ.get("CHOCH_ADX_MIN", "20.0"))
 HTF_EMA_PERIOD: Final[int] = int(os.environ.get("CHOCH_HTF_EMA", "20"))
 MAX_TRADES_PER_DAY: Final[int] = int(os.environ.get("CHOCH_MAX_TRADES", "2"))
+BROKER_SYNC_GRACE_SEC: Final[int] = int(os.environ.get("CHOCH_BROKER_SYNC_GRACE_SEC", "90"))
+BROKER_FLAT_CONFIRM_TICKS: Final[int] = int(os.environ.get("CHOCH_BROKER_FLAT_CONFIRM_TICKS", "2"))
 
 # ── risk / sizing ─────────────────────────────────────────────────────────────
 CAPITAL_INR: Final[float] = float(os.environ.get("CHOCH_CAPITAL_INR", "500000"))
@@ -539,11 +541,24 @@ class CHOCHIndexState:
     struct_upto: int = 0  # next confirmable bar index for catch_up_structure
     last_entry_fingerprint: str = ""
     last_rejected_fingerprint: str = ""
+    broker_flat_streak: int = 0
     rejected_signals: list[dict[str, Any]] = field(default_factory=list)
 
 
 def _entry_fingerprint(signal_type: str, direction: str, signal_level: float) -> str:
     return f"{signal_type}|{direction}|{round(signal_level, 1)}"
+
+
+def _position_age_seconds(pos: CHOCHPosition, now: datetime) -> float:
+    if not pos.opened_at:
+        return 0.0
+    try:
+        opened = datetime.fromisoformat(pos.opened_at)
+    except ValueError:
+        return 0.0
+    if opened.tzinfo is None:
+        opened = opened.replace(tzinfo=IST)
+    return max(0.0, (now - opened).total_seconds())
 
 
 def _position_to_dict(pos: CHOCHPosition) -> dict[str, Any]:
@@ -1092,6 +1107,7 @@ class CHOCHEngine:
                 return
 
         state.last_entry_fingerprint = fp
+        state.broker_flat_streak = 0
         state.position = CHOCHPosition(
             direction=direction,
             entry_price=entry,
@@ -1165,16 +1181,24 @@ class CHOCHEngine:
             return
         spot = state.spot
 
-        # Sync if user flattened manually on Upstox (engine would otherwise stay "open")
-        if pos.instrument_key:
+        # Sync if user flattened manually on Upstox (engine would otherwise stay "open").
+        # Skip until fill settles and require consecutive flat reads — avoids false exits
+        # when the portfolio API lags or instrument ids differ (NSE_FO|token vs token-only).
+        if pos.instrument_key and _position_age_seconds(pos, now) >= BROKER_SYNC_GRACE_SEC:
             net = self.client.broker_net_qty(pos.instrument_key)
-            if net is not None and net <= 0:
-                logger.info(
-                    "[%s] CHOCH broker flat detected (manual exit?) — clearing engine state",
-                    state.config.code,
-                )
-                self._exit(state, spot, "BROKER_FLAT", now, skip_broker_order=True)
-                return
+            if net is None:
+                state.broker_flat_streak = 0
+            elif net <= 0:
+                state.broker_flat_streak += 1
+                if state.broker_flat_streak >= BROKER_FLAT_CONFIRM_TICKS:
+                    logger.info(
+                        "[%s] CHOCH broker flat confirmed (manual exit?) — clearing engine state",
+                        state.config.code,
+                    )
+                    self._exit(state, spot, "BROKER_FLAT", now, skip_broker_order=True)
+                    return
+            else:
+                state.broker_flat_streak = 0
 
         if now.time() >= SQUARE_OFF_TIME:
             self._exit(state, spot, "INTRADAY_SQUARE_OFF_1455", now)
@@ -1256,7 +1280,10 @@ class CHOCHEngine:
         pnl_inr = pnl_pts * pos.lots * pos.lot_size
         state.daily_pnl_inr += pnl_inr
         state.position = None
-        state.last_entry_fingerprint = ""
+        state.broker_flat_streak = 0
+        # Keep fingerprint after BROKER_FLAT so the same 5m signal cannot re-fire within seconds.
+        if reason != "BROKER_FLAT":
+            state.last_entry_fingerprint = ""
         state.setup_label = f"Flat — {reason} ({pnl_pts:+.1f} pts)"
         state.signal_log.append(f"EXIT {reason} @ {exit_price:.1f} | {pnl_pts:+.2f} pts")
         performance_store.record_completed_trade(

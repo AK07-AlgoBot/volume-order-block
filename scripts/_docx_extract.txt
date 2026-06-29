@@ -1,0 +1,209 @@
+=== ROW 0 ===
+
+PAVANI KENGANA
+ 
+SOFTWARE TESTING & QA PROFESSIONAL
+
+
+=== ROW 1 ===
++91-6369255698
+
+=== ROW 1 ===
+         Pavanikengana.agm@gmail.com
+
+=== ROW 1 ===
+                               Bangalore, India 
+
+=== ROW 2 ===
+Performance-driven Software Testing professional, accomplishing new summits of achievement through unwavering diligence and 
+leaving an indelible imprint of excellence at every stride, targeting challenging leadership assignments in Software Testing & QA, with
+an organization of high repute, preferably in Bangalore 
+
+=== ROW 3 ===
+
+ CORE COMPETENCIES
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+       CERTIFICATIONS
+
+ISTQB Certification
+
+
+
+ TECHNICAL SKILLS
+
+Tools: Eclipse, Selenium WebDriver, JIRA, qTest, Tapsium, postman, putty, Linux, PL/SQL, Zephyr, Winscp
+Languages: Basics in Core Java
+
+
+
+  SOFT SKILLS
+
+
+
+
+       EDUCATION
+
+2013: B.Sc. in Computer Science from Sri Venkateshwara University, Tirupati
+
+
+
+
+
+
+
+
+
+
+
+
+ PERSONAL DETAILS
+
+Date of Birth: 1st July 1993
+Address: Bangalore, India
+Languages Known: English,Telugu,Tamil and Hindi
+ 
+
+=== ROW 3 ===
+
+ PROFILE SUMMARY 
+
+Leveraging over 10 years of comprehensive experience in Software Testing, covering Manual and Automation testing using Selenium WebDriver, throughout different stages of the Software Testing Life Cycle (STLC).
+Outstanding competence in all phases of STLC, including Requirement Analysis, Test Planning, Test Scripting (using TestNG Annotations), Test Execution, Defect Management, Status Reporting, and Test Closure.
+Excels in analyzing business requirements, crafting test cases, and tracking defects using JIRA, QTest, and Zephyr. 
+Proficient in crafting frameworks using Data-driven Testing and leveraging tools like Jenkins, Tapsium, Putty, Winscp, Postman, PL/SQL, and Linux.
+Showcased proficiency in diverse testing phases, encompassing, Functional end to end Testing, System Testing, Integration Testing, Regression Testing, Adhoc Testing, and Retest Testing.
+Capability to drive an independent workstream, comfortable to work in ambiguous, ever-changing situations and flexible to work collaboratively in a team.
+
+ CAREER TIMELINE  
+
+
+
+
+ WORK EXPERIENCE    
+
+Since Feb’20 | Associate Consultant | Tata Consultancy Services, Bangalore
+
+
+Projects Undertaken:
+
+Since Oct’23 | Client: J. Sainsburys | Environment: Manual Testing
+
+Key Result Areas:
+Participating in Sprint Review and planning calls.
+Analyzing and comprehending user stories.
+Preparing test scenarios and uploading cases in Zephyr.
+Executing cases in E2E and ST environments.
+Utilizing Postman for token retrieval and triggering results with Get and Post requests based on JSON.
+Employing SQL commands to retrieve and examine results in relevant tables.
+Uploading test format files to servers using Winscp tools for application connections.
+Using Putty to run Linux commands in Integration testing and End to End testing.
+Reporting and tracking defects in Zephyr.
+Attending triage calls to prioritize defects and participating in retrospective meetings.
+Participating in DTP calls and reporting status.
+Sending signoff emails to signify the completion of testing activities.
+Attending Retrospective meetings to review and improve processes.
+Identifying regression cases for automation.
+Writing automation scripts for project modules using IDE(Eclipse) 
+Web services testing using XML requests and analyzing the responses in POSTMAN tool for JSON and Rest client (extension) for API testing.
+Working with TestNG for automation testing reports and extent reports for the scheduled jenkins jobs.
+Developed a framework and maintaining using Data driven, POM and driving the data with excel on annotations.
+Having experience working on Maven, GIThub for code commits.
+Health-checks suite maintenance and execution in production environment.
+Integration with jenkins and QE portal about the JIRA loggers for reporting.
+Implementation of CI/CD pipeline for the Project Initiation module helps on the continuous integration and continuous inspection with continuous deployment.
+Conducted all types of testing like functional, unit, integration, smoke, sanity, system, web services, compatibility, user interface, accessibility, exploratory and regression testing.
+Feb’20-Feb’22 | Client: Verizon | Environment: Manual and Automation Testing
+
+Key Result Areas:
+Analyzed and comprehended user stories thoroughly.
+Prepared and executed test cases with precision.
+Compiled data points through Mongo DB.
+Reported defects and meticulously tracked them in JIRA and Qtest.
+Attended developer meetings to discuss identified defects.
+Participated in defect tracking meetings with Business Analysts, Product Owners, and the development team.
+Possessed knowledge and hands-on experience in API, utilizing Postman in testing projects.
+Attended Daily sync-up calls and provided comprehensive status reports.
+Engaged in Defect Triage and Prevention (DTP) calls, delivering detailed status updates.
+Identified cases suitable for automation.
+Demonstrated expertise in compatibility testing and UI.
+Contributed to Production testing initiatives.
+Wrote automation scripts and executed them through Tapsium.
+
+Sep’18-Feb’20 | Sr. Associate Consultant | Foray Software Private Limited, Chennai
+
+Projects Undertaken:
+
+Sep’18-Feb’20 | Client: Verizon | Environment: Manual and Automation Tester
+
+Key Result Areas:
+Analyzed and comprehended user stories thoroughly.
+Prepared and executed test cases with precision.
+Compiled data points through Mongo DB.
+Reported defects and tracked them in JIRA/qTest.
+Attended daily sync-up calls and provided status reports.
+Engaged in Defect Triage and Prevention (DTP) calls, delivering detailed status updates.
+Identified cases suitable for automation.
+Wrote automation scripts and executed them through Tapsium.
+
+Nov'17-Jun'18 | Associate Consultant | Capgemini, Chennai
+
+Projects Undertaken:
+
+Nov’17-Jun'18| Client: Euler Hermes | Environment: Manual Tester
+
+Key Result Areas:
+Analyzed and understood business requirements comprehensively.
+Prepared scenarios based on the identified requirements.
+Developed test cases for the created scenarios and executed testing procedures.
+Reported and tracked defects in HP ALM.
+Attended defect tracking meetings to discuss and address identified issues.
+Provided status reports during regular reporting sessions.
+
+Jan’14-Feb’17 | Operations Executive | Infosys, Chennai
+
+Projects Undertaken:
+
+Jun’16-Feb’17 | Client: Horizon Blue Cross and Blue Shield | Environment: Automation Tester
+
+Key Result Areas:
+Analyzed and comprehended business requirements thoroughly.
+Prepared and executed test cases to ensure comprehensive testing coverage.
+Reported defects, tracked their progress, and provided detailed status reports.
+Created test cases utilizing element locators and Selenium WebDriver methods.
+
+Executed Selenium test cases and diligently reported identified defects.
+Enhanced test cases using Java programming and Testing annotations.
+Identified areas suitable for automation and developed scripts for Sanity testing and Regression suite in Selenium WebDriver.
+Conducted daily execution of automation scripts for Sanity tests to maintain environment stability and identify breaks in functionality.
+
+Jan’14-May’16 | Client: AT&T Business Center | Environment: Manual Tester
+
+Key Result Areas:
+Actively participated in Grooming sessions and stand-up meetings to grasp the intricacies of business rules and system operation flows.
+Regularly attended daily stand-up calls and scrum meetings for ongoing project updates.
+Played a pivotal role in the Sustenance team, closely monitoring production defects and addressing new requirements raised by users and business stakeholders.
+Utilized Jenkins for both continuous and scheduled execution of project tasks.
+Participated in and initiated Defect Triage Calls to address and prioritize identified issues.
+Acted as a mentor to new team members, sharing knowledge and facilitating their onboarding process.
+

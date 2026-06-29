@@ -250,6 +250,17 @@ def _parse_v3_candle_row(row: Any) -> dict[str, float] | None:
     return None
 
 
+def _instrument_keys_match(expected: str, actual: str) -> bool:
+    """Match Upstox instrument ids across chain (NSE_FO|token) vs positions (token-only)."""
+    if not expected or not actual:
+        return False
+    if expected == actual:
+        return True
+    expected_suffix = expected.split("|", 1)[-1]
+    actual_suffix = actual.split("|", 1)[-1]
+    return expected_suffix == actual or actual_suffix == expected or expected_suffix == actual_suffix
+
+
 def in_execution_boundary(spot: float, call_wall: int, put_floor: int) -> bool:
     """True when spot is inside the 30-pt support or resistance pocket."""
     in_support = put_floor <= spot <= put_floor + SUPPORT_POCKET_POINTS
@@ -626,7 +637,7 @@ class UpstoxClient:
         return False
 
     def get_net_position_qty(self, instrument_key: str) -> int | None:
-        """Net intraday qty for one instrument. 0 = flat. None = lookup failed."""
+        """Net intraday qty for one instrument. 0 = flat at broker. None = API failed or unknown."""
         if not instrument_key:
             return None
         data = self._get(f"{self.base_url}/portfolio/short-term-positions")
@@ -636,13 +647,13 @@ class UpstoxClient:
             if not isinstance(row, dict):
                 continue
             key = str(row.get("instrument_token") or row.get("instrument_key") or "")
-            if key != instrument_key:
+            if not _instrument_keys_match(instrument_key, key):
                 continue
             try:
                 return int(row.get("quantity") or 0)
             except (TypeError, ValueError):
                 return 0
-        return 0
+        return None
 
     def get_short_term_positions(self) -> list[dict[str, Any]]:
         data = self._get(f"{self.base_url}/portfolio/short-term-positions")
