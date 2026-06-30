@@ -29,7 +29,8 @@ Exit rules
 ──────────
   SL  = CHOCH structural level ± 0.25 × ATR(14)
   TP  = entry ± 2 × risk_distance  (R:R 2:1)
-  Trail SL: ratchet to 3-bar swing after price moves 1R in our favour.
+  Trail SL: ratchet to 3-bar swing after MFE reaches 1R (not just current spot).
+  Breakeven: move SL to entry when MFE reaches 0.5R (prevents +144 pts → -122 flip).
   Force flat: 14:55 IST (same as S1/S2/S7).
 """
 
@@ -90,6 +91,8 @@ SWING_LOOKBACK: Final[int] = int(os.environ.get("CHOCH_SWING_LB", "3"))
 ATR_PERIOD: Final[int] = int(os.environ.get("CHOCH_ATR_PERIOD", "14"))
 SL_ATR_BUFFER: Final[float] = float(os.environ.get("CHOCH_SL_BUF", "0.25"))
 TP_RR: Final[float] = float(os.environ.get("CHOCH_TP_RR", "2.0"))
+BE_TRIGGER_RR: Final[float] = float(os.environ.get("CHOCH_BE_RR", "0.5"))
+BE_BUFFER_PTS: Final[float] = float(os.environ.get("CHOCH_BE_BUFFER_PTS", "2.0"))
 ADX_PERIOD: Final[int] = int(os.environ.get("CHOCH_ADX_PERIOD", "14"))
 ADX_MIN: Final[float] = float(os.environ.get("CHOCH_ADX_MIN", "20.0"))
 ADX_MIN_BARS: Final[int] = ADX_PERIOD * 2
@@ -472,6 +475,58 @@ def ratchet_stop(
     return candidate
 
 
+def breakeven_sl_price(direction: str, entry: float) -> float:
+    """Lock ~flat once trade has worked — LONG SL below entry, SHORT SL above entry."""
+    if direction == "LONG":
+        return entry - BE_BUFFER_PTS
+    return entry + BE_BUFFER_PTS
+
+
+def update_position_mfe(pos: CHOCHPosition, spot: float, closed: list[dict]) -> None:
+    """Track max favourable excursion using live spot and closed-bar extremes."""
+    if pos.direction == "LONG":
+        pos.max_favorable_pts = max(pos.max_favorable_pts, spot - pos.entry_price)
+        if closed:
+            pos.max_favorable_pts = max(
+                pos.max_favorable_pts,
+                float(closed[-1]["high"]) - pos.entry_price,
+            )
+    else:
+        pos.max_favorable_pts = max(pos.max_favorable_pts, pos.entry_price - spot)
+        if closed:
+            pos.max_favorable_pts = max(
+                pos.max_favorable_pts,
+                pos.entry_price - float(closed[-1]["low"]),
+            )
+
+
+def apply_profit_management(pos: CHOCHPosition, closed: list[dict]) -> None:
+    """BE at 0.5R MFE, then 3-bar swing trail at 1R MFE."""
+    if pos.risk_pts <= 0:
+        return
+    be_level = pos.risk_pts * BE_TRIGGER_RR
+    if pos.max_favorable_pts >= be_level:
+        be_sl = breakeven_sl_price(pos.direction, pos.entry_price)
+        new_sl = ratchet_stop(pos.direction, pos.sl_price, pos.entry_price, be_sl)
+        if new_sl != pos.sl_price:
+            pos.sl_price = new_sl
+            pos.trail_sl = new_sl
+
+    if pos.max_favorable_pts >= pos.risk_pts and closed:
+        if pos.direction == "LONG":
+            swing_low = min(float(c["low"]) for c in closed[-3:])
+            new_trail = swing_low - pos.risk_pts * 0.2
+            if new_trail > pos.sl_price:
+                pos.sl_price = new_trail
+                pos.trail_sl = new_trail
+        else:
+            swing_high = max(float(c["high"]) for c in closed[-3:])
+            new_trail = swing_high + pos.risk_pts * 0.2
+            if new_trail < pos.sl_price:
+                pos.sl_price = new_trail
+                pos.trail_sl = new_trail
+
+
 def detect_choch(state: StructureState, closed: list[dict]) -> tuple[str | None, float]:
     """Two-step CHOCH + BOS detection.
 
@@ -559,6 +614,7 @@ class CHOCHPosition:
     tp_price: float
     trail_sl: float
     risk_pts: float
+    max_favorable_pts: float = 0.0
     opened_at: str
     entry_reason: str
     instrument_key: str = ""
@@ -612,6 +668,7 @@ def _position_to_dict(pos: CHOCHPosition) -> dict[str, Any]:
         "tp_price": pos.tp_price,
         "trail_sl": pos.trail_sl,
         "risk_pts": pos.risk_pts,
+        "max_favorable_pts": pos.max_favorable_pts,
         "opened_at": pos.opened_at,
         "entry_reason": pos.entry_reason,
         "instrument_key": pos.instrument_key,
@@ -630,6 +687,7 @@ def _position_from_dict(raw: dict[str, Any], lot_size: int) -> CHOCHPosition:
         tp_price=float(raw["tp_price"]),
         trail_sl=float(raw.get("trail_sl") or raw["sl_price"]),
         risk_pts=float(raw["risk_pts"]),
+        max_favorable_pts=float(raw.get("max_favorable_pts") or 0.0),
         opened_at=str(raw.get("opened_at") or ""),
         entry_reason=str(raw.get("entry_reason") or ""),
         instrument_key=str(raw.get("instrument_key") or ""),
@@ -1255,8 +1313,11 @@ class CHOCHEngine:
             self._exit(state, spot, "INTRADAY_SQUARE_OFF_1455", now)
             return
 
+        update_position_mfe(pos, spot, closed)
+
         # Ratchet SL to latest confirmed structural swing (last_sl / last_sh)
-        atr_val = _atr(closed)
+        indicator_bars = _indicator_series(state.indicator_warmup, closed)
+        atr_val = _atr(indicator_bars)
         if atr_val is not None:
             buf = atr_val * SL_ATR_BUFFER
             candidate = structural_stop_price(pos.direction, state.structure, buf)
@@ -1281,31 +1342,22 @@ class CHOCHEngine:
                         timestamp=now.strftime("%Y-%m-%d %H:%M:%S IST"),
                     )
 
-        # Extra bar trail once price moves 1R in our favour
-        profit_pts = (spot - pos.entry_price) if pos.direction == "LONG" else (pos.entry_price - spot)
-        if profit_pts >= pos.risk_pts and closed:
-            if pos.direction == "LONG":
-                swing_low = min(float(c["low"]) for c in closed[-3:])
-                new_trail = swing_low - pos.risk_pts * 0.2
-                if new_trail > pos.sl_price:
-                    pos.sl_price = new_trail
-                    pos.trail_sl = new_trail
-            else:
-                swing_high = max(float(c["high"]) for c in closed[-3:])
-                new_trail = swing_high + pos.risk_pts * 0.2
-                if new_trail < pos.sl_price:
-                    pos.sl_price = new_trail
-                    pos.trail_sl = new_trail
+        apply_profit_management(pos, closed)
+
+        bar_high = float(closed[-1]["high"]) if closed else spot
+        bar_low = float(closed[-1]["low"]) if closed else spot
+        check_high = max(spot, bar_high)
+        check_low = min(spot, bar_low)
 
         if pos.direction == "LONG":
-            if spot <= pos.sl_price:
+            if check_low <= pos.sl_price:
                 self._exit(state, pos.sl_price, "SL_HIT", now)
-            elif spot >= pos.tp_price:
+            elif check_high >= pos.tp_price:
                 self._exit(state, pos.tp_price, "TP_HIT_2R", now)
         else:
-            if spot >= pos.sl_price:
+            if check_high >= pos.sl_price:
                 self._exit(state, pos.sl_price, "SL_HIT", now)
-            elif spot <= pos.tp_price:
+            elif check_low <= pos.tp_price:
                 self._exit(state, pos.tp_price, "TP_HIT_2R", now)
 
     def _exit(

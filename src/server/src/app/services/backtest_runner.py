@@ -47,6 +47,8 @@ from app.services.choch_engine import (
     ratchet_stop,
     detect_choch,
     detect_bos_trend,
+    apply_profit_management,
+    update_position_mfe,
     _atr as s8_atr,
     _adx as s8_adx,
     _htf_trend as s8_htf_trend,
@@ -139,6 +141,9 @@ class SimPosition:
     target_price: float | None = None
     partial_booked: bool = False
     lots: int = 1
+    risk_pts: float = 0.0
+    max_favorable_pts: float = 0.0
+    trail_sl: float = 0.0
 
 
 @dataclass
@@ -768,6 +773,10 @@ def backtest_strategy_8_choch(
             if atr_val is not None:
                 candidate = structural_stop_price(pos.direction, state, atr_val * SL_BUF_MULT)
                 pos.sl_price = ratchet_stop(pos.direction, pos.sl_price, pos.entry_price, candidate)
+            update_position_mfe(pos, float(candle["close"]), closed)
+            if pos.risk_pts <= 0:
+                pos.risk_pts = abs(pos.entry_price - pos.sl_price)
+            apply_profit_management(pos, closed)
             hit = _exit_on_bar(pos, candle, square_off=S8_SQUARE_OFF, bar_close=bar_close)
             if hit:
                 _finalize_trade(
@@ -853,6 +862,8 @@ def backtest_strategy_8_choch(
             tp1_price=tp1,
             entry_at=bar_close.isoformat(),
             entry_reason=f"{signal_type} {direction} struct={state.structure} lvl={signal_level:.1f} ADX={adx_val:.1f}",
+            risk_pts=risk,
+            trail_sl=sl,
         )
 
     if pos is not None:
