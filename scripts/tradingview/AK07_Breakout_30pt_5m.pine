@@ -1,0 +1,398 @@
+//@version=6
+// AK07 Breakout — multiple SL/TP modes · structural band levels · 14:50/14:55.
+// Paste into TradingView Pine Editor → Save → Add to 5-minute NIFTY / BANKNIFTY / SENSEX chart.
+// Use "Strategy Tester" tab for win rate and P&L stats.
+// P&L in List of Trades = index points (qty 1) when commission is 0.
+// Old default commission 40/order made +30pt wins show as -50 net (30 - 40 - 40).
+strategy(
+     "AK07 Breakout · 5m · v7",
+     overlay=true,
+     max_labels_count=500,
+     pyramiding=0,
+     calc_on_every_tick=false,
+     process_orders_on_close=true,
+     default_qty_type=strategy.fixed,
+     default_qty_value=1,
+     commission_type=strategy.commission.cash_per_order,
+     commission_value=0)
+
+// =========================
+// Inputs
+// =========================
+showOnlySession = input.bool(true, "Show Only Session")
+showMid         = input.bool(true, "Show Mid/Sentiment")
+showFill        = input.bool(true, "Show Fill")
+showTradeTable  = input.bool(true, "Show Trade Table")
+sessionStr      = input.session("0915-1455", "Market Session")
+tz              = input.string("Asia/Kolkata", "Timezone")
+
+useManualBandPct = input.bool(false, "Override Auto Band % (Manual)")
+bandHalfPct      = input.float(0.25, "Manual Band Half-Width (% of Price)", step=0.001, minval=0.001)
+gapExtraPct      = input.float(0.0, "Extra Half-Width on Gap Days (% of Price)", step=0.001)
+
+// --- Risk sizing: each mode uses different inputs (greyed-out inputs are ignored) ---
+riskSizingMode = input.string(
+     "Fixed SL + Band RR",
+     "Risk sizing mode",
+     options=["Fixed TP + Band SL", "Band-based RR", "Fixed SL + Band RR", "Fixed SL and TP"],
+     group="Risk sizing",
+     tooltip="Fixed SL + Band RR = stop 30 pts from entry, target = band width × RR (capped).\nFixed TP + Band SL = stop at Red/Green band, target = fixed pts.\nBand-based RR = stop at band structure, target = band width × RR.")
+
+bool useFixedTarget = riskSizingMode == "Fixed TP + Band SL" or riskSizingMode == "Fixed SL and TP"
+bool useFixedSl = riskSizingMode == "Fixed SL + Band RR" or riskSizingMode == "Fixed SL and TP"
+bool useBandRrTarget = riskSizingMode == "Band-based RR" or riskSizingMode == "Fixed SL + Band RR"
+
+fixedTargetPts = input.float(40.0, "Target (pts) — fixed only", step=1.0, minval=1.0, active=useFixedTarget, group="Risk sizing", tooltip="Used only in Fixed TP + Band SL and Fixed SL and TP. NOT used when mode is Fixed SL + Band RR.")
+fixedSlPts = input.float(30.0, "Stop (pts) — fixed only", step=1.0, minval=1.0, active=useFixedSl, group="Risk sizing", tooltip="Used only in Fixed SL + Band RR and Fixed SL and TP.")
+rrMult = input.float(1.0, "Extra RR multiplier", step=0.25, minval=0.25, active=useBandRrTarget, group="Risk sizing", tooltip="Scales the band target size choice below.")
+bandTargetSize = input.string(
+     "Half band (~60 NF)",
+     "Band target size",
+     options=["Half band (~60 NF)", "Production 1.5× half (~90 NF)", "Full Green↔Red (~120 NF)"],
+     active=useBandRrTarget,
+     group="Risk sizing",
+     tooltip="Half band = bandHalf+2 (~58–62 on NIFTY). Full width = 2×bandHalf (~118–122). Same all day per session.")
+maxBandTargetPts = input.float(80.0, "Max band target (pts)", step=5.0, minval=0.0, active=useBandRrTarget, group="Risk sizing", tooltip="Hard cap on band TP (0 = no cap). Default 80 suits half-band + 30 SL.")
+slBufferPts = input.float(2.0, "SL buffer beyond band (pts)", step=0.5, minval=0.0, group="Risk sizing")
+maxTradesPerDay  = input.int(3, "Max Trades Per Day", minval=1, maxval=10)
+stopAfterFirstTp = input.bool(true, "Stop for day if 1st trade hits target")
+requireCross     = input.bool(true, "Entry: crossover Green / crossunder Red (else any close beyond level)")
+requireAboveMid  = input.bool(true, "Long only if close > Mid · Short only if close < Mid")
+noEntryAfter1450 = input.bool(true, "No new entries after 14:50 IST")
+flatAt1455       = input.bool(true, "Force flat at 14:55 IST")
+moveSlToCost     = input.bool(false, "Move SL to entry at 50% to target")
+beTriggerPct     = input.float(0.5, "Move-to-cost trigger (% of target path)", step=0.05, minval=0.1, maxval=0.95)
+
+// =========================
+// Require 5-minute chart
+// =========================
+bool is5m = timeframe.isminutes and timeframe.multiplier == 5
+if not is5m
+    runtime.error("Use this script on a 5-minute chart (NIFTY / BANKNIFTY / SENSEX).")
+
+// =========================
+// Locked BLR core (matches AK07 cockpit band logic)
+// =========================
+string BASE_MODE = "SessionOpen"
+float BASE_W = 0.75
+float FLAT_GAP_PCT = 0.10
+float GREEN_OFFSET = 0.0
+float RED_OFFSET = 0.0
+
+string _t = syminfo.ticker
+bool _isBank   = str.contains(_t, "BANKNIFTY") or str.contains(_t, "BANKEX") or str.contains(_t, "NIFTY_BANK")
+bool _isSensex = str.contains(_t, "SENSEX")
+bool _isNifty  = (str.contains(_t, "NIFTY") and not _isBank) or _t == "NIFTY50"
+float autoPct = _isBank ? 0.125 : _isSensex ? 0.14 : _isNifty ? 0.25 : bandHalfPct
+float activeBandPct = useManualBandPct ? bandHalfPct : autoPct
+
+// =========================
+// Session / time
+// =========================
+int hh = hour(time, tz)
+int mm = minute(time, tz)
+
+bool inSession  = not na(time(timeframe.period, sessionStr, tz))
+bool newSession = inSession and not inSession[1]
+bool newDay     = ta.change(time("D")) != 0
+
+bool entryAllowedTime = noEntryAfter1450 ? (hh < 14 or (hh == 14 and mm < 50)) : true
+bool squareOff1455    = flatAt1455 and (hh > 14 or (hh == 14 and mm >= 55))
+
+// =========================
+// Previous day (gap context)
+// =========================
+float pH = request.security(syminfo.tickerid, "D", high[1], gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_off)
+float pL = request.security(syminfo.tickerid, "D", low[1], gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_off)
+float pC = request.security(syminfo.tickerid, "D", close[1], gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_off)
+
+float safeRange = math.max(pH - pL, syminfo.mintick)
+
+// =========================
+// Session open capture
+// =========================
+var float sessionOpen = na
+var bool captured = false
+
+if newDay
+    sessionOpen := na
+    captured := false
+
+if newSession and not captured
+    sessionOpen := open
+    captured := true
+
+if inSession and not captured
+    sessionOpen := open
+    captured := true
+
+// =========================
+// BLR levels
+// =========================
+float baseRaw = sessionOpen
+float gap = na(sessionOpen) ? na : sessionOpen - pC
+float gapAbs = math.abs(gap)
+float gapPct = na(gap) ? na : gapAbs / safeRange
+bool isGapUp = not na(gap) and gap > 0
+bool isGapDn = not na(gap) and gap < 0
+bool isFlat = not na(gapPct) and gapPct <= FLAT_GAP_PCT
+
+float base = baseRaw
+float halfWidth = na(base) ? na : base * activeBandPct / 100.0
+float gapAddOn = (isGapUp or isGapDn) ? (na(base) ? 0.0 : base * gapExtraPct / 100.0) : 0.0
+float bandHalf = na(halfWidth) ? na : halfWidth + gapAddOn
+
+float green = na(base) ? na : base + bandHalf + GREEN_OFFSET
+float red = na(base) ? na : base - bandHalf + RED_OFFSET
+
+var float dayGreen = na
+var float dayRed = na
+var float dayBase = na
+var float dayBandHalf = na
+
+if newDay
+    dayGreen := na
+    dayRed := na
+    dayBase := na
+    dayBandHalf := na
+
+if captured and na(dayGreen)
+    dayGreen := green
+    dayRed := red
+    dayBase := base
+    dayBandHalf := bandHalf
+
+bool plotNow = (showOnlySession ? inSession : true)
+
+pGreen = plot(plotNow and captured ? dayGreen : na, "Green", color=color.new(color.teal, 0), linewidth=2, style=plot.style_linebr)
+pMid = plot(plotNow and captured and showMid ? dayBase : na, "Mid/Sentiment", color=color.new(color.orange, 0), linewidth=2, style=plot.style_linebr)
+pRed = plot(plotNow and captured ? dayRed : na, "Red", color=color.new(color.red, 0), linewidth=2, style=plot.style_linebr)
+
+fill(pGreen, pMid, color=showFill and showMid ? color.new(color.teal, 86) : na)
+fill(pMid, pRed, color=showFill and showMid ? color.new(color.red, 89) : na)
+
+// =========================
+// Entries — post open, 5m close beyond Green / Red
+// =========================
+var int tradesToday = 0
+var int closedAtDayOpen = 0
+var bool dayDoneAfterTp = false
+var float posRiskPts = na
+var float posTargetPts = na
+var float posSlPrice = na
+var float posTpPrice = na
+var float lastEntryTargetPts = na
+var float activeSl = na
+var bool slAtCost = false
+
+bandRiskPts() =>
+    na(dayBandHalf) ? fixedSlPts : dayBandHalf + slBufferPts
+
+// Structural SL at band levels (matches original AK07 / production S3)
+structuralSlLong() =>
+    float anchor = isGapUp ? dayBase : dayRed
+    anchor - slBufferPts
+
+structuralSlShort() =>
+    float anchor = isGapDn ? dayBase : dayGreen
+    anchor + slBufferPts
+
+// Constant band-based target — size from day bandHalf, NOT entry extension
+bandWidthTargetPts() =>
+    float half = na(dayBandHalf) ? fixedSlPts : dayBandHalf
+    float raw = bandTargetSize == "Full Green↔Red (~120 NF)" ? 2.0 * half + slBufferPts :
+                 bandTargetSize == "Production 1.5× half (~90 NF)" ? 1.5 * half + slBufferPts :
+                 half + slBufferPts
+    float tgt = raw * rrMult
+    maxBandTargetPts > 0 ? math.min(tgt, maxBandTargetPts) : tgt
+
+bandTpPrice(isLong, entry) =>
+    float tgtPts = bandWidthTargetPts()
+    isLong ? entry + tgtPts : entry - tgtPts
+
+tradeSlPrice(isLong, entry) =>
+    if riskSizingMode == "Fixed SL and TP" or riskSizingMode == "Fixed SL + Band RR"
+        isLong ? entry - fixedSlPts : entry + fixedSlPts
+    else if isLong
+        structuralSlLong()
+    else
+        structuralSlShort()
+
+tradeTpPrice(isLong, entry) =>
+    if useBandRrTarget
+        bandTpPrice(isLong, entry)
+    else
+        isLong ? entry + fixedTargetPts : entry - fixedTargetPts
+
+tradeRiskPts(isLong, entry) =>
+    float sl = tradeSlPrice(isLong, entry)
+    math.max(isLong ? entry - sl : sl - entry, syminfo.mintick)
+
+tradeTargetPts(isLong, entry) =>
+    float tp = tradeTpPrice(isLong, entry)
+    math.max(isLong ? tp - entry : entry - tp, syminfo.mintick)
+
+levelsValid(isLong, entry) =>
+    float sl = tradeSlPrice(isLong, entry)
+    float tp = tradeTpPrice(isLong, entry)
+    float risk = tradeRiskPts(isLong, entry)
+    if isLong
+        sl < entry and tp > entry and risk >= syminfo.mintick
+    else
+        sl > entry and tp < entry and risk >= syminfo.mintick
+
+if newDay
+    tradesToday := 0
+    closedAtDayOpen := strategy.closedtrades
+    dayDoneAfterTp := false
+    posRiskPts := na
+    posTargetPts := na
+    posSlPrice := na
+    posTpPrice := na
+    lastEntryTargetPts := na
+    activeSl := na
+    slAtCost := false
+
+// 1st trade of the day hit target → no more entries today
+if strategy.closedtrades > strategy.closedtrades[1]
+    int dayClosedCount = strategy.closedtrades - closedAtDayOpen
+    if stopAfterFirstTp and dayClosedCount == 1
+        int ti = strategy.closedtrades - 1
+        float e = strategy.closedtrades.entry_price(ti)
+        float x = strategy.closedtrades.exit_price(ti)
+        float sz = strategy.closedtrades.size(ti)
+        float pts = sz > 0 ? (x - e) : (e - x)
+        float tgt = nz(lastEntryTargetPts, useBandRrTarget ? tradeTargetPts(sz > 0, e) : fixedTargetPts)
+        if pts >= tgt - syminfo.mintick
+            dayDoneAfterTp := true
+            label.new(bar_index, close, "DAY DONE\n1st TP +" + str.tostring(pts, "#.##"), style=label.style_label_left, color=color.new(color.teal, 20), textcolor=color.white, size=size.small)
+    posRiskPts := na
+    posTargetPts := na
+    posSlPrice := na
+    posTpPrice := na
+    activeSl := na
+    slAtCost := false
+
+bool flat = strategy.position_size == 0
+if flat
+    activeSl := na
+    slAtCost := false
+bool canTrade = captured and inSession and entryAllowedTime and (tradesToday < maxTradesPerDay) and flat and not dayDoneAfterTp
+
+bool longBreak = requireCross ? ta.crossover(close, dayGreen) : (close > dayGreen and close[1] <= dayGreen)
+bool shortBreak = requireCross ? ta.crossunder(close, dayRed) : (close < dayRed and close[1] >= dayRed)
+
+bool longOk = requireAboveMid ? close > dayBase : true
+bool shortOk = requireAboveMid ? close < dayBase : true
+
+bool longSignal = canTrade and longBreak and longOk and levelsValid(true, close)
+bool shortSignal = canTrade and shortBreak and shortOk and levelsValid(false, close)
+
+if longSignal
+    tradesToday += 1
+    posSlPrice := tradeSlPrice(true, close)
+    posTpPrice := tradeTpPrice(true, close)
+    posRiskPts := tradeRiskPts(true, close)
+    posTargetPts := tradeTargetPts(true, close)
+    lastEntryTargetPts := posTargetPts
+    activeSl := na
+    slAtCost := false
+    strategy.entry("LONG", strategy.long)
+    label.new(bar_index, low, "BUY\n" + riskSizingMode + "\nSL-" + str.tostring(posRiskPts, "#") + " TP+" + str.tostring(posTargetPts, "#"), style=label.style_label_up, color=color.lime, textcolor=color.black, size=size.small)
+
+if shortSignal
+    tradesToday += 1
+    posSlPrice := tradeSlPrice(false, close)
+    posTpPrice := tradeTpPrice(false, close)
+    posRiskPts := tradeRiskPts(false, close)
+    posTargetPts := tradeTargetPts(false, close)
+    lastEntryTargetPts := posTargetPts
+    activeSl := na
+    slAtCost := false
+    strategy.entry("SHORT", strategy.short)
+    label.new(bar_index, high, "SELL\n" + riskSizingMode + "\nSL-" + str.tostring(posRiskPts, "#") + " TP+" + str.tostring(posTargetPts, "#"), style=label.style_label_down, color=color.red, textcolor=color.white, size=size.small)
+
+// Exits — mode-specific SL price + TP price stored at entry
+if strategy.position_size > 0 and not na(posSlPrice)
+    float eL = strategy.position_avg_price
+    float slL = na(activeSl) ? posSlPrice : activeSl
+    float halfL = eL + posTargetPts * beTriggerPct
+    if moveSlToCost and high >= halfL
+        slL := math.max(slL, eL)
+        if not slAtCost and slL >= eL - syminfo.mintick
+            slAtCost := true
+            label.new(bar_index, low, "SL→COST", style=label.style_label_up, color=color.new(color.orange, 0), textcolor=color.black, size=size.tiny)
+    activeSl := slL
+    strategy.exit("L-X", "LONG", stop=activeSl, limit=posTpPrice)
+
+if strategy.position_size < 0 and not na(posSlPrice)
+    float eS = strategy.position_avg_price
+    float slS = na(activeSl) ? posSlPrice : activeSl
+    float halfS = eS - posTargetPts * beTriggerPct
+    if moveSlToCost and low <= halfS
+        slS := math.min(slS, eS)
+        if not slAtCost and slS <= eS + syminfo.mintick
+            slAtCost := true
+            label.new(bar_index, high, "SL→COST", style=label.style_label_down, color=color.new(color.orange, 0), textcolor=color.black, size=size.tiny)
+    activeSl := slS
+    strategy.exit("S-X", "SHORT", stop=activeSl, limit=posTpPrice)
+
+plot(strategy.position_size > 0 ? posSlPrice : na, "Long SL", color=color.new(color.red, 0), style=plot.style_linebr, linewidth=1)
+plot(strategy.position_size > 0 ? posTpPrice : na, "Long TP", color=color.new(color.lime, 0), style=plot.style_linebr, linewidth=1)
+plot(strategy.position_size < 0 ? posSlPrice : na, "Short SL", color=color.new(color.red, 0), style=plot.style_linebr, linewidth=1)
+plot(strategy.position_size < 0 ? posTpPrice : na, "Short TP", color=color.new(color.lime, 0), style=plot.style_linebr, linewidth=1)
+
+if squareOff1455 and strategy.position_size != 0
+    strategy.close_all(comment="14:55 FLAT")
+    label.new(bar_index, close, "14:55 FLAT", style=label.style_label_left, color=color.gray, textcolor=color.white, size=size.tiny)
+
+// =========================
+// Status table
+// =========================
+var table trTbl = table.new(position.top_right, 2, 11, border_width=1)
+
+if showTradeTable and barstate.islast
+    color cKey = color.new(color.rgb(35, 41, 52), 0)
+    color cVal = color.new(color.rgb(20, 24, 32), 0)
+    color tc = color.white
+
+    table.cell(trTbl, 0, 0, "Mode", text_color=tc, bgcolor=cKey)
+    table.cell(trTbl, 1, 0, riskSizingMode, text_color=tc, bgcolor=color.new(color.rgb(45, 55, 72), 0))
+
+    table.cell(trTbl, 0, 1, "Status", text_color=tc, bgcolor=cKey)
+    table.cell(trTbl, 1, 1, strategy.position_size > 0 ? "LONG" : strategy.position_size < 0 ? "SHORT" : "FLAT", text_color=tc, bgcolor=cVal)
+
+    table.cell(trTbl, 0, 2, "Trades", text_color=tc, bgcolor=cKey)
+    table.cell(trTbl, 1, 2, str.tostring(tradesToday) + "/" + str.tostring(maxTradesPerDay), text_color=tc, bgcolor=cVal)
+
+    table.cell(trTbl, 0, 3, "Risk / Tgt", text_color=tc, bgcolor=cKey)
+    string previewRisk = str.tostring(tradeRiskPts(true, close), "#.##")
+    string previewTgt = str.tostring(tradeTargetPts(true, close), "#.##")
+    string openRiskTxt = strategy.position_size != 0 and not na(posRiskPts) ? str.tostring(posRiskPts, "#.##") + " / " + str.tostring(posTargetPts, "#.##") + " (SL " + str.tostring(posSlPrice, format.mintick) + ")" : riskSizingMode + " · ~" + previewRisk + "/" + previewTgt
+    table.cell(trTbl, 1, 3, openRiskTxt + " pts", text_color=tc, bgcolor=cVal)
+
+    table.cell(trTbl, 0, 4, "Green", text_color=tc, bgcolor=cKey)
+    table.cell(trTbl, 1, 4, captured ? str.tostring(dayGreen, format.mintick) : "-", text_color=tc, bgcolor=cVal)
+
+    table.cell(trTbl, 0, 5, "Mid", text_color=tc, bgcolor=cKey)
+    table.cell(trTbl, 1, 5, captured ? str.tostring(dayBase, format.mintick) : "-", text_color=tc, bgcolor=cVal)
+
+    table.cell(trTbl, 0, 6, "Red", text_color=tc, bgcolor=cKey)
+    table.cell(trTbl, 1, 6, captured ? str.tostring(dayRed, format.mintick) : "-", text_color=tc, bgcolor=cVal)
+
+    table.cell(trTbl, 0, 7, "Band%", text_color=tc, bgcolor=cKey)
+    string instrLabel = _isBank ? "BN" : _isSensex ? "SX" : _isNifty ? "NF" : "Custom"
+    table.cell(trTbl, 1, 7, str.tostring(activeBandPct, "#.###") + "% " + instrLabel, text_color=tc, bgcolor=cVal)
+
+    table.cell(trTbl, 0, 8, "Day", text_color=tc, bgcolor=cKey)
+    table.cell(trTbl, 1, 8, isFlat ? "Flat" : isGapUp ? "GapUp" : isGapDn ? "GapDn" : "-", text_color=tc, bgcolor=cVal)
+
+    table.cell(trTbl, 0, 9, "SL at cost", text_color=tc, bgcolor=cKey)
+    table.cell(trTbl, 1, 9, slAtCost ? "YES" : moveSlToCost ? "Waiting" : "Off", text_color=tc, bgcolor=slAtCost ? color.new(color.orange, 40) : cVal)
+
+    table.cell(trTbl, 0, 10, "1st TP lock", text_color=tc, bgcolor=cKey)
+    table.cell(trTbl, 1, 10, dayDoneAfterTp ? "DONE" : stopAfterFirstTp ? "Active" : "Off", text_color=tc, bgcolor=dayDoneAfterTp ? color.new(color.teal, 40) : cVal)
+
+alertcondition(longSignal, "Long Entry", "AK07 LONG {{ticker}} @ {{close}} | band 1R")
+alertcondition(shortSignal, "Short Entry", "AK07 SHORT {{ticker}} @ {{close}} | band 1R")
+alertcondition(squareOff1455 and strategy.position_size != 0, "14:55 Flat", "AK07 flat {{ticker}} @ {{close}}")

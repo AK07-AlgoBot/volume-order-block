@@ -92,6 +92,8 @@ SL_ATR_BUFFER: Final[float] = float(os.environ.get("CHOCH_SL_BUF", "0.25"))
 TP_RR: Final[float] = float(os.environ.get("CHOCH_TP_RR", "2.0"))
 ADX_PERIOD: Final[int] = int(os.environ.get("CHOCH_ADX_PERIOD", "14"))
 ADX_MIN: Final[float] = float(os.environ.get("CHOCH_ADX_MIN", "20.0"))
+ADX_MIN_BARS: Final[int] = ADX_PERIOD * 2
+INDICATOR_WARMUP_BARS: Final[int] = int(os.environ.get("CHOCH_INDICATOR_WARMUP_BARS", str(ADX_MIN_BARS + 4)))
 HTF_EMA_PERIOD: Final[int] = int(os.environ.get("CHOCH_HTF_EMA", "20"))
 MAX_TRADES_PER_DAY: Final[int] = int(os.environ.get("CHOCH_MAX_TRADES", "2"))
 BROKER_SYNC_GRACE_SEC: Final[int] = int(os.environ.get("CHOCH_BROKER_SYNC_GRACE_SEC", "90"))
@@ -175,6 +177,45 @@ def _adx(candles: list[dict], period: int = ADX_PERIOD) -> float | None:
         return None
     adx_vals = _ema_series(dx, period)
     return adx_vals[-1] if adx_vals else None
+
+
+def _adx_reject_reason(adx_val: float | None, today_bars: int) -> str:
+    """Human-readable ADX gate failure (None ≠ 0.0 choppy market)."""
+    if adx_val is None:
+        return f"ADX warming up ({today_bars}/{ADX_MIN_BARS} bars today — need prior-session data)"
+    if adx_val < ADX_MIN:
+        return f"ADX {adx_val:.1f} < {ADX_MIN}"
+    return ""
+
+
+def _indicator_series(warmup: list[dict], closed: list[dict]) -> list[dict]:
+    """Prior-session tail + today's closed bars for ADX/ATR (intraday API is today-only)."""
+    if not closed:
+        return warmup[-INDICATOR_WARMUP_BARS:]
+    if not warmup:
+        return closed
+    first_ts = parse_candle_ts(closed[0]["timestamp"])
+    prefix = [c for c in warmup if parse_candle_ts(c["timestamp"]) < first_ts][-INDICATOR_WARMUP_BARS:]
+    return prefix + closed
+
+
+def _load_indicator_warmup(config: Any, today: date) -> list[dict]:
+    """Load prior-session 5m bars so ADX(14) is valid from 09:30 (Upstox intraday = today only)."""
+    if MOCK_MODE:
+        return []
+    try:
+        from app.services.backtest_data import HistoricalDataClient
+
+        username = os.environ.get("AK07_USER", "AK07")
+        client = HistoricalDataClient(username=username)
+        start = today - timedelta(days=7)
+        end = today - timedelta(days=1)
+        hist = client.fetch_5m(config.spot_instrument_key, start, end, use_cache=True)
+        prior = [c for c in hist if parse_candle_ts(c["timestamp"]).date() < today]
+        return prior[-INDICATOR_WARMUP_BARS:]
+    except Exception as exc:
+        logger.warning("CHOCH indicator warmup failed for %s: %s", getattr(config, "code", "?"), exc)
+        return []
 
 
 def _build_1h_candles(candles_5m: list[dict]) -> list[dict]:
@@ -543,6 +584,8 @@ class CHOCHIndexState:
     last_rejected_fingerprint: str = ""
     broker_flat_streak: int = 0
     rejected_signals: list[dict[str, Any]] = field(default_factory=list)
+    indicator_warmup: list[dict] = field(default_factory=list)
+    indicator_warmup_day: str = ""
 
 
 def _entry_fingerprint(signal_type: str, direction: str, signal_level: float) -> str:
@@ -885,7 +928,13 @@ class CHOCHEngine:
                 state.daily_pnl_inr = 0.0
                 state.struct_upto = SWING_LOOKBACK
                 state.last_rejected_fingerprint = ""
+                state.indicator_warmup = _load_indicator_warmup(state.config, today)
+                state.indicator_warmup_day = today.isoformat()
                 setattr(state, "_last_reset_day", today)
+
+        if state.indicator_warmup_day != today.isoformat():
+            state.indicator_warmup = _load_indicator_warmup(state.config, today)
+            state.indicator_warmup_day = today.isoformat()
 
         # Bars closed at or before now
         closed = [c for c in day_candles
@@ -929,9 +978,11 @@ class CHOCHEngine:
         if fp == state.last_entry_fingerprint:
             return
 
-        # ADX filter
-        adx_val = _adx(closed)
-        if adx_val is None or adx_val < ADX_MIN:
+        # ADX filter (warmup bars from prior sessions — intraday feed is today-only)
+        indicator_bars = _indicator_series(state.indicator_warmup, closed)
+        adx_val = _adx(indicator_bars)
+        adx_reason = _adx_reject_reason(adx_val, len(closed))
+        if adx_reason:
             self._reject_signal(
                 state,
                 now,
@@ -939,14 +990,14 @@ class CHOCHEngine:
                 direction,
                 signal_level,
                 spot_val,
-                f"ADX {adx_val or 0:.1f} < {ADX_MIN}",
-                extra={"adx": adx_val},
+                adx_reason,
+                extra={"adx": adx_val, "today_bars": len(closed)},
                 fingerprint=fp,
             )
             return
 
         # 1H HTF filter
-        htf = _htf_trend(closed, now)
+        htf = _htf_trend(indicator_bars, now)
         if htf is not None:
             if direction == "LONG" and htf == "BEAR":
                 self._reject_signal(
@@ -974,7 +1025,7 @@ class CHOCHEngine:
                 return
 
         # Sizing
-        atr_val = _atr(closed)
+        atr_val = _atr(indicator_bars)
         if atr_val is None:
             self._reject_signal(
                 state,
