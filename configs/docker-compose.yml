@@ -200,9 +200,7 @@ services:
       PYTHONUNBUFFERED: "1"
       PYTHONPATH: /app/src/server/src
       REDIS_HOST: redis
-      AK07_DAILY_TARGET_EXPIRY_INR: "3000"
-      AK07_DAILY_TARGET_FIRST_TRADE_INR: "3000"
-      AK07_DAILY_TARGET_NORMAL_INR: "5000"
+      AK07_DAILY_PROFIT_GUARD_ENABLED: "0"
       AK07_PROFIT_GUARD_POLL_SEC: "5"
     volumes:
       - ak07_server_data:/app/src/server/data

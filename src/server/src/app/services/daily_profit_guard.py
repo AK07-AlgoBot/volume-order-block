@@ -29,6 +29,12 @@ IST: Final = ZoneInfo("Asia/Kolkata")
 TARGET_EXPIRY_INR: Final[float] = float(os.environ.get("AK07_DAILY_TARGET_EXPIRY_INR", "3000"))
 TARGET_NORMAL_INR: Final[float] = float(os.environ.get("AK07_DAILY_TARGET_NORMAL_INR", "5000"))
 TARGET_FIRST_TRADE_INR: Final[float] = float(os.environ.get("AK07_DAILY_TARGET_FIRST_TRADE_INR", "3000"))
+PROFIT_GUARD_ENABLED: Final[bool] = os.environ.get("AK07_DAILY_PROFIT_GUARD_ENABLED", "0").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+)
 
 SESSION_START: Final[dtime] = dtime(9, 0)
 SESSION_END: Final[dtime] = dtime(15, 45)
@@ -73,6 +79,8 @@ def save_state(state: dict[str, Any]) -> None:
 
 
 def profit_target_engaged() -> bool:
+    if not PROFIT_GUARD_ENABLED:
+        return False
     state = load_state()
     return bool(state.get("engaged"))
 

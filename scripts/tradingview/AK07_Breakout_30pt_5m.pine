@@ -16,7 +16,7 @@
 //        Override Auto Band %  = OFF  (NIFTY auto 0.25%)
 //        Risk sizing mode      = Fixed SL and TP
 //        Stop / Target         = 30 / 60  (1:2)
-//        Stop for day @ 1st TP = ON
+//        Stop for day @ 1st TP = OFF
 //        Max trades/day        = 3
 //        No new entries after  = 13:00 IST (last entry on 1 PM 5m close; flat 14:55)
 //        Breakout filters      = OFF by default (enable one at a time to test)
@@ -74,7 +74,7 @@ bandTargetSize = input.string(
 maxBandTargetPts = input.float(80.0, "Max band target (pts)", step=5.0, minval=0.0, active=useBandRrTarget, group="Risk sizing", tooltip="Hard cap on band TP (0 = no cap). Default 80 suits half-band + 30 SL.")
 slBufferPts = input.float(2.0, "SL buffer beyond band (pts)", step=0.5, minval=0.0, group="Risk sizing")
 maxTradesPerDay  = input.int(3, "Max Trades Per Day", minval=1, maxval=10)
-stopAfterFirstTp = input.bool(true, "Stop for day if 1st trade hits target")
+stopAfterFirstTp = input.bool(false, "Stop for day if 1st trade hits target")
 requireAboveMid  = input.bool(true, "Long only if close > Mid · Short only if close < Mid")
 noEntryAfterHour = input.int(13, "No new entries after — hour (IST)", minval=9, maxval=15, group="Session window")
 noEntryAfterMin  = input.int(0, "No new entries after — minute", minval=0, maxval=59, group="Session window", tooltip="Last entry on 5m close at this time (e.g. 13:00 = 1 PM bar). Later closes = no new trades.")

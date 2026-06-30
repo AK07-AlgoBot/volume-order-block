@@ -10,6 +10,7 @@ from typing import Final
 from zoneinfo import ZoneInfo
 
 from app.services.daily_profit_guard import (
+    PROFIT_GUARD_ENABLED,
     engage_daily_profit_target,
     effective_target_inr,
     is_expiry_trading_day,
@@ -33,10 +34,8 @@ class ProfitTargetEngine:
     def __init__(self) -> None:
         self._client = None if (MOCK_MODE or PAPER_TRADING) else build_upstox_client()
         logger.info(
-            "Profit target engine started | expiry=%.0f first=%.0f normal=%.0f | paper=%s",
-            float(os.environ.get("AK07_DAILY_TARGET_EXPIRY_INR", "3000")),
-            float(os.environ.get("AK07_DAILY_TARGET_FIRST_TRADE_INR", "3000")),
-            float(os.environ.get("AK07_DAILY_TARGET_NORMAL_INR", "5000")),
+            "Profit target engine started | guard=%s | paper=%s",
+            PROFIT_GUARD_ENABLED,
             PAPER_TRADING,
         )
 
@@ -81,6 +80,9 @@ class ProfitTargetEngine:
             }
         )
         save_state(state)
+
+        if not PROFIT_GUARD_ENABLED:
+            return
 
         engage, hit_target, reason = should_engage_target(total, entries, expiry_day)
         if not engage:
