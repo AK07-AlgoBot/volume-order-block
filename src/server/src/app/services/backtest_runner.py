@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass, field
 from datetime import date, datetime, time as dtime, timedelta
 from typing import Any, Final
@@ -12,14 +13,17 @@ from app.services import performance_store
 from app.services.backtest_data import HistoricalDataClient, parse_candle_ts
 from app.services.breakout_engine import (
     ENTRY_START as S3_ENTRY_START,
+    FIXED_TP_PTS,
     MAX_TRADES_PER_DAY as S3_MAX_TRADES,
     NO_ENTRY_AFTER as S3_NO_ENTRY,
     SENSEX_COST_SL_PTS,
     SESSION_START as S3_SESSION_START,
     SQUARE_OFF_TIME as S3_SQUARE_OFF,
+    BREAKOUT_MIN_BODY_RATIO,
     compute_blr_levels,
     day_review_from_first_close,
     detect_breakout_signal,
+    is_first_session_bar,
     trade_levels,
 )
 from app.services.engine_intraday import blr_day_review_allows_direction, rr_book_targets, session_vwap
@@ -354,10 +358,15 @@ def _simulate_day_bars(
     entry_start: dtime,
     max_trades: int,
     on_bar,
+    stop_after_first_tp: bool = False,
+    first_tp_target_pts: float | None = None,
 ) -> None:
     """Generic bar walk: `on_bar` returns SimPosition | None to open; manages one position at a time."""
     pos: SimPosition | None = None
     trades_today = 0
+    closed_trades_today = 0
+    day_done_after_tp = False
+    tp_target = first_tp_target_pts if first_tp_target_pts is not None else FIXED_TP_PTS
     partial_extra = 0.0
 
     for idx, candle in enumerate(session_candles):
@@ -382,6 +391,9 @@ def _simulate_day_bars(
                     pos.lots = 1
                     pos.sl_price = pos.entry_price
                     continue
+                trade_pnl = (
+                    (exit_px - pos.entry_price) if pos.direction == "LONG" else (pos.entry_price - exit_px)
+                ) + partial_extra
                 _finalize_trade(
                     report,
                     strategy=strategy,
@@ -392,11 +404,23 @@ def _simulate_day_bars(
                     exit_at=bar_close,
                     extra_pnl=partial_extra,
                 )
+                closed_trades_today += 1
+                if (
+                    stop_after_first_tp
+                    and closed_trades_today == 1
+                    and trade_pnl >= tp_target - 0.05
+                ):
+                    day_done_after_tp = True
                 pos = None
                 partial_extra = 0.0
                 continue
 
-        if pos is None and trades_today < max_trades and bar_close.time() <= no_entry_after:
+        if (
+            pos is None
+            and not day_done_after_tp
+            and trades_today < max_trades
+            and bar_close.time() <= no_entry_after
+        ):
             closed = session_candles[: idx + 1]
             new_pos = on_bar(closed, bar_close, trades_today)
             if new_pos is not None:
@@ -417,6 +441,15 @@ def _simulate_day_bars(
         )
 
 
+def _breakout_stop_after_first_tp() -> bool:
+    return os.environ.get("BREAKOUT_STOP_AFTER_FIRST_TP", "0").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
 def backtest_strategy_3(
     report: BacktestReport,
     cfg: IndexConfig,
@@ -424,9 +457,13 @@ def backtest_strategy_3(
     session_candles: list[dict[str, float]],
     blr: BLRDayContext,
     prev_ohlc: dict[str, float] | None = None,
+    *,
+    stop_after_first_tp: bool | None = None,
 ) -> None:
     """S3 BLR breakout — mirrors live breakout_engine (no ADX / prev-day filters)."""
     del day, prev_ohlc  # kept for runner signature compatibility
+    if stop_after_first_tp is None:
+        stop_after_first_tp = _breakout_stop_after_first_tp()
 
     prev_close = session_candles[0]["open"]
 
@@ -434,6 +471,10 @@ def backtest_strategy_3(
         nonlocal prev_close
         candle = closed[-1]
         close = float(candle["close"])
+        prev_candle = closed[-2]
+        candle_ts = parse_candle_ts(candle["timestamp"])
+        prev_ts = parse_candle_ts(prev_candle["timestamp"])
+        first_bar = is_first_session_bar(candle_ts, prev_ts)
         direction, reason = detect_breakout_signal(
             float(prev_close),
             close,
@@ -441,6 +482,11 @@ def backtest_strategy_3(
             blr.red,
             blr.mid,
             blr.day_review,
+            first_session_bar=first_bar,
+            candle_open=float(candle["open"]),
+            candle_high=float(candle["high"]),
+            candle_low=float(candle["low"]),
+            min_body_ratio=BREAKOUT_MIN_BODY_RATIO,
         )
         prev_close = close
         if direction is None or not reason:
@@ -467,6 +513,7 @@ def backtest_strategy_3(
         entry_start=S3_ENTRY_START,
         max_trades=S3_MAX_TRADES,
         on_bar=on_bar,
+        stop_after_first_tp=stop_after_first_tp,
     )
 
 

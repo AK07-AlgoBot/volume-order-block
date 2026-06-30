@@ -1,11 +1,30 @@
 //@version=6
-// AK07 Breakout — multiple SL/TP modes · structural band levels · 14:50/14:55.
-// Paste into TradingView Pine Editor → Save → Add to 5-minute NIFTY / BANKNIFTY / SENSEX chart.
-// Use "Strategy Tester" tab for win rate and P&L stats.
+// AK07 Breakout · v10 · Fixed SL 30 / TP 60 · server band 0.25% (NIFTY live)
+//
+// Entry logic (S3):
+//   • 9:15 — Green / Mid / Red locked from session open
+//   • Each 5m body CLOSE (not wick high/low) vs levels:
+//       Long  if close > Green (and > Mid)
+//       Short if close < Red   (and < Mid)
+//   • First bar (9:20 close): close beyond level is enough
+//   • Later bars: prior close must have been inside the level (body-close cross)
+//
+// QUICK START
+//   1. Chart: NSE NIFTY / BANKNIFTY / SENSEX on 5-minute
+//   2. Pine Editor → paste all → Save → Add to chart
+//   3. Confirm inputs (defaults match live server):
+//        Override Auto Band %  = OFF  (NIFTY auto 0.25%)
+//        Risk sizing mode      = Fixed SL and TP
+//        Stop / Target         = 30 / 60  (1:2)
+//        Stop for day @ 1st TP = ON
+//        Max trades/day        = 3
+//        No new entries after  = 13:00 IST (last entry on 1 PM 5m close; flat 14:55)
+//        Breakout filters      = OFF by default (enable one at a time to test)
+//   4. Strategy Tester → Settings → Commission = 0
+//
 // P&L in List of Trades = index points (qty 1) when commission is 0.
-// Old default commission 40/order made +30pt wins show as -50 net (30 - 40 - 40).
 strategy(
-     "AK07 Breakout · 5m · v7",
+     "AK07 Breakout · 5m · v10 · 30/60",
      overlay=true,
      max_labels_count=500,
      pyramiding=0,
@@ -26,13 +45,13 @@ showTradeTable  = input.bool(true, "Show Trade Table")
 sessionStr      = input.session("0915-1455", "Market Session")
 tz              = input.string("Asia/Kolkata", "Timezone")
 
-useManualBandPct = input.bool(false, "Override Auto Band % (Manual)")
-bandHalfPct      = input.float(0.25, "Manual Band Half-Width (% of Price)", step=0.001, minval=0.001)
+useManualBandPct = input.bool(false, "Override Auto Band % (Manual)", tooltip="Leave OFF for server parity (NIFTY 0.25%, BN 0.125%, SX 0.14%).")
+bandHalfPct      = input.float(0.25, "Manual Band Half-Width (% of Price)", step=0.001, minval=0.001, active=useManualBandPct)
 gapExtraPct      = input.float(0.0, "Extra Half-Width on Gap Days (% of Price)", step=0.001)
 
 // --- Risk sizing: each mode uses different inputs (greyed-out inputs are ignored) ---
 riskSizingMode = input.string(
-     "Fixed SL + Band RR",
+     "Fixed SL and TP",
      "Risk sizing mode",
      options=["Fixed TP + Band SL", "Band-based RR", "Fixed SL + Band RR", "Fixed SL and TP"],
      group="Risk sizing",
@@ -42,8 +61,8 @@ bool useFixedTarget = riskSizingMode == "Fixed TP + Band SL" or riskSizingMode =
 bool useFixedSl = riskSizingMode == "Fixed SL + Band RR" or riskSizingMode == "Fixed SL and TP"
 bool useBandRrTarget = riskSizingMode == "Band-based RR" or riskSizingMode == "Fixed SL + Band RR"
 
-fixedTargetPts = input.float(40.0, "Target (pts) — fixed only", step=1.0, minval=1.0, active=useFixedTarget, group="Risk sizing", tooltip="Used only in Fixed TP + Band SL and Fixed SL and TP. NOT used when mode is Fixed SL + Band RR.")
-fixedSlPts = input.float(30.0, "Stop (pts) — fixed only", step=1.0, minval=1.0, active=useFixedSl, group="Risk sizing", tooltip="Used only in Fixed SL + Band RR and Fixed SL and TP.")
+fixedTargetPts = input.float(60.0, "Target (pts) — fixed only", step=1.0, minval=1.0, active=useFixedTarget, group="Risk sizing", tooltip="Fixed SL and TP mode: default 60 pts (1:2 vs 30 SL).")
+fixedSlPts = input.float(30.0, "Stop (pts) — fixed only", step=1.0, minval=1.0, active=useFixedSl, group="Risk sizing", tooltip="Fixed SL and TP mode: default 30 pts.")
 rrMult = input.float(1.0, "Extra RR multiplier", step=0.25, minval=0.25, active=useBandRrTarget, group="Risk sizing", tooltip="Scales the band target size choice below.")
 bandTargetSize = input.string(
      "Half band (~60 NF)",
@@ -56,10 +75,18 @@ maxBandTargetPts = input.float(80.0, "Max band target (pts)", step=5.0, minval=0
 slBufferPts = input.float(2.0, "SL buffer beyond band (pts)", step=0.5, minval=0.0, group="Risk sizing")
 maxTradesPerDay  = input.int(3, "Max Trades Per Day", minval=1, maxval=10)
 stopAfterFirstTp = input.bool(true, "Stop for day if 1st trade hits target")
-requireCross     = input.bool(true, "Entry: crossover Green / crossunder Red (else any close beyond level)")
 requireAboveMid  = input.bool(true, "Long only if close > Mid · Short only if close < Mid")
-noEntryAfter1450 = input.bool(true, "No new entries after 14:50 IST")
+noEntryAfterHour = input.int(13, "No new entries after — hour (IST)", minval=9, maxval=15, group="Session window")
+noEntryAfterMin  = input.int(0, "No new entries after — minute", minval=0, maxval=59, group="Session window", tooltip="Last entry on 5m close at this time (e.g. 13:00 = 1 PM bar). Later closes = no new trades.")
+enforceEntryWindow = input.bool(true, "Enforce entry time window", group="Session window")
 flatAt1455       = input.bool(true, "Force flat at 14:55 IST")
+
+requireVolumeSpike = input.bool(false, "Volume > MA (anti-fakeout)", group="Breakout filters", tooltip="Use on futures/stocks with real volume. NIFTY index often has no volume on TV — filter auto-skips when volume is 0.")
+volMaLen           = input.int(20, "Volume MA length", minval=5, maxval=50, group="Breakout filters", active=requireVolumeSpike)
+useBodyRatioFilter = input.bool(false, "Min directional body ratio", group="Breakout filters", tooltip="Long: (close-open)/range. Short: (open-close)/range. Filters wick-only breaks.")
+minBodyRatio       = input.float(0.35, "Min body ratio", step=0.05, minval=0.1, maxval=0.9, active=useBodyRatioFilter, group="Breakout filters")
+minBreakPts        = input.float(0.0, "Min close beyond level (pts)", step=1.0, minval=0.0, group="Breakout filters", tooltip="Long: close >= Green + N. Short: close <= Red - N. 0 = off.")
+
 moveSlToCost     = input.bool(false, "Move SL to entry at 50% to target")
 beTriggerPct     = input.float(0.5, "Move-to-cost trigger (% of target path)", step=0.05, minval=0.1, maxval=0.95)
 
@@ -96,7 +123,9 @@ bool inSession  = not na(time(timeframe.period, sessionStr, tz))
 bool newSession = inSession and not inSession[1]
 bool newDay     = ta.change(time("D")) != 0
 
-bool entryAllowedTime = noEntryAfter1450 ? (hh < 14 or (hh == 14 and mm < 50)) : true
+int barMins = hh * 60 + mm
+int entryCutoffMins = noEntryAfterHour * 60 + noEntryAfterMin
+bool entryAllowedTime = enforceEntryWindow ? barMins <= entryCutoffMins : true
 bool squareOff1455    = flatAt1455 and (hh > 14 or (hh == 14 and mm >= 55))
 
 // =========================
@@ -163,7 +192,6 @@ if captured and na(dayGreen)
     dayBandHalf := bandHalf
 
 bool plotNow = (showOnlySession ? inSession : true)
-
 pGreen = plot(plotNow and captured ? dayGreen : na, "Green", color=color.new(color.teal, 0), linewidth=2, style=plot.style_linebr)
 pMid = plot(plotNow and captured and showMid ? dayBase : na, "Mid/Sentiment", color=color.new(color.orange, 0), linewidth=2, style=plot.style_linebr)
 pRed = plot(plotNow and captured ? dayRed : na, "Red", color=color.new(color.red, 0), linewidth=2, style=plot.style_linebr)
@@ -279,14 +307,41 @@ if flat
     slAtCost := false
 bool canTrade = captured and inSession and entryAllowedTime and (tradesToday < maxTradesPerDay) and flat and not dayDoneAfterTp
 
-bool longBreak = requireCross ? ta.crossover(close, dayGreen) : (close > dayGreen and close[1] <= dayGreen)
-bool shortBreak = requireCross ? ta.crossunder(close, dayRed) : (close < dayRed and close[1] >= dayRed)
+// BLR known from 9:15 — entry on 5m body close (close price), not wick high/low
+bool isFirst5mBar = captured and inSession and ta.barssince(newSession) == 0
+
+bodyCloseLongBreak() =>
+    close > dayGreen and (isFirst5mBar or close[1] <= dayGreen)
+
+bodyCloseShortBreak() =>
+    close < dayRed and (isFirst5mBar or close[1] >= dayRed)
+
+float candleRange = math.max(high - low, syminfo.mintick)
+float volMa = ta.sma(volume, volMaLen)
+
+breakoutVolOk() =>
+    // NIFTY/BN index on TV often reports volume=0 — do not block entries when no volume feed
+    not requireVolumeSpike or na(volume) or volume <= 0 or (not na(volMa) and volume > volMa)
+
+bodyRatioLongOk() =>
+    not useBodyRatioFilter or (close - open) / candleRange >= minBodyRatio
+
+bodyRatioShortOk() =>
+    not useBodyRatioFilter or (open - close) / candleRange >= minBodyRatio
+
+minBreakLongOk() =>
+    minBreakPts <= 0 or close >= dayGreen + minBreakPts
+
+minBreakShortOk() =>
+    minBreakPts <= 0 or close <= dayRed - minBreakPts
+
+bool longBreak = bodyCloseLongBreak()
+bool shortBreak = bodyCloseShortBreak()
 
 bool longOk = requireAboveMid ? close > dayBase : true
 bool shortOk = requireAboveMid ? close < dayBase : true
-
-bool longSignal = canTrade and longBreak and longOk and levelsValid(true, close)
-bool shortSignal = canTrade and shortBreak and shortOk and levelsValid(false, close)
+bool longSignal = canTrade and longBreak and longOk and levelsValid(true, close) and breakoutVolOk() and bodyRatioLongOk() and minBreakLongOk()
+bool shortSignal = canTrade and shortBreak and shortOk and levelsValid(false, close) and breakoutVolOk() and bodyRatioShortOk() and minBreakShortOk()
 
 if longSignal
     tradesToday += 1
@@ -298,7 +353,8 @@ if longSignal
     activeSl := na
     slAtCost := false
     strategy.entry("LONG", strategy.long)
-    label.new(bar_index, low, "BUY\n" + riskSizingMode + "\nSL-" + str.tostring(posRiskPts, "#") + " TP+" + str.tostring(posTargetPts, "#"), style=label.style_label_up, color=color.lime, textcolor=color.black, size=size.small)
+    string entryTag = isFirst5mBar ? "BUY 1st5m" : "BUY"
+    label.new(bar_index, low, entryTag + "\n" + riskSizingMode + "\nSL-" + str.tostring(posRiskPts, "#") + " TP+" + str.tostring(posTargetPts, "#"), style=label.style_label_up, color=color.lime, textcolor=color.black, size=size.small)
 
 if shortSignal
     tradesToday += 1
@@ -310,7 +366,8 @@ if shortSignal
     activeSl := na
     slAtCost := false
     strategy.entry("SHORT", strategy.short)
-    label.new(bar_index, high, "SELL\n" + riskSizingMode + "\nSL-" + str.tostring(posRiskPts, "#") + " TP+" + str.tostring(posTargetPts, "#"), style=label.style_label_down, color=color.red, textcolor=color.white, size=size.small)
+    string entryTagS = isFirst5mBar ? "SELL 1st5m" : "SELL"
+    label.new(bar_index, high, entryTagS + "\n" + riskSizingMode + "\nSL-" + str.tostring(posRiskPts, "#") + " TP+" + str.tostring(posTargetPts, "#"), style=label.style_label_down, color=color.red, textcolor=color.white, size=size.small)
 
 // Exits — mode-specific SL price + TP price stored at entry
 if strategy.position_size > 0 and not na(posSlPrice)
@@ -349,7 +406,7 @@ if squareOff1455 and strategy.position_size != 0
 // =========================
 // Status table
 // =========================
-var table trTbl = table.new(position.top_right, 2, 11, border_width=1)
+var table trTbl = table.new(position.top_right, 2, 12, border_width=1)
 
 if showTradeTable and barstate.islast
     color cKey = color.new(color.rgb(35, 41, 52), 0)
@@ -392,6 +449,10 @@ if showTradeTable and barstate.islast
 
     table.cell(trTbl, 0, 10, "1st TP lock", text_color=tc, bgcolor=cKey)
     table.cell(trTbl, 1, 10, dayDoneAfterTp ? "DONE" : stopAfterFirstTp ? "Active" : "Off", text_color=tc, bgcolor=dayDoneAfterTp ? color.new(color.teal, 40) : cVal)
+
+    string filtTxt = (requireVolumeSpike ? "Vol" : "") + (useBodyRatioFilter ? (requireVolumeSpike ? "+Body" : "Body") : "") + (minBreakPts > 0 ? "+" + str.tostring(minBreakPts, "#") + "pt" : "")
+    table.cell(trTbl, 0, 11, "Filters", text_color=tc, bgcolor=cKey)
+    table.cell(trTbl, 1, 11, filtTxt != "" ? filtTxt : "Off", text_color=tc, bgcolor=cVal)
 
 alertcondition(longSignal, "Long Entry", "AK07 LONG {{ticker}} @ {{close}} | band 1R")
 alertcondition(shortSignal, "Short Entry", "AK07 SHORT {{ticker}} @ {{close}} | band 1R")

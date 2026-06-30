@@ -1,8 +1,11 @@
 """AK07 Breakout System — Strategy Type 3.
 
-Daily Green / Mid / Red from 9:15 session open + instrument band half-width
-(Pine v6: Nifty 0.25%, BankNifty 0.125%, Sensex 0.14% of price). Day-review filter
-from 9:20 first 5m close vs Mid: Review LONG → longs only, Review SHORT → shorts only.
+Daily Green / Mid / Red locked at 9:15 session open + instrument band half-width
+(Pine v6: Nifty 0.25%, BankNifty 0.125%, Sensex 0.14% of price).
+
+Entry: each 5m **body close** (close price, not wick high/low) through Green/Red
+after levels are known from 9:15. First session bar (9:20 close) uses close vs level;
+later bars require prior close on the inside (body-close cross, not wick poke).
 
 **Trading disabled by default** (BREAKOUT_ENTRIES_ENABLED=0) after 3-year backtest
 showed no edge. Engine still runs to publish BLR levels + day_review for S2 SMC+CRT.
@@ -28,6 +31,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from app.services import cache_manager, telegram_notifier
 from app.services import performance_store
+from app.services.backtest_data import parse_candle_ts
 from app.services.engine_intraday import blr_day_review_allows_direction
 from app.services.upstox_engine import (
     INDEX_CONFIGS,
@@ -45,17 +49,27 @@ logger = logging.getLogger("ak07.breakout_engine")
 IST: Final = ZoneInfo("Asia/Kolkata")
 CANDLE_5M: Final[int] = 5
 POLL_SECONDS: Final[float] = float(os.environ.get("BREAKOUT_POLL_SECONDS", "15"))
-MAX_TRADES_PER_DAY: Final[int] = int(os.environ.get("BREAKOUT_MAX_TRADES_PER_DAY", "2"))
+MAX_TRADES_PER_DAY: Final[int] = int(os.environ.get("BREAKOUT_MAX_TRADES_PER_DAY", "3"))
 LOTS_PER_TRADE: Final[int] = 1
 SL_BUFFER: Final[float] = float(os.environ.get("BREAKOUT_SL_BUFFER_PTS", "2.0"))
 # Minimum directional body ratio (body / candle_range). Filters wick-driven false breakouts.
-BREAKOUT_MIN_BODY_RATIO: Final[float] = float(os.environ.get("BREAKOUT_MIN_BODY_RATIO", "0.35"))
+BREAKOUT_MIN_BODY_RATIO: Final[float] = float(os.environ.get("BREAKOUT_MIN_BODY_RATIO", "0"))
+DAY_REVIEW_ENABLED: Final[bool] = os.environ.get("BREAKOUT_DAY_REVIEW_ENABLED", "0").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+)
 BREAKOUT_TP1_PTS: Final[dict[str, float]] = {
     "NIFTY": float(os.environ.get("BREAKOUT_TP1_PTS_NIFTY", "80")),
     "BANKNIFTY": float(os.environ.get("BREAKOUT_TP1_PTS_BANKNIFTY", "80")),
     "SENSEX": float(os.environ.get("BREAKOUT_TP1_PTS_SENSEX", "200")),
 }
 SENSEX_COST_SL_PTS: Final[float] = float(os.environ.get("BREAKOUT_SENSEX_COST_SL_PTS", "50"))
+# Sizing: band (production default) or fixed_sl_tp (30 SL / 60 TP trial — matches Pine v8).
+SIZING_MODE: Final[str] = os.environ.get("BREAKOUT_SIZING_MODE", "fixed_sl_tp").strip().lower()
+FIXED_SL_PTS: Final[float] = float(os.environ.get("BREAKOUT_FIXED_SL_PTS", "30"))
+FIXED_TP_PTS: Final[float] = float(os.environ.get("BREAKOUT_FIXED_TP_PTS", "60"))
 
 # Pine v6 band half-width (% of 9:15 session open / Mid)
 BAND_HALF_PCT: Final[dict[str, float]] = {
@@ -85,6 +99,16 @@ def _parse_ist_time(env_key: str, default_hour: int, default_minute: int) -> dti
 SESSION_START: Final[dtime] = _parse_ist_time("BREAKOUT_SESSION_START_IST", 9, 15)
 ENTRY_START: Final[dtime] = _parse_ist_time("BREAKOUT_ENTRY_START_IST", 9, 20)
 NO_ENTRY_AFTER: Final[dtime] = _parse_ist_time("BREAKOUT_NO_ENTRY_AFTER_IST", 13, 0)
+
+
+def _parse_entries_indices() -> frozenset[str]:
+    raw = os.environ.get("BREAKOUT_ENTRIES_INDICES", "NIFTY,BANKNIFTY,SENSEX").strip()
+    if not raw or raw.lower() in ("all", "*"):
+        return frozenset(INDEX_CONFIGS.keys())
+    return frozenset(part.strip().upper() for part in raw.split(",") if part.strip())
+
+
+ENTRIES_INDICES: Final[frozenset[str]] = _parse_entries_indices()
 SQUARE_OFF_TIME: Final[dtime] = _parse_ist_time("BREAKOUT_SQUARE_OFF_IST", 14, 55)
 SESSION_END: Final[dtime] = _parse_ist_time("BREAKOUT_SESSION_END_IST", 15, 30)
 
@@ -220,6 +244,11 @@ def day_review_from_first_close(first_close: float, mid: float) -> str:
     return "NEUTRAL"
 
 
+def is_first_session_bar(candle_ts: datetime, prev_candle_ts: datetime) -> bool:
+    """True when prev bar is pre-session (yesterday or before 9:15) — first 5m close at ~9:20."""
+    return prev_candle_ts.date() < candle_ts.date() or prev_candle_ts.time() < SESSION_START
+
+
 def detect_breakout_signal(
     prev_close: float,
     close: float,
@@ -228,22 +257,32 @@ def detect_breakout_signal(
     mid: float,
     day_review: str,
     *,
+    first_session_bar: bool = False,
     candle_open: float | None = None,
     candle_high: float | None = None,
     candle_low: float | None = None,
     min_body_ratio: float = 0.0,
+    use_day_review: bool | None = None,
 ) -> tuple[str | None, str]:
-    """Return (direction, reason) for a closed 5m breakout (9:20 day-review filter).
+    """Return (direction, reason) for a closed 5m body-close breakout.
 
-    Optional body-ratio confirmation: if min_body_ratio > 0, the candle must have
-    a directional body of at least that fraction of its total range. This filters
-    wick-driven false breakouts (e.g. big BANKNIFTY opening candles where price
-    spikes above the green level but closes back near open).
+    Uses **close** only (not wick high/low). After 9:15 BLR lock:
+    - First session 5m bar: close > Green or close < Red (+ mid side filter).
+    - Later bars: same, but prior bar close must have been on the inside of the level.
     """
-    long_breakout = prev_close <= green and close > green and close > mid
-    short_breakout = prev_close >= red and close < red and close < mid
+    if use_day_review is None:
+        use_day_review = DAY_REVIEW_ENABLED
 
-    # Body-ratio confirmation gate
+    long_body_close = close > green and close > mid
+    short_body_close = close < red and close < mid
+
+    if first_session_bar:
+        long_breakout = long_body_close
+        short_breakout = short_body_close
+    else:
+        long_breakout = long_body_close and prev_close <= green
+        short_breakout = short_body_close and prev_close >= red
+
     if min_body_ratio > 0 and candle_open is not None and candle_high is not None and candle_low is not None:
         rng = candle_high - candle_low
         if rng > 0:
@@ -256,16 +295,17 @@ def detect_breakout_signal(
                 if bear_body < min_body_ratio:
                     return None, f"short wick-breakout filtered (body {bear_body:.2f} < {min_body_ratio:.2f})"
 
-    if long_breakout and blr_day_review_allows_direction(day_review, "LONG"):
-        return "LONG", f"green breakout (Review {day_review})"
-
-    if short_breakout and blr_day_review_allows_direction(day_review, "SHORT"):
-        return "SHORT", f"red breakdown (Review {day_review})"
-
     if long_breakout:
-        return None, f"long breakout blocked (Review {day_review} day)"
+        if use_day_review and not blr_day_review_allows_direction(day_review, "LONG"):
+            return None, f"long body-close blocked (Review {day_review} day)"
+        review_note = f" Review {day_review}" if use_day_review else ""
+        return "LONG", f"green body-close ({close:.2f} > {green:.2f}){review_note}"
+
     if short_breakout:
-        return None, f"short breakout blocked (Review {day_review} day)"
+        if use_day_review and not blr_day_review_allows_direction(day_review, "SHORT"):
+            return None, f"short body-close blocked (Review {day_review} day)"
+        review_note = f" Review {day_review}" if use_day_review else ""
+        return "SHORT", f"red body-close ({close:.2f} < {red:.2f}){review_note}"
 
     return None, ""
 
@@ -279,17 +319,20 @@ def trade_levels(
     red: float,
     gap_regime: str,
 ) -> tuple[float, float, float]:
-    """Spot SL, TP1, TP2 with entry-anchored fixed-risk sizing.
+    """Spot SL, TP1, TP2 from BREAKOUT_SIZING_MODE.
 
-    SL distance = band_half (green - mid), giving a constant R:R = 1.5:1
-    regardless of how extended the breakout candle is.  This prevents the
-    'blow-through' problem where a big opening candle creates a 200+ pt loss
-    even though the intended SL level was only ~60 pts away.
+    fixed_sl_tp — entry ± FIXED_SL_PTS / FIXED_TP_PTS (default 30 / 60, 1:2 R:R).
+    band — SL at band_half + buffer, TP at 1.5× / 3× band (legacy production).
     """
-    band_half = green - mid  # same day, same band for every bar
-    sl_dist = band_half + SL_BUFFER
-    tp1_pts = band_half * 1.5  # 1.5:1 R:R
-    tp2_pts = band_half * 3.0  # 3:1 R:R
+    if SIZING_MODE in ("fixed", "fixed_sl_tp", "fixed_sl_and_tp"):
+        sl_dist = FIXED_SL_PTS
+        tp1_pts = FIXED_TP_PTS
+        tp2_pts = FIXED_TP_PTS * 2
+    else:
+        band_half = green - mid  # same day, same band for every bar
+        sl_dist = band_half + SL_BUFFER
+        tp1_pts = band_half * 1.5  # 1.5:1 R:R
+        tp2_pts = band_half * 3.0  # 3:1 R:R
     if direction == "LONG":
         sl = entry - sl_dist
         tp1 = entry + tp1_pts
@@ -509,11 +552,16 @@ class BreakoutEngine:
             state.trade_day = now.date().isoformat()
             self._restore_frozen_levels(state, now.date().isoformat())
         logger.info(
-            "Breakout engine started (paper=%s mock=%s entries=%s max_trades=%d lot=%d)",
+            "Breakout engine started (paper=%s mock=%s entries=%s indices=%s sizing=%s sl=%.0f tp=%.0f max_trades=%d no_entry_after=%s lot=%d)",
             PAPER_TRADING,
             MOCK_MODE,
             ENTRIES_ENABLED,
+            ",".join(sorted(ENTRIES_INDICES)),
+            SIZING_MODE,
+            FIXED_SL_PTS,
+            FIXED_TP_PTS,
             MAX_TRADES_PER_DAY,
+            NO_ENTRY_AFTER.strftime("%H:%M"),
             LOTS_PER_TRADE,
         )
         if not ENTRIES_ENABLED:
@@ -552,7 +600,7 @@ class BreakoutEngine:
             return
 
         kill = self._kill_switch_engaged()
-        entries_blocked = kill or now.time() >= NO_ENTRY_AFTER or now.time() < SESSION_START
+        entries_blocked = kill or now.time() < SESSION_START
         block_reason = ""
         if not ENTRIES_ENABLED:
             entries_blocked = True
@@ -565,7 +613,16 @@ class BreakoutEngine:
             entries_blocked = True
 
         for state in self.states.values():
-            self._process_index(state, now, entries_blocked, block_reason)
+            index_block = block_reason
+            index_blocked = entries_blocked
+            if state.config.code not in ENTRIES_INDICES:
+                index_blocked = True
+                if not block_reason:
+                    index_block = (
+                        f"Entries off for {state.config.code} "
+                        f"(live indices: {', '.join(sorted(ENTRIES_INDICES))})"
+                    )
+            self._process_index(state, now, index_blocked, index_block)
         self._publish_heartbeat(now)
 
     def _roll_trade_day(self, now: datetime) -> None:
@@ -849,7 +906,7 @@ class BreakoutEngine:
         if state.mid is None or state.green is None or state.red is None:
             return
 
-        if state.day_review in ("", "PENDING"):
+        if DAY_REVIEW_ENABLED and state.day_review in ("", "PENDING"):
             state.setup_label = "Awaiting 9:20 5m close for day review"
             return
 
@@ -860,9 +917,18 @@ class BreakoutEngine:
         if candle["timestamp"] == state.last_candle_ts:
             return
 
-        prev_close = float(candles[-2]["close"])
+        candle_ts = parse_candle_ts(candle["timestamp"])
+        if candle_ts.time() > NO_ENTRY_AFTER:
+            state.setup_label = f"Past {NO_ENTRY_AFTER.strftime('%H:%M')} — no new entries (flat {SQUARE_OFF_TIME.strftime('%H:%M')})"
+            return
+
+        prev_candle = candles[-2]
+        prev_close = float(prev_candle["close"])
         close = float(candle["close"])
         state.last_candle_ts = candle["timestamp"]
+
+        prev_ts = parse_candle_ts(prev_candle["timestamp"])
+        first_bar = is_first_session_bar(candle_ts, prev_ts)
 
         direction, reason = detect_breakout_signal(
             prev_close,
@@ -871,6 +937,11 @@ class BreakoutEngine:
             state.red,
             state.mid,
             state.day_review,
+            first_session_bar=first_bar,
+            candle_open=float(candle["open"]),
+            candle_high=float(candle["high"]),
+            candle_low=float(candle["low"]),
+            min_body_ratio=BREAKOUT_MIN_BODY_RATIO,
         )
         if direction is None:
             blocked = reason or f"Watching breakouts (Review {state.day_review} day filter)"
@@ -1055,6 +1126,9 @@ class BreakoutEngine:
             "allowed_short": blr_day_review_allows_direction(state.day_review, "SHORT"),
             "band_half": state.band_half,
             "band_half_pct": state.band_half_pct,
+            "sizing_mode": SIZING_MODE,
+            "fixed_sl_pts": FIXED_SL_PTS,
+            "fixed_tp_pts": FIXED_TP_PTS,
             "session_open": state.session_open,
             "session_open_source": state.session_open_source,
             "prev_close": state.prev_close,
@@ -1101,6 +1175,7 @@ class BreakoutEngine:
                 "square_off_ist": SQUARE_OFF_TIME.strftime("%H:%M"),
                 "no_entry_after_ist": NO_ENTRY_AFTER.strftime("%H:%M"),
                 "indices": list(INDEX_CONFIGS.keys()),
+                "entries_indices": sorted(ENTRIES_INDICES),
                 "entries_enabled": ENTRIES_ENABLED,
             },
             ttl_seconds=60,
