@@ -614,9 +614,9 @@ class CHOCHPosition:
     tp_price: float
     trail_sl: float
     risk_pts: float
-    max_favorable_pts: float = 0.0
     opened_at: str
     entry_reason: str
+    max_favorable_pts: float = 0.0
     instrument_key: str = ""
     option_strike: int = 0
     option_type: str = ""
