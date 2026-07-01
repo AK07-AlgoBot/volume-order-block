@@ -706,7 +706,7 @@ class BreakoutEngine:
         self._refresh_levels(state, candles, now, spot)
 
         if state.position:
-            self._manage_position(state, now)
+            self._manage_position(state, now, candles)
         elif (
             not entries_blocked
             and state.levels_ready
@@ -1089,12 +1089,42 @@ class BreakoutEngine:
             candles=candles,
         )
 
-    def _manage_position(self, state: IndexBreakoutState, now: datetime) -> None:
+    def _position_price_extremes(
+        self,
+        pos: BreakoutPosition,
+        spot: float,
+        candles: list[dict[str, float]],
+    ) -> tuple[float, float]:
+        """Session highs/lows since entry — catches TP/SL wicks LTP polls miss."""
+        high = low = spot
+        entry_ts: datetime | None = None
+        if pos.opened_at:
+            try:
+                entry_ts = datetime.fromisoformat(pos.opened_at)
+                if entry_ts.tzinfo is None:
+                    entry_ts = entry_ts.replace(tzinfo=IST)
+            except ValueError:
+                entry_ts = None
+        for candle in candles:
+            ts = parse_candle_ts(candle["timestamp"])
+            if entry_ts is not None and ts < entry_ts:
+                continue
+            high = max(high, float(candle["high"]))
+            low = min(low, float(candle["low"]))
+        return high, low
+
+    def _manage_position(
+        self,
+        state: IndexBreakoutState,
+        now: datetime,
+        candles: list[dict[str, float]] | None = None,
+    ) -> None:
         pos = state.position
         if pos is None or state.spot is None:
             return
 
         spot = state.spot
+        bar_high, bar_low = self._position_price_extremes(pos, spot, candles or [])
         # Sensex: after +50 pts move SL to entry (cost)
         if state.config.code == "SENSEX":
             fav = (spot - pos.entry_price) if pos.direction == "LONG" else (pos.entry_price - spot)
@@ -1105,25 +1135,39 @@ class BreakoutEngine:
                     pos.sl_price = pos.entry_price
 
         exit_reason = ""
+        exit_price = spot
         if pos.direction == "LONG":
-            if spot <= pos.sl_price:
+            if bar_low <= pos.sl_price:
                 exit_reason = "SL"
-            elif spot >= pos.tp1_price:
+                exit_price = pos.sl_price
+            elif bar_high >= pos.tp1_price:
                 exit_reason = "TP1 booked"
+                exit_price = pos.tp1_price
         else:
-            if spot >= pos.sl_price:
+            if bar_high >= pos.sl_price:
                 exit_reason = "SL"
-            elif spot <= pos.tp1_price:
+                exit_price = pos.sl_price
+            elif bar_low <= pos.tp1_price:
                 exit_reason = "TP1 booked"
+                exit_price = pos.tp1_price
 
         if not exit_reason:
             return
 
         if pos.instrument_key:
-            self.client.place_exit(pos.instrument_key, pos.quantity)
+            if not self.client.place_exit(pos.instrument_key, pos.quantity):
+                logger.error("[%s] breakout exit order failed (%s)", state.config.code, exit_reason)
+                return
 
-        pnl = (spot - pos.entry_price) if pos.direction == "LONG" else (pos.entry_price - spot)
-        msg = f"{state.config.display} BREAKOUT exit {exit_reason} @ {spot:.2f} ({pnl:+.2f} pts)"
+        pnl = (
+            (exit_price - pos.entry_price)
+            if pos.direction == "LONG"
+            else (pos.entry_price - exit_price)
+        )
+        msg = (
+            f"{state.config.display} BREAKOUT exit {exit_reason} @ {exit_price:.2f} "
+            f"(spot {spot:.2f} bar {bar_low:.2f}-{bar_high:.2f}) ({pnl:+.2f} pts)"
+        )
         state.signal_log.append(msg)
         logger.info(msg)
         performance_store.record_completed_trade(
@@ -1132,7 +1176,7 @@ class BreakoutEngine:
             symbol=state.config.code,
             direction=pos.direction,
             entry_price=pos.entry_price,
-            exit_price=spot,
+            exit_price=exit_price,
             pnl_points=pnl,
             exit_reason=exit_reason,
             entry_at=pos.opened_at,
@@ -1144,7 +1188,7 @@ class BreakoutEngine:
         telegram_notifier.notify_trade_exit(
             index_name=f"{state.config.display} Breakout ({pos.option_strike}{pos.option_type})",
             trade_type=pos.direction,
-            exit_price=spot,
+            exit_price=exit_price,
             pnl_points=pnl,
             reason=exit_reason,
             timestamp=now.strftime("%Y-%m-%d %H:%M:%S IST"),
