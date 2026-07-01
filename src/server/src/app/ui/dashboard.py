@@ -80,7 +80,14 @@ def render_smc_crt_strategy_panel(symbol_code: str) -> None:
         st.caption(f"SMC engine heartbeat {str(smc_hb.get('at', ''))[:19]} · until {end} IST · {mode} · 1 lot options")
 
     if not smc:
-        st.info(f"No SMC state for {symbol_code} yet.")
+        active = (smc_hb or {}).get("instruments") or []
+        if active and symbol_code not in active:
+            st.info(
+                f"S2 SMC+CRT is **not enabled** on {symbol_code} — "
+                f"active: **{', '.join(active)}** only (3yr backtest)."
+            )
+        else:
+            st.info(f"No SMC state for {symbol_code} yet — waiting for CRT / market data.")
         return
 
     s1, s2, s3, s4, s5 = st.columns(5)
