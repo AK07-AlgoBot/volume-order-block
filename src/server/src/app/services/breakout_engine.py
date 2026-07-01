@@ -181,6 +181,41 @@ class IndexBreakoutState:
     signal_log: list[str] = field(default_factory=list)
 
 
+def _position_to_dict(pos: BreakoutPosition) -> dict[str, Any]:
+    return {
+        "direction": pos.direction,
+        "entry_price": pos.entry_price,
+        "sl_price": pos.sl_price,
+        "tp1_price": pos.tp1_price,
+        "tp2_price": pos.tp2_price,
+        "lot_size": pos.lot_size,
+        "instrument_key": pos.instrument_key,
+        "option_strike": pos.option_strike,
+        "option_type": pos.option_type,
+        "opened_at": pos.opened_at,
+        "entry_reason": pos.entry_reason,
+    }
+
+
+def _position_from_dict(raw: dict[str, Any]) -> BreakoutPosition | None:
+    try:
+        return BreakoutPosition(
+            direction=str(raw["direction"]),
+            entry_price=float(raw["entry_price"]),
+            sl_price=float(raw["sl_price"]),
+            tp1_price=float(raw["tp1_price"]),
+            tp2_price=float(raw["tp2_price"]),
+            lot_size=int(raw["lot_size"]),
+            instrument_key=str(raw.get("instrument_key") or ""),
+            option_strike=int(raw["option_strike"]),
+            option_type=str(raw["option_type"]),
+            opened_at=str(raw.get("opened_at") or ""),
+            entry_reason=str(raw.get("entry_reason") or ""),
+        )
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
 def compute_blr_levels(
     prev_open: float,
     prev_high: float,
@@ -551,6 +586,7 @@ class BreakoutEngine:
         for state in self.states.values():
             state.trade_day = now.date().isoformat()
             self._restore_frozen_levels(state, now.date().isoformat())
+            self._restore_session_state(state, now.date().isoformat())
         logger.info(
             "Breakout engine started (paper=%s mock=%s entries=%s indices=%s sizing=%s sl=%.0f tp=%.0f max_trades=%d no_entry_after=%s lot=%d)",
             PAPER_TRADING,
@@ -847,6 +883,56 @@ class BreakoutEngine:
         elif state.day_review == "PENDING":
             state.setup_label = f"{state.setup_label} — awaiting 1st 5m close for day review"
 
+    def _session_key(self, day: str, index_code: str) -> str:
+        return cache_manager.BREAKOUT_SESSION_KEY_TEMPLATE.format(day=day, index=index_code)
+
+    def _save_session_state(self, state: IndexBreakoutState) -> None:
+        day = state.trade_day or datetime.now(IST).date().isoformat()
+        payload: dict[str, Any] = {
+            "trades_today": state.trades_today,
+            "last_candle_ts": state.last_candle_ts,
+            "signal_log": state.signal_log[-20:],
+            "position": _position_to_dict(state.position) if state.position else None,
+        }
+        cache_manager.set_json(self._session_key(day, state.config.code), payload, ttl_seconds=86_400 * 2)
+
+    def _restore_session_state(self, state: IndexBreakoutState, day: str) -> bool:
+        raw = cache_manager.get_json(self._session_key(day, state.config.code))
+        if not isinstance(raw, dict):
+            return False
+        state.trades_today = int(raw.get("trades_today") or 0)
+        state.last_candle_ts = str(raw.get("last_candle_ts") or "")
+        logs = raw.get("signal_log")
+        if isinstance(logs, list) and logs:
+            state.signal_log = [str(line) for line in logs[-20:]]
+        pos_raw = raw.get("position")
+        if isinstance(pos_raw, dict):
+            pos = _position_from_dict(pos_raw)
+            if pos is not None:
+                state.position = pos
+                state.setup_label = (
+                    f"{pos.direction} open — restored "
+                    f"{pos.option_strike}{pos.option_type} @ spot {pos.entry_price:.2f}"
+                )
+                logger.info(
+                    "[%s] restored breakout position %s %d%s @ %.2f (SL %.2f TP1 %.2f)",
+                    state.config.code,
+                    pos.direction,
+                    pos.option_strike,
+                    pos.option_type,
+                    pos.entry_price,
+                    pos.sl_price,
+                    pos.tp1_price,
+                )
+        if state.trades_today or state.position:
+            logger.info(
+                "[%s] session restored — trades_today=%d position=%s",
+                state.config.code,
+                state.trades_today,
+                "open" if state.position else "flat",
+            )
+        return bool(state.trades_today or state.position)
+
     def _frozen_key(self, day: str, index_code: str) -> str:
         return cache_manager.BREAKOUT_FROZEN_KEY_TEMPLATE.format(day=day, index=index_code)
 
@@ -990,6 +1076,7 @@ class BreakoutEngine:
         state.setup_label = f"{direction} entry — {reason}"
         state.signal_log.append(msg)
         logger.info(msg)
+        self._save_session_state(state)
         telegram_notifier.notify_trade_execution(
             index_name=f"{state.config.display} Breakout ({option_label} x{LOTS_PER_TRADE})",
             trade_type=direction,
@@ -1053,6 +1140,7 @@ class BreakoutEngine:
         )
         state.setup_label = f"Flat after {exit_reason}"
         state.position = None
+        self._save_session_state(state)
         telegram_notifier.notify_trade_exit(
             index_name=f"{state.config.display} Breakout ({pos.option_strike}{pos.option_type})",
             trade_type=pos.direction,
@@ -1085,6 +1173,7 @@ class BreakoutEngine:
                 state.signal_log.append(f"Square-off {reason} @ {spot:.2f}")
                 state.position = None
                 state.setup_label = f"Flat — {reason}"
+                self._save_session_state(state)
                 telegram_notifier.notify_trade_exit(
                     index_name=f"{state.config.display} Breakout",
                     trade_type=pos.direction,

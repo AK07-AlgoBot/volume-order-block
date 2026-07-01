@@ -457,7 +457,7 @@ def render_breakout_strategy_panel(index_code: str) -> None:
         p5.metric("Stop-Loss", fmt(float(bo_pos.get("sl_price", 0))))
         p6.metric("Reason", str(bo_pos.get("entry_reason", "—"))[:18])
     else:
-        st.caption("Flat — no breakout position (1 lot · options · max 2/day).")
+        st.caption(f"Flat — no breakout position (1 lot · options · max {bo.get('max_trades', 3)}/day).")
 
     signals = bo.get("signals") or []
     if signals:
@@ -468,7 +468,7 @@ def render_breakout_strategy_panel(index_code: str) -> None:
     updated = str(bo.get("updated_at", ""))[:19].replace("T", " ")
     st.markdown(
         f'<p class="ak07-muted-line">Breakout state updated {updated} · trades today '
-        f'{bo.get("trades_today", 0)}/{bo.get("max_trades", 2)}</p>',
+        f'{bo.get("trades_today", 0)}/{bo.get("max_trades", 3)}</p>',
         unsafe_allow_html=True,
     )
 
