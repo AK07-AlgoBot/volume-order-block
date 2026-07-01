@@ -1,5 +1,5 @@
 //@version=6
-// AK07 Breakout · v10 · Fixed SL 30 / TP 60 · server band 0.25% (NIFTY live)
+// AK07 Breakout · v10 · Fixed SL 30 / TP 60 · server band 0.211% (NIFTY live)
 //
 // Entry logic (S3):
 //   • 9:15 — Green / Mid / Red locked from session open
@@ -13,7 +13,7 @@
 //   1. Chart: NSE NIFTY / BANKNIFTY / SENSEX on 5-minute
 //   2. Pine Editor → paste all → Save → Add to chart
 //   3. Confirm inputs (defaults match live server):
-//        Override Auto Band %  = OFF  (NIFTY auto 0.25%)
+//        Override Auto Band %  = OFF  (NIFTY auto 0.211%)
 //        Risk sizing mode      = Fixed SL and TP
 //        Stop / Target         = 30 / 60  (1:2)
 //        Stop for day @ 1st TP = OFF
@@ -45,8 +45,8 @@ showTradeTable  = input.bool(true, "Show Trade Table")
 sessionStr      = input.session("0915-1455", "Market Session")
 tz              = input.string("Asia/Kolkata", "Timezone")
 
-useManualBandPct = input.bool(false, "Override Auto Band % (Manual)", tooltip="Leave OFF for server parity (NIFTY 0.25%, BN 0.125%, SX 0.14%).")
-bandHalfPct      = input.float(0.25, "Manual Band Half-Width (% of Price)", step=0.001, minval=0.001, active=useManualBandPct)
+useManualBandPct = input.bool(false, "Override Auto Band % (Manual)", tooltip="Leave OFF for server parity (NIFTY 0.211%, BN 0.125%, SX 0.14%).")
+bandHalfPct      = input.float(0.211, "Manual Band Half-Width (% of Price)", step=0.001, minval=0.001, active=useManualBandPct)
 gapExtraPct      = input.float(0.0, "Extra Half-Width on Gap Days (% of Price)", step=0.001)
 
 // --- Risk sizing: each mode uses different inputs (greyed-out inputs are ignored) ---
@@ -110,7 +110,7 @@ string _t = syminfo.ticker
 bool _isBank   = str.contains(_t, "BANKNIFTY") or str.contains(_t, "BANKEX") or str.contains(_t, "NIFTY_BANK")
 bool _isSensex = str.contains(_t, "SENSEX")
 bool _isNifty  = (str.contains(_t, "NIFTY") and not _isBank) or _t == "NIFTY50"
-float autoPct = _isBank ? 0.125 : _isSensex ? 0.14 : _isNifty ? 0.25 : bandHalfPct
+float autoPct = _isBank ? 0.125 : _isSensex ? 0.14 : _isNifty ? 0.211 : bandHalfPct
 float activeBandPct = useManualBandPct ? bandHalfPct : autoPct
 
 // =========================

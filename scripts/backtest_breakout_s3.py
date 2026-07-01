@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""S3 BLR breakout backtest — Pine v8 aligned (30 SL / 60 TP, 0.25% band).
+"""S3 BLR breakout backtest — Pine v10 aligned (30 SL / 60 TP, 0.211% band).
 
 Default: **no** stop-after-first-TP (keep trading after 1st target hit; up to max/day).
 Use --stop-after-first-tp to match live Pine (day done when 1st trade reaches target).
@@ -37,7 +37,7 @@ os.environ.setdefault("BREAKOUT_FIXED_TP_PTS", "60")
 os.environ.setdefault("BREAKOUT_MAX_TRADES_PER_DAY", "3")
 os.environ.setdefault("BREAKOUT_NO_ENTRY_AFTER_IST", "13:00")
 os.environ.setdefault("BREAKOUT_SQUARE_OFF_IST", "14:55")
-os.environ.setdefault("BREAKOUT_BAND_PCT_NIFTY", "0.25")
+os.environ.setdefault("BREAKOUT_BAND_PCT_NIFTY", "0.211")
 os.environ.setdefault("BREAKOUT_BAND_PCT_BANKNIFTY", "0.125")
 os.environ.setdefault("BREAKOUT_BAND_PCT_SENSEX", "0.14")
 os.environ.setdefault("BREAKOUT_STOP_AFTER_FIRST_TP", "0")
@@ -143,7 +143,7 @@ def main() -> int:
     print(f"Period     : {start} -> {end}")
     print(f"Indices    : {', '.join(sorted(indices))}")
     print(f"Sizing     : fixed SL 30 / TP 60 (1:2)")
-    print(f"Band       : NIFTY 0.25% auto (server default)")
+    print(f"Band       : NIFTY 0.211% auto (server default)")
     print(f"Max trades : 3/day · no entry after {os.environ.get('BREAKOUT_NO_ENTRY_AFTER_IST', '13:00')} · flat 14:55")
     print(f"Day done   : {'ON (1st TP stops day)' if day_done else 'OFF (no filter — default)'}")
     print("=" * 72)

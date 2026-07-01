@@ -1,7 +1,7 @@
 """AK07 Breakout System — Strategy Type 3.
 
 Daily Green / Mid / Red locked at 9:15 session open + instrument band half-width
-(Pine v6: Nifty 0.25%, BankNifty 0.125%, Sensex 0.14% of price).
+(Pine v6: Nifty 0.211%, BankNifty 0.125%, Sensex 0.14% of price).
 
 Entry: each 5m **body close** (close price, not wick high/low) through Green/Red
 after levels are known from 9:15. First session bar (9:20 close) uses close vs level;
@@ -73,7 +73,7 @@ FIXED_TP_PTS: Final[float] = float(os.environ.get("BREAKOUT_FIXED_TP_PTS", "60")
 
 # Pine v6 band half-width (% of 9:15 session open / Mid)
 BAND_HALF_PCT: Final[dict[str, float]] = {
-    "NIFTY": float(os.environ.get("BREAKOUT_BAND_PCT_NIFTY", "0.25")),
+    "NIFTY": float(os.environ.get("BREAKOUT_BAND_PCT_NIFTY", "0.211")),
     "BANKNIFTY": float(os.environ.get("BREAKOUT_BAND_PCT_BANKNIFTY", "0.125")),
     "SENSEX": float(os.environ.get("BREAKOUT_BAND_PCT_SENSEX", "0.14")),
 }
@@ -209,7 +209,7 @@ def compute_blr_levels(
         gap_regime = "GAP_DN"
 
     base = session_open
-    active_pct = BAND_HALF_PCT.get(index_code, 0.25)
+    active_pct = BAND_HALF_PCT.get(index_code, 0.211)
     half_width = base * active_pct / 100.0
     gap_addon = (
         base * GAP_EXTRA_PCT / 100.0
