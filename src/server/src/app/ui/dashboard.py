@@ -20,9 +20,20 @@ import streamlit as st
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
+from app.constants import (
+    STRATEGY_GAMMA,
+    STRATEGY_S1_OI,
+    STRATEGY_S2_SMC,
+    STRATEGY_S3_BREAKOUT,
+    STRATEGY_S7_ORB,
+    STRATEGY_S8_CHOCH,
+)
 from app.services import cache_manager
 from app.services.upstox_engine import INDEX_CONFIGS, INDEX_OI_RISK, DEFAULT_OI_RISK
+import app.ui.auth_session as auth_session
+from app.ui.strategy_access import enabled_strategy_labels_text, user_can_view_strategy
 from app.ui.cockpit_layout import render_compact_sidebar, render_top_status_bar
+from app.ui.nav_config import build_navigation
 from app.ui.styles import inject_dark_theme
 
 REFRESH_SECONDS = 5
@@ -33,15 +44,6 @@ if MOCK_MODE:
     from app.services import mock_data
 
     mock_data.seed()
-
-st.set_page_config(
-    page_title="AK07 Execution Cockpit",
-    page_icon="\U0001f3af",
-    layout="wide",
-    initial_sidebar_state="collapsed",
-)
-
-inject_dark_theme()
 
 
 def bias_badge(bias: str) -> str:
@@ -483,123 +485,142 @@ def render_breakout_strategy_panel(index_code: str) -> None:
 # ---------------------------------------------------------------------------
 # Layout: slim sidebar + top status bar (full-width main content)
 # ---------------------------------------------------------------------------
-render_compact_sidebar(mock_mode=MOCK_MODE)
-auto_refresh = render_top_status_bar(
-    mock_mode=MOCK_MODE,
-    production_domain=PRODUCTION_DOMAIN,
-    refresh_seconds=REFRESH_SECONDS,
+def run_dashboard() -> None:
+    auth_session.require_login()
+    render_compact_sidebar(mock_mode=MOCK_MODE, admin_mode=auth_session.is_admin())
+    auto_refresh = render_top_status_bar(
+        mock_mode=MOCK_MODE,
+        production_domain=PRODUCTION_DOMAIN,
+        refresh_seconds=REFRESH_SECONDS,
+        can_view_strategy=user_can_view_strategy,
+    )
+
+    # ---------------------------------------------------------------------------
+    # Main: one tab per index
+    # ---------------------------------------------------------------------------
+    st.markdown("# AK07 Multi-Index Execution Cockpit")
+    meta_col, domain_col = st.columns([10, 2])
+    with meta_col:
+        st.caption(
+            f"Updated {datetime.now(timezone.utc).astimezone().strftime('%H:%M:%S')} local · "
+            f"{enabled_strategy_labels_text()} · collapse sidebar « for full width"
+        )
+    with domain_col:
+        st.caption(PRODUCTION_DOMAIN)
+
+    ak07_tabs = [cfg.display for cfg in INDEX_CONFIGS.values()]
+    tabs = st.tabs(ak07_tabs)
+    
+    for tab, (code, cfg) in zip(tabs, INDEX_CONFIGS.items()):
+        with tab:
+            state = cache_manager.get_json(cache_manager.INDEX_STATE_KEY_TEMPLATE.format(index=code))
+            if not state:
+                st.info(f"No live state for {cfg.display} yet — is the engine running?")
+                continue
+    
+            if user_can_view_strategy(STRATEGY_S1_OI):
+                spot = state.get("spot")
+                call_wall = state.get("call_wall")
+                put_floor = state.get("put_floor")
+    
+                c1, c2, c3, c4 = st.columns(4)
+                c1.metric("Live Spot Price", fmt(float(spot)) if spot is not None else "—")
+                c2.metric(
+                    "Institutional Call Wall \u2191",
+                    fmt(call_wall, 0),
+                    delta=(f"{call_wall - spot:+,.0f} pts away" if call_wall and spot else None),
+                    delta_color="off",
+                )
+                c3.metric(
+                    "Institutional Put Floor \u2193",
+                    fmt(put_floor, 0),
+                    delta=(f"{spot - put_floor:+,.0f} pts above" if put_floor and spot else None),
+                    delta_color="off",
+                )
+                with c4:
+                    st.markdown("**Component Bias**")
+                    st.markdown(bias_badge(state.get("component_bias", "NEUTRAL")), unsafe_allow_html=True)
+                    st.caption(f"Trades today: {state.get('trades_today', 0)}/{state.get('max_trades', 2)}")
+    
+                st.markdown("#### Institutional Component Health")
+                components: dict[str, float | None] = state.get("components") or {}
+                if components:
+                    cols = st.columns(len(components))
+                    for col, (symbol, pct) in zip(cols, components.items()):
+                        col.markdown(component_block(symbol, pct), unsafe_allow_html=True)
+                else:
+                    st.caption("Component quotes unavailable.")
+    
+                position = state.get("position")
+                st.markdown("#### Active Position")
+                if position:
+                    p1, p2, p3, p4, p5, p6 = st.columns(6)
+                    option = f"{position.get('option_strike', '')}{position.get('option_type', '')}"
+                    p1.metric("Direction", position.get("direction", "—"), delta=option or None, delta_color="off")
+                    p2.metric("Entry (spot)", fmt(float(position.get("entry_price", 0))))
+                    p3.metric("Target", fmt(float(position.get("target_price", 0))))
+                    p4.metric("Stop-Loss", fmt(float(position.get("sl_price", 0))))
+                    lots = int(position.get("lots_remaining", 1))
+                    _, partial_pts, _ = INDEX_OI_RISK.get(code, DEFAULT_OI_RISK)
+                    partial_label = (
+                        "1 lot booked"
+                        if position.get("partial_booked")
+                        else f"awaiting +{int(partial_pts)} book"
+                    )
+                    p5.metric(
+                        "Lots Running",
+                        f"{lots}/2",
+                        delta=partial_label,
+                        delta_color="off",
+                    )
+                    if spot is not None:
+                        live_pnl = (
+                            spot - position["entry_price"]
+                            if position.get("direction") == "LONG"
+                            else position["entry_price"] - spot
+                        )
+                        p6.metric("Live P&L (pts)", f"{live_pnl:+.2f}")
+                else:
+                    st.caption("Flat — no open position.")
+    
+                recent = state.get("recent_trades") or []
+                if recent:
+                    with st.expander("Strategy 1 — today's trade log", expanded=False):
+                        for line in reversed(recent):
+                            st.markdown(f'<p class="ak07-signal-line">{line}</p>', unsafe_allow_html=True)
+    
+                updated = str(state.get("updated_at", ""))[:19].replace("T", " ")
+                flags = []
+                if state.get("entries_blocked"):
+                    flags.append("entries blocked")
+                elif state.get("monitoring_active"):
+                    flags.append("monitoring active execution boundaries")
+                if state.get("paper_trading"):
+                    flags.append("paper mode")
+                st.caption(f"Engine state updated {updated}" + (f" · {' · '.join(flags)}" if flags else ""))
+    
+            if user_can_view_strategy(STRATEGY_S2_SMC):
+                render_smc_crt_strategy_panel(code)
+            if user_can_view_strategy(STRATEGY_S3_BREAKOUT):
+                render_breakout_strategy_panel(code)
+            if user_can_view_strategy(STRATEGY_S7_ORB):
+                render_s7_strategy_panel(code)
+            if user_can_view_strategy(STRATEGY_S8_CHOCH):
+                render_choch_strategy_panel(code)
+            if user_can_view_strategy(STRATEGY_GAMMA):
+                render_gamma_expiry_panel(code)
+    
+    if auto_refresh:
+        time.sleep(REFRESH_SECONDS)
+        st.rerun()
+
+
+st.set_page_config(
+    page_title="AK07 Execution Cockpit",
+    page_icon="\U0001f3af",
+    layout="wide",
+    initial_sidebar_state="expanded",
 )
 
-# ---------------------------------------------------------------------------
-# Main: one tab per index
-# ---------------------------------------------------------------------------
-st.markdown("# AK07 Multi-Index Execution Cockpit")
-meta_col, domain_col = st.columns([10, 2])
-with meta_col:
-    st.caption(
-        f"Updated {datetime.now(timezone.utc).astimezone().strftime('%H:%M:%S')} local · "
-        "S1 OI · S2 SMC · S3 BLR · S7 ORB+ · S8 CHOCH · **Performance Review** in nav · "
-        "collapse sidebar « for full width"
-    )
-with domain_col:
-    st.caption(PRODUCTION_DOMAIN)
-
-ak07_tabs = [cfg.display for cfg in INDEX_CONFIGS.values()]
-tabs = st.tabs(ak07_tabs)
-
-for tab, (code, cfg) in zip(tabs, INDEX_CONFIGS.items()):
-    with tab:
-        state = cache_manager.get_json(cache_manager.INDEX_STATE_KEY_TEMPLATE.format(index=code))
-        if not state:
-            st.info(f"No live state for {cfg.display} yet — is the engine running?")
-            continue
-
-        spot = state.get("spot")
-        call_wall = state.get("call_wall")
-        put_floor = state.get("put_floor")
-
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Live Spot Price", fmt(float(spot)) if spot is not None else "—")
-        c2.metric(
-            "Institutional Call Wall \u2191",
-            fmt(call_wall, 0),
-            delta=(f"{call_wall - spot:+,.0f} pts away" if call_wall and spot else None),
-            delta_color="off",
-        )
-        c3.metric(
-            "Institutional Put Floor \u2193",
-            fmt(put_floor, 0),
-            delta=(f"{spot - put_floor:+,.0f} pts above" if put_floor and spot else None),
-            delta_color="off",
-        )
-        with c4:
-            st.markdown("**Component Bias**")
-            st.markdown(bias_badge(state.get("component_bias", "NEUTRAL")), unsafe_allow_html=True)
-            st.caption(f"Trades today: {state.get('trades_today', 0)}/{state.get('max_trades', 2)}")
-
-        st.markdown("#### Institutional Component Health")
-        components: dict[str, float | None] = state.get("components") or {}
-        if components:
-            cols = st.columns(len(components))
-            for col, (symbol, pct) in zip(cols, components.items()):
-                col.markdown(component_block(symbol, pct), unsafe_allow_html=True)
-        else:
-            st.caption("Component quotes unavailable.")
-
-        position = state.get("position")
-        st.markdown("#### Active Position")
-        if position:
-            p1, p2, p3, p4, p5, p6 = st.columns(6)
-            option = f"{position.get('option_strike', '')}{position.get('option_type', '')}"
-            p1.metric("Direction", position.get("direction", "—"), delta=option or None, delta_color="off")
-            p2.metric("Entry (spot)", fmt(float(position.get("entry_price", 0))))
-            p3.metric("Target", fmt(float(position.get("target_price", 0))))
-            p4.metric("Stop-Loss", fmt(float(position.get("sl_price", 0))))
-            lots = int(position.get("lots_remaining", 1))
-            _, partial_pts, _ = INDEX_OI_RISK.get(code, DEFAULT_OI_RISK)
-            partial_label = (
-                "1 lot booked"
-                if position.get("partial_booked")
-                else f"awaiting +{int(partial_pts)} book"
-            )
-            p5.metric(
-                "Lots Running",
-                f"{lots}/2",
-                delta=partial_label,
-                delta_color="off",
-            )
-            if spot is not None:
-                live_pnl = (
-                    spot - position["entry_price"]
-                    if position.get("direction") == "LONG"
-                    else position["entry_price"] - spot
-                )
-                p6.metric("Live P&L (pts)", f"{live_pnl:+.2f}")
-        else:
-            st.caption("Flat — no open position.")
-
-        recent = state.get("recent_trades") or []
-        if recent:
-            with st.expander("Strategy 1 — today's trade log", expanded=False):
-                for line in reversed(recent):
-                    st.markdown(f'<p class="ak07-signal-line">{line}</p>', unsafe_allow_html=True)
-
-        updated = str(state.get("updated_at", ""))[:19].replace("T", " ")
-        flags = []
-        if state.get("entries_blocked"):
-            flags.append("entries blocked")
-        elif state.get("monitoring_active"):
-            flags.append("monitoring active execution boundaries")
-        if state.get("paper_trading"):
-            flags.append("paper mode")
-        st.caption(f"Engine state updated {updated}" + (f" · {' · '.join(flags)}" if flags else ""))
-
-        render_smc_crt_strategy_panel(code)
-        render_breakout_strategy_panel(code)
-        render_s7_strategy_panel(code)
-        render_choch_strategy_panel(code)
-        render_gamma_expiry_panel(code)
-
-if auto_refresh:
-    time.sleep(REFRESH_SECONDS)
-    st.rerun()
+inject_dark_theme()
+build_navigation(dashboard_runner=run_dashboard).run()

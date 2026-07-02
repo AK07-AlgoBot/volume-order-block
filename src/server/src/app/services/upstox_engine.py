@@ -81,6 +81,12 @@ MAX_TRADES_PER_INDEX_PER_DAY: Final[int] = 2
 SUPPORT_POCKET_POINTS: Final[float] = float(os.environ.get("AK07_SUPPORT_POCKET_PTS", "20"))
 RESISTANCE_POCKET_POINTS: Final[float] = float(os.environ.get("AK07_RESISTANCE_POCKET_PTS", "20"))
 WICK_REJECTION_RATIO: Final[float] = float(os.environ.get("AK07_WICK_REJECTION_RATIO", "0.50"))
+OI_VELOCITY_GATE_ENABLED: Final[bool] = os.environ.get("AK07_OI_VELOCITY_GATE", "0").strip().lower() in (
+    "1", "true", "yes",
+)
+OI_PCR_GATE_ENABLED: Final[bool] = os.environ.get("AK07_OI_PCR_GATE", "0").strip().lower() in (
+    "1", "true", "yes",
+)
 SQUARE_OFF_TIME: Final[dtime] = dtime(14, 55)   # IST hard intraday protection
 ARCHIVE_TIME: Final[dtime] = dtime(15, 30)      # post-market performance archival
 
@@ -901,21 +907,24 @@ def detect_setup(
 ) -> str | None:
     """Evaluate SETUP 1 (LONG) and SETUP 2 (SHORT) on a closed 5-min candle.
 
-    Enhanced with two additional gates from the AK07 OI Scanner pattern:
-      1. PCR regime filter: skip LONG in bearish regime (PCR < 0.75) or SHORT in bullish (PCR > 1.25).
-      2. OI velocity confirmation: for SHORT, require max CE writing strike == call_wall (wall actively
-         defended); for LONG, require max PE writing strike == put_floor (floor actively defended).
-         Falls back to wall-only check when velocity data is unavailable.
+    Enhanced with optional gates (env toggles, off by default):
+      1. PCR regime filter (AK07_OI_PCR_GATE=1): skip LONG when PCR < 0.75, SHORT when PCR > 1.25.
+      2. OI velocity confirmation (AK07_OI_VELOCITY_GATE=1): require max writing strike == wall/floor.
+         Disabled by default — intraday velocity hotspots rarely align with max-total-OI walls.
     """
     spot = candle["close"]
 
-    # PCR regime thresholds (derived from AK07 OI Scanner decision tree)
-    pcr_bearish = pcr < 0.75 if pcr is not None else False
-    pcr_bullish = pcr > 1.25 if pcr is not None else False
+    # PCR regime thresholds (optional — AK07_OI_PCR_GATE=1)
+    pcr_bearish = OI_PCR_GATE_ENABLED and pcr is not None and pcr < 0.75
+    pcr_bullish = OI_PCR_GATE_ENABLED and pcr is not None and pcr > 1.25
 
     in_support_pocket = put_floor <= spot <= put_floor + SUPPORT_POCKET_POINTS
-    # Velocity gate: floor must be the most actively written PE strike right now.
-    floor_velocity_ok = (max_pe_writing_strike is None or max_pe_writing_strike == put_floor)
+    # Velocity gate (optional — AK07_OI_VELOCITY_GATE=1): exact strike match rarely aligns
+    # with max-total-OI walls; pocket + wick logic is the primary entry filter.
+    if OI_VELOCITY_GATE_ENABLED:
+        floor_velocity_ok = max_pe_writing_strike is None or max_pe_writing_strike == put_floor
+    else:
+        floor_velocity_ok = True
     if (
         in_support_pocket
         and lower_wick_ratio(candle) >= WICK_REJECTION_RATIO
@@ -927,8 +936,10 @@ def detect_setup(
         return "LONG"
 
     in_resistance_pocket = call_wall - RESISTANCE_POCKET_POINTS <= spot <= call_wall
-    # Velocity gate: wall must be the most actively written CE strike right now.
-    wall_velocity_ok = (max_ce_writing_strike is None or max_ce_writing_strike == call_wall)
+    if OI_VELOCITY_GATE_ENABLED:
+        wall_velocity_ok = max_ce_writing_strike is None or max_ce_writing_strike == call_wall
+    else:
+        wall_velocity_ok = True
     if (
         in_resistance_pocket
         and upper_wick_ratio(candle) >= WICK_REJECTION_RATIO

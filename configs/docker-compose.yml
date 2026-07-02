@@ -155,6 +155,7 @@ services:
       CHOCH_MAX_LOTS: "2"
       CHOCH_RISK_PCT: "1.0"
       CHOCH_DAILY_LOSS_LIMIT_PCT: "2.0"
+      CHOCH_BE_RR: "1.0"
     volumes:
       - ak07_server_data:/app/src/server/data
     depends_on:
@@ -246,6 +247,7 @@ services:
       PYTHONUNBUFFERED: "1"
       PYTHONPATH: /app/src/server/src
       REDIS_HOST: redis
+      AK07_API_URL: http://api:8000
       COMPOSE_FILE: /app/configs/docker-compose.yml
     volumes:
       - ak07_server_data:/app/src/server/data
@@ -256,6 +258,8 @@ services:
     depends_on:
       redis:
         condition: service_healthy
+      api:
+        condition: service_started
       engine:
         condition: service_started
       smc_crt_engine:

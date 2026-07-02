@@ -353,8 +353,7 @@ if longSignal
     activeSl := na
     slAtCost := false
     strategy.entry("LONG", strategy.long)
-    string entryTag = isFirst5mBar ? "BUY 1st5m" : "BUY"
-    label.new(bar_index, low, entryTag + "\n" + riskSizingMode + "\nSL-" + str.tostring(posRiskPts, "#") + " TP+" + str.tostring(posTargetPts, "#"), style=label.style_label_up, color=color.lime, textcolor=color.black, size=size.small)
+    label.new(bar_index, low, "BUY", style=label.style_label_up, color=color.lime, textcolor=color.black, size=size.small)
 
 if shortSignal
     tradesToday += 1
@@ -366,8 +365,7 @@ if shortSignal
     activeSl := na
     slAtCost := false
     strategy.entry("SHORT", strategy.short)
-    string entryTagS = isFirst5mBar ? "SELL 1st5m" : "SELL"
-    label.new(bar_index, high, entryTagS + "\n" + riskSizingMode + "\nSL-" + str.tostring(posRiskPts, "#") + " TP+" + str.tostring(posTargetPts, "#"), style=label.style_label_down, color=color.red, textcolor=color.white, size=size.small)
+    label.new(bar_index, high, "SELL", style=label.style_label_down, color=color.red, textcolor=color.white, size=size.small)
 
 // Exits — mode-specific SL price + TP price stored at entry
 if strategy.position_size > 0 and not na(posSlPrice)
@@ -380,7 +378,7 @@ if strategy.position_size > 0 and not na(posSlPrice)
             slAtCost := true
             label.new(bar_index, low, "SL→COST", style=label.style_label_up, color=color.new(color.orange, 0), textcolor=color.black, size=size.tiny)
     activeSl := slL
-    strategy.exit("L-X", "LONG", stop=activeSl, limit=posTpPrice)
+    strategy.exit("Long Exit", "LONG", stop=activeSl, limit=posTpPrice, comment_profit="TP", comment_loss="SL")
 
 if strategy.position_size < 0 and not na(posSlPrice)
     float eS = strategy.position_avg_price
@@ -392,7 +390,7 @@ if strategy.position_size < 0 and not na(posSlPrice)
             slAtCost := true
             label.new(bar_index, high, "SL→COST", style=label.style_label_down, color=color.new(color.orange, 0), textcolor=color.black, size=size.tiny)
     activeSl := slS
-    strategy.exit("S-X", "SHORT", stop=activeSl, limit=posTpPrice)
+    strategy.exit("Short Exit", "SHORT", stop=activeSl, limit=posTpPrice, comment_profit="TP", comment_loss="SL")
 
 plot(strategy.position_size > 0 ? posSlPrice : na, "Long SL", color=color.new(color.red, 0), style=plot.style_linebr, linewidth=1)
 plot(strategy.position_size > 0 ? posTpPrice : na, "Long TP", color=color.new(color.lime, 0), style=plot.style_linebr, linewidth=1)

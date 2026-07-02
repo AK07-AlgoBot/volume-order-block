@@ -15,16 +15,15 @@ import streamlit as st
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
 from app.config.paths import repo_root
+from app.ui.auth_session import is_admin, require_login
 from app.ui.styles import inject_dark_theme
 
-st.set_page_config(
-    page_title="AK07 — Deploy",
-    page_icon="🚀",
-    layout="wide",
-    initial_sidebar_state="collapsed",
-)
-
 inject_dark_theme()
+require_login()
+
+if not is_admin():
+    st.error("Deploy is admin-only.")
+    st.stop()
 
 REPO = repo_root()
 COMPOSE_FILE = str(REPO / "configs" / "docker-compose.yml")

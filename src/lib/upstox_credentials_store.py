@@ -124,5 +124,10 @@ def persist_credentials_for_user(username: str, data: dict[str, str]) -> dict[st
 
 
 def list_usernames_from_auth_store() -> list[str]:
-    """Single-tenant dashboard: only AK07."""
-    return ["AK07"]
+    """All dashboard usernames from users_auth.json."""
+    try:
+        from app.services.users_store import list_users
+
+        return [u["username"] for u in list_users()]
+    except Exception:
+        return ["AK07"]

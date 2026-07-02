@@ -20,20 +20,15 @@ from app.services.instrument_catalog import (
     search_instruments_api,
 )
 from app.services.stock_oi_analyzer import analyze_and_matrix, load_credentials_for_user
+from app.ui.auth_session import current_username, require_login
 from app.ui.styles import inject_dark_theme
 
 ensure_repo_and_lib_on_path()
 
-st.set_page_config(
-    page_title="AK07 — Stock OI Scanner",
-    page_icon="📊",
-    layout="wide",
-    initial_sidebar_state="collapsed",
-)
-
 inject_dark_theme()
+require_login()
 
-USERNAME = "AK07"
+USERNAME = current_username()
 
 st.markdown("# Stock OI Scanner")
 st.caption(
@@ -66,7 +61,10 @@ with sync_col:
     if st.button("Sync catalog", use_container_width=True):
         with st.spinner("Syncing Upstox instrument master…"):
             ok, msg = ensure_catalog()
-        st.success(msg) if ok else st.error(msg)
+        if ok:
+            st.success(msg)
+        else:
+            st.error(msg)
         st.rerun()
 
 st.markdown("**Quick picks**")

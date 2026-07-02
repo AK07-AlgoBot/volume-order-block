@@ -1,0 +1,258 @@
+{
+  "date": "2026-07-02",
+  "generated_at": "2026-07-02T19:03:43.841037+05:30",
+  "paper_trading": true,
+  "pnl_points_by_index": {
+    "NIFTY": 0.0,
+    "BANKNIFTY": 0.0,
+    "SENSEX": 0.0
+  },
+  "pnl_points_total": 0.0,
+  "trade_log": [],
+  "spot_tracking": {
+    "NIFTY": [
+      {
+        "at": "2026-07-02T19:03:43.841037+05:30",
+        "spot": 22600.0
+      }
+    ],
+    "BANKNIFTY": [
+      {
+        "at": "2026-07-02T19:03:43.841037+05:30",
+        "spot": 51650.0
+      }
+    ],
+    "SENSEX": [
+      {
+        "at": "2026-07-02T19:03:43.841037+05:30",
+        "spot": 78850.0
+      }
+    ]
+  },
+  "component_sentiment_tracking": {
+    "NIFTY": [
+      {
+        "at": "2026-07-02T19:03:43.841037+05:30",
+        "bias": "BULLISH",
+        "components": {
+          "RELIANCE": 1.01,
+          "HDFCBANK": 1.01,
+          "ICICIBANK": 1.01,
+          "INFY": 1.01,
+          "TCS": 1.01
+        }
+      }
+    ],
+    "BANKNIFTY": [
+      {
+        "at": "2026-07-02T19:03:43.841037+05:30",
+        "bias": "BULLISH",
+        "components": {
+          "HDFCBANK": 1.01,
+          "ICICIBANK": 1.01,
+          "SBIN": 1.01,
+          "AXISBANK": 1.01,
+          "KOTAKBANK": 1.01
+        }
+      }
+    ],
+    "SENSEX": [
+      {
+        "at": "2026-07-02T19:03:43.841037+05:30",
+        "bias": "BULLISH",
+        "components": {
+          "RELIANCE": 1.01,
+          "HDFCBANK": 1.01,
+          "ICICIBANK": 1.01,
+          "INFY": 1.01,
+          "TCS": 1.01,
+          "ITC": 1.01
+        }
+      }
+    ]
+  },
+  "redis_cache_dump": {
+    "live_state": {
+      "spot_price": 22600.0,
+      "volume": 120000,
+      "highest_call_oi_strike": 24000,
+      "highest_put_oi_strike": 21200,
+      "timestamp": "2026-07-02T19:03:43.841037+05:30"
+    },
+    "system_mode": "NEUTRAL",
+    "kill_switch": null,
+    "positions": {},
+    "index_states": {
+      "NIFTY": {
+        "index": "NIFTY",
+        "display": "Nifty 50",
+        "spot": 22600.0,
+        "call_wall": 24000,
+        "put_floor": 21200,
+        "pcr": null,
+        "max_ce_writing_strike": null,
+        "max_pe_writing_strike": null,
+        "component_bias": "BULLISH",
+        "components": {
+          "RELIANCE": 1.01,
+          "HDFCBANK": 1.01,
+          "ICICIBANK": 1.01,
+          "INFY": 1.01,
+          "TCS": 1.01
+        },
+        "trades_today": 0,
+        "max_trades": 2,
+        "position": null,
+        "entries_blocked": false,
+        "monitoring_active": false,
+        "paper_trading": true,
+        "recent_trades": [],
+        "updated_at": "2026-07-02T19:03:43.841037+05:30"
+      },
+      "BANKNIFTY": {
+        "index": "BANKNIFTY",
+        "display": "BankNifty",
+        "spot": 51650.0,
+        "call_wall": 52500,
+        "put_floor": 50800,
+        "pcr": null,
+        "max_ce_writing_strike": null,
+        "max_pe_writing_strike": null,
+        "component_bias": "BULLISH",
+        "components": {
+          "HDFCBANK": 1.01,
+          "ICICIBANK": 1.01,
+          "SBIN": 1.01,
+          "AXISBANK": 1.01,
+          "KOTAKBANK": 1.01
+        },
+        "trades_today": 0,
+        "max_trades": 2,
+        "position": null,
+        "entries_blocked": false,
+        "monitoring_active": false,
+        "paper_trading": true,
+        "recent_trades": [],
+        "updated_at": "2026-07-02T19:03:43.841037+05:30"
+      },
+      "SENSEX": {
+        "index": "SENSEX",
+        "display": "Sensex",
+        "spot": 78850.0,
+        "call_wall": 79800,
+        "put_floor": 77900,
+        "pcr": null,
+        "max_ce_writing_strike": null,
+        "max_pe_writing_strike": null,
+        "component_bias": "BULLISH",
+        "components": {
+          "RELIANCE": 1.01,
+          "HDFCBANK": 1.01,
+          "ICICIBANK": 1.01,
+          "INFY": 1.01,
+          "TCS": 1.01,
+          "ITC": 1.01
+        },
+        "trades_today": 0,
+        "max_trades": 2,
+        "position": null,
+        "entries_blocked": false,
+        "monitoring_active": false,
+        "paper_trading": true,
+        "recent_trades": [],
+        "updated_at": "2026-07-02T19:03:43.841037+05:30"
+      }
+    }
+  },
+  "completed_trades_summary": {
+    "trade_count": 0,
+    "wins": 0,
+    "losses": 0,
+    "win_pct": 0.0,
+    "pnl_points_total": 0.0,
+    "by_strategy": [
+      {
+        "Strategy": "Strategy 1 — AK07 OI",
+        "Trades": 0,
+        "Wins": 0,
+        "Losses": 0,
+        "Win %": 0.0,
+        "Profit (pts)": 0
+      },
+      {
+        "Strategy": "Strategy 2 — SMC+CRT",
+        "Trades": 0,
+        "Wins": 0,
+        "Losses": 0,
+        "Win %": 0.0,
+        "Profit (pts)": 0
+      },
+      {
+        "Strategy": "Strategy 3 — BLR Breakout",
+        "Trades": 0,
+        "Wins": 0,
+        "Losses": 0,
+        "Win %": 0.0,
+        "Profit (pts)": 0
+      },
+      {
+        "Strategy": "Strategy 4 — Price Action",
+        "Trades": 0,
+        "Wins": 0,
+        "Losses": 0,
+        "Win %": 0.0,
+        "Profit (pts)": 0
+      },
+      {
+        "Strategy": "Strategy 5 — Greeks",
+        "Trades": 0,
+        "Wins": 0,
+        "Losses": 0,
+        "Win %": 0.0,
+        "Profit (pts)": 0
+      },
+      {
+        "Strategy": "Strategy 6 — S/R Reversal",
+        "Trades": 0,
+        "Wins": 0,
+        "Losses": 0,
+        "Win %": 0.0,
+        "Profit (pts)": 0
+      },
+      {
+        "Strategy": "Strategy 7 — ORB+",
+        "Trades": 0,
+        "Wins": 0,
+        "Losses": 0,
+        "Win %": 0.0,
+        "Profit (pts)": 0
+      },
+      {
+        "Strategy": "Strategy 8 — CHOCH",
+        "Trades": 0,
+        "Wins": 0,
+        "Losses": 0,
+        "Win %": 0.0,
+        "Profit (pts)": 0
+      },
+      {
+        "Strategy": "Gamma Expiry Observer",
+        "Trades": 0,
+        "Wins": 0,
+        "Losses": 0,
+        "Win %": 0.0,
+        "Profit (pts)": 0
+      },
+      {
+        "Strategy": "TOTAL",
+        "Trades": 0,
+        "Wins": 0,
+        "Losses": 0,
+        "Win %": 0.0,
+        "Profit (pts)": 0.0
+      }
+    ],
+    "by_index": [],
+    "by_strategy_and_index": []
+  }
+}

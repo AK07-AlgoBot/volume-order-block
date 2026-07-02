@@ -1,4 +1,4 @@
-"""FastAPI dependencies: AK07 auth only."""
+"""FastAPI dependencies: JWT auth + admin guard."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ from dataclasses import dataclass
 
 from fastapi import HTTPException, Request
 
-from app.constants import DASHBOARD_USERNAME
+from app.constants import ADMIN_ROLE
 from app.utils.security import decode_token
 
 
@@ -25,7 +25,7 @@ def _claims_from_authorization(request: Request) -> UserClaims | None:
     if not payload:
         return None
     sub = str(payload.get("sub") or "").strip()
-    if sub != DASHBOARD_USERNAME:
+    if not sub:
         return None
     return UserClaims(username=sub, role=str(payload.get("role", "user")))
 
@@ -40,3 +40,8 @@ async def require_user(request: Request) -> UserClaims:
     return c
 
 
+async def require_admin_user(request: Request) -> UserClaims:
+    user = await require_user(request)
+    if user.role != ADMIN_ROLE:
+        raise HTTPException(status_code=403, detail="Admin access required.")
+    return user

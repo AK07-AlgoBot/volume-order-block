@@ -91,7 +91,7 @@ SWING_LOOKBACK: Final[int] = int(os.environ.get("CHOCH_SWING_LB", "3"))
 ATR_PERIOD: Final[int] = int(os.environ.get("CHOCH_ATR_PERIOD", "14"))
 SL_ATR_BUFFER: Final[float] = float(os.environ.get("CHOCH_SL_BUF", "0.25"))
 TP_RR: Final[float] = float(os.environ.get("CHOCH_TP_RR", "2.0"))
-BE_TRIGGER_RR: Final[float] = float(os.environ.get("CHOCH_BE_RR", "0.5"))
+BE_TRIGGER_RR: Final[float] = float(os.environ.get("CHOCH_BE_RR", "1.0"))
 BE_BUFFER_PTS: Final[float] = float(os.environ.get("CHOCH_BE_BUFFER_PTS", "2.0"))
 ADX_PERIOD: Final[int] = int(os.environ.get("CHOCH_ADX_PERIOD", "14"))
 ADX_MIN: Final[float] = float(os.environ.get("CHOCH_ADX_MIN", "20.0"))
@@ -482,6 +482,12 @@ def breakeven_sl_price(direction: str, entry: float) -> float:
     return entry + BE_BUFFER_PTS
 
 
+def is_breakeven_stop(pos: "CHOCHPosition") -> bool:
+    """True when active SL is at the post-BE scratch level (entry ± buffer)."""
+    be = breakeven_sl_price(pos.direction, pos.entry_price)
+    return abs(pos.sl_price - be) < 0.05
+
+
 def update_position_mfe(pos: CHOCHPosition, spot: float, closed: list[dict]) -> None:
     """Track max favourable excursion using live spot and closed-bar extremes."""
     if pos.direction == "LONG":
@@ -511,6 +517,8 @@ def apply_profit_management(pos: CHOCHPosition, closed: list[dict]) -> None:
         if new_sl != pos.sl_price:
             pos.sl_price = new_sl
             pos.trail_sl = new_sl
+            if is_breakeven_stop(pos):
+                pos.be_active = True
 
     if pos.max_favorable_pts >= pos.risk_pts and closed:
         if pos.direction == "LONG":
@@ -617,6 +625,7 @@ class CHOCHPosition:
     opened_at: str
     entry_reason: str
     max_favorable_pts: float = 0.0
+    be_active: bool = False
     instrument_key: str = ""
     option_strike: int = 0
     option_type: str = ""
@@ -669,6 +678,7 @@ def _position_to_dict(pos: CHOCHPosition) -> dict[str, Any]:
         "trail_sl": pos.trail_sl,
         "risk_pts": pos.risk_pts,
         "max_favorable_pts": pos.max_favorable_pts,
+        "be_active": pos.be_active,
         "opened_at": pos.opened_at,
         "entry_reason": pos.entry_reason,
         "instrument_key": pos.instrument_key,
@@ -688,6 +698,7 @@ def _position_from_dict(raw: dict[str, Any], lot_size: int) -> CHOCHPosition:
         trail_sl=float(raw.get("trail_sl") or raw["sl_price"]),
         risk_pts=float(raw["risk_pts"]),
         max_favorable_pts=float(raw.get("max_favorable_pts") or 0.0),
+        be_active=bool(raw.get("be_active")),
         opened_at=str(raw.get("opened_at") or ""),
         entry_reason=str(raw.get("entry_reason") or ""),
         instrument_key=str(raw.get("instrument_key") or ""),
@@ -1245,6 +1256,7 @@ class CHOCHEngine:
             target_price=tp,
             sl_price=sl,
             component_sentiment=state.structure.structure,
+            context_label="Structure",
             timestamp=now.strftime("%Y-%m-%d %H:%M:%S IST"),
             candles=closed,
         )
@@ -1351,12 +1363,14 @@ class CHOCHEngine:
 
         if pos.direction == "LONG":
             if check_low <= pos.sl_price:
-                self._exit(state, pos.sl_price, "SL_HIT", now)
+                reason = "BE_HIT" if (pos.be_active or is_breakeven_stop(pos)) else "SL_HIT"
+                self._exit(state, pos.sl_price, reason, now)
             elif check_high >= pos.tp_price:
                 self._exit(state, pos.tp_price, "TP_HIT_2R", now)
         else:
             if check_high >= pos.sl_price:
-                self._exit(state, pos.sl_price, "SL_HIT", now)
+                reason = "BE_HIT" if (pos.be_active or is_breakeven_stop(pos)) else "SL_HIT"
+                self._exit(state, pos.sl_price, reason, now)
             elif check_low <= pos.tp_price:
                 self._exit(state, pos.tp_price, "TP_HIT_2R", now)
 

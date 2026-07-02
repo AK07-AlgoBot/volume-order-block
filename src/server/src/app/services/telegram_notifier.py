@@ -8,6 +8,10 @@ and logged — a notification failure can never lag or crash the engine.
 Configuration (environment):
     TELEGRAM_BOT_TOKEN  Bot token from @BotFather.
     TELEGRAM_CHAT_ID    Target chat/channel id.
+    AK07_TELEGRAM_ENABLED      Master switch (default 1).
+    AK07_TELEGRAM_ADMIN_ONLY   When 1 (default), alerts go only via the AK07
+                               admin profile — regular dashboard users do not
+                               receive Telegram until fan-out is implemented.
 
 Both are read from the environment (a repo/server `.env` is loaded by
 `app.config.paths` at import time elsewhere in the app).
@@ -25,6 +29,8 @@ from dataclasses import dataclass, field
 from typing import Final
 
 import httpx
+
+from app.constants import ADMIN_ROLE, DASHBOARD_USERNAME
 
 logger = logging.getLogger("ak07.telegram_notifier")
 
@@ -66,6 +72,23 @@ def _credentials() -> tuple[str, str] | None:
     if not token or not chat_id:
         return None
     return token, chat_id
+
+
+def _env_flag(name: str, *, default: bool = True) -> bool:
+    raw = (os.environ.get(name) or ("1" if default else "0")).strip().lower()
+    return raw not in ("0", "false", "no", "off")
+
+
+def _dispatch_enabled() -> bool:
+    """Admin-only Telegram policy until per-user delivery is built."""
+    if not _env_flag("AK07_TELEGRAM_ENABLED", default=True):
+        return False
+    if not _env_flag("AK07_TELEGRAM_ADMIN_ONLY", default=True):
+        return True
+    from app.services.user_profiles_store import read_profile, telegram_notifications_enabled
+
+    profile = read_profile(DASHBOARD_USERNAME, role=ADMIN_ROLE)
+    return telegram_notifications_enabled(profile, role=ADMIN_ROLE)
 
 
 # ---------------------------------------------------------------------------
@@ -171,6 +194,9 @@ def _ensure_worker() -> None:
 
 
 def _enqueue(msg: _TextMsg | _PhotoMsg) -> bool:
+    if not _dispatch_enabled():
+        logger.debug("Telegram alert skipped (admin-only policy or disabled)")
+        return False
     try:
         _ensure_worker()
         _queue.put_nowait(msg)
@@ -383,6 +409,7 @@ def notify_trade_execution(
     timestamp: str,
     tp2_price: float | None = None,
     candles: list[dict] | None = None,
+    context_label: str = "Sentiment",
 ) -> bool:
     """Dispatch a trade execution alert with an optional SL/TP chart image."""
     if tp2_price is not None:
@@ -401,7 +428,7 @@ def notify_trade_execution(
         f"\u2022 *Entry:* {entry_price:.2f}\n"
         f"{target_block}"
         f"\u2022 *Stop-Loss:* {sl_price:.2f}\n"
-        f"\u2022 *Sentiment:* {_escape_markdown(component_sentiment)}\n"
+        f"\u2022 *{_escape_markdown(context_label)}:* {_escape_markdown(component_sentiment)}\n"
         f"\u2022 *Time:* {_escape_markdown(timestamp)}"
     )
 

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import streamlit as st
 
 DARK_THEME_CSS = """
@@ -197,6 +199,58 @@ DARK_THEME_CSS = """
 
 def inject_dark_theme() -> None:
     st.markdown(DARK_THEME_CSS, unsafe_allow_html=True)
+
+
+def inject_login_page_style(*, background_path: Path | None = None) -> None:
+    """Full-viewport background + centered login card (sign-in page only)."""
+    bg_css = ""
+    if background_path and background_path.is_file():
+        import base64
+
+        mime = "image/png" if background_path.suffix.lower() == ".png" else "image/jpeg"
+        encoded = base64.b64encode(background_path.read_bytes()).decode("ascii")
+        bg_css = f"""
+  .stApp {{
+    background-color: transparent !important;
+    background-image:
+      linear-gradient(rgba(12, 15, 20, 0.78), rgba(12, 15, 20, 0.88)),
+      url("data:{mime};base64,{encoded}") !important;
+    background-size: cover !important;
+    background-position: center center !important;
+    background-repeat: no-repeat !important;
+    background-attachment: fixed !important;
+  }}
+  [data-testid="stAppViewContainer"] {{
+    background: transparent !important;
+  }}
+"""
+
+    st.markdown(
+        f"""
+<style>
+{bg_css}
+  [data-testid="stSidebar"] {{ display: none; }}
+  section.main > div.block-container {{
+    max-width: 28rem !important;
+    margin: 0 auto !important;
+    padding: 2rem 1.75rem 1.5rem !important;
+    padding-top: 4rem !important;
+    background: rgba(22, 27, 36, 0.92);
+    border: 1px solid #232b38;
+    border-radius: 16px;
+    box-shadow: 0 24px 64px rgba(0, 0, 0, 0.45);
+    backdrop-filter: blur(8px);
+  }}
+</style>
+""",
+        unsafe_allow_html=True,
+    )
+
+
+def login_background_path() -> Path:
+    from app.config.paths import repo_root
+
+    return repo_root() / "assets" / "branding" / "ak07_login_background.png"
 
 
 def status_pill(label: str, online: bool | None, detail: str = "") -> str:

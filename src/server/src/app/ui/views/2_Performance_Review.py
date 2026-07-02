@@ -16,6 +16,8 @@ IST = ZoneInfo("Asia/Kolkata")
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
 from app.services import performance_store
+from app.ui.auth_session import require_login
+from app.ui.strategy_access import enabled_strategy_labels_text, user_can_view_trade
 from app.ui.styles import inject_dark_theme
 
 MOCK_MODE = os.environ.get("AK07_MOCK") == "1"
@@ -25,14 +27,8 @@ if MOCK_MODE:
 
     mock_data.seed()
 
-st.set_page_config(
-    page_title="AK07 Performance Review",
-    page_icon="\U0001f4ca",
-    layout="wide",
-    initial_sidebar_state="collapsed",
-)
-
 inject_dark_theme()
+require_login()
 
 st.markdown("# AK07 Performance Review")
 
@@ -57,7 +53,7 @@ with f3:
     if MOCK_MODE:
         st.caption("MOCK DATA — sample trades · sidebar « only for page nav")
     else:
-        st.caption("Closed trades · S1 OI · S2 SMC · S3 BLR · S7 ORB+ · sidebar « for nav")
+        st.caption(f"Closed trades · {enabled_strategy_labels_text()} · sidebar « for nav")
 
 today = datetime.now(IST).date()
 if range_choice == "Today":
@@ -72,6 +68,7 @@ else:
     start_date = today - timedelta(days=365)
 
 trades = performance_store.load_trades(start_date=start_date, end_date=today)
+trades = [t for t in trades if user_can_view_trade(t)]
 load_status = performance_store.load_status(start_date, today)
 
 if paper_filter == "Paper only":

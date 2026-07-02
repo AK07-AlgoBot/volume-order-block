@@ -241,7 +241,7 @@ def _seed_breakout(now: datetime, kill_engaged: bool) -> None:
             "low": spot - 180,
             "close": spot - 40,
         }
-        levels = compute_blr_levels(prev["open"], prev["high"], prev["low"], prev["close"], spot)
+        levels = compute_blr_levels(prev["open"], prev["high"], prev["low"], prev["close"], spot, code)
         day_review = "LONG" if spot > levels.mid else "SHORT"
 
         position = None
@@ -301,64 +301,70 @@ def _seed_breakout(now: datetime, kill_engaged: bool) -> None:
 
 
 def _seed_smc_crt(now: datetime, kill_engaged: bool) -> None:
-    """Strategy Type 2 mock frame — Nifty only."""
-    cfg = SMC_CRT_INSTRUMENTS["NIFTY"]
-    key = cache_manager.SMC_CRT_STATE_KEY_TEMPLATE.format(symbol="NIFTY")
-    previous = cache_manager.get_json(key) or {}
-    spot = _walk(float(previous.get("spot") or cfg.baseline_spot), max_pct=0.0012)
-    width = spot * 0.004
-    crh = float(previous.get("crh") or spot + width / 2)
-    crm = float(previous.get("crm") or spot)
-    crl = float(previous.get("crl") or spot - width / 2)
+    """Strategy Type 2 mock frames for each enabled SMC+CRT instrument."""
+    if not SMC_CRT_INSTRUMENTS:
+        return
 
-    position = None
-    if not kill_engaged:
-        prev_pos = previous.get("position") or {}
-        entry = float(prev_pos.get("entry_price") or crl + (crm - crl) * 0.3)
-        position = {
-            "direction": "LONG",
-            "entry_price": round(entry, 2),
-            "sl_price": round(entry - width * 0.35, 2),
-            "tp1_price": round(crm, 2),
-            "tp2_price": round(crh, 2),
-            "option_strike": int(round((entry - 50) / 50) * 50),
-            "option_type": "CE",
-            "quantity": INDEX_CONFIGS["NIFTY"].lot_size,
-            "opened_at": prev_pos.get("opened_at") or now.isoformat(),
-        }
+    instrument_codes: list[str] = []
+    for code, cfg in SMC_CRT_INSTRUMENTS.items():
+        instrument_codes.append(code)
+        key = cache_manager.SMC_CRT_STATE_KEY_TEMPLATE.format(symbol=code)
+        previous = cache_manager.get_json(key) or {}
+        spot = _walk(float(previous.get("spot") or cfg.baseline_spot), max_pct=0.0012)
+        width = spot * 0.004
+        crh = float(previous.get("crh") or spot + width / 2)
+        crm = float(previous.get("crm") or spot)
+        crl = float(previous.get("crl") or spot - width / 2)
 
-    cache_manager.set_json(
-        key,
-        {
-            "symbol": "NIFTY",
-            "display": cfg.display,
-            "strategy": "SMC+CRT",
-            "spot": round(spot, 2),
-            "crh": round(crh, 2),
-            "crm": round(crm, 2),
-            "crl": round(crl, 2),
-            "crt_ready": True,
-            "setup_label": "CRT locked — watching 5m FVG (mock)",
-            "swept_low": True,
-            "swept_high": False,
-            "paper_trading": False,
-            "entries_blocked": kill_engaged,
-            "trades_today": 1 if position else 0,
-            "max_trades": 2,
-            "lots_per_trade": 1,
-            "session_end_ist": "15:30",
-            "fvg": {
+        position = None
+        if code == "BANKNIFTY" and not kill_engaged:
+            prev_pos = previous.get("position") or {}
+            entry = float(prev_pos.get("entry_price") or crl + (crm - crl) * 0.3)
+            bn_step = int(_BASELINES.get("BANKNIFTY", {}).get("step") or 100)
+            position = {
                 "direction": "LONG",
-                "low": round(crl + width * 0.1, 2),
-                "high": round(crl + width * 0.25, 2),
-                "candle_ts": now.isoformat(),
+                "entry_price": round(entry, 2),
+                "sl_price": round(entry - width * 0.35, 2),
+                "tp1_price": round(crm, 2),
+                "tp2_price": round(crh, 2),
+                "option_strike": int(round((entry - 50) / bn_step) * bn_step),
+                "option_type": "CE",
+                "quantity": INDEX_CONFIGS["BANKNIFTY"].lot_size,
+                "opened_at": prev_pos.get("opened_at") or now.isoformat(),
+            }
+
+        cache_manager.set_json(
+            key,
+            {
+                "symbol": code,
+                "display": cfg.display,
+                "strategy": "SMC+CRT",
+                "spot": round(spot, 2),
+                "crh": round(crh, 2),
+                "crm": round(crm, 2),
+                "crl": round(crl, 2),
+                "crt_ready": True,
+                "setup_label": "CRT locked — watching 5m FVG (mock)",
+                "swept_low": True,
+                "swept_high": False,
+                "paper_trading": False,
+                "entries_blocked": kill_engaged,
+                "trades_today": 1 if position else 0,
+                "max_trades": 2,
+                "lots_per_trade": 1,
+                "session_end_ist": "15:30",
+                "fvg": {
+                    "direction": "LONG",
+                    "low": round(crl + width * 0.1, 2),
+                    "high": round(crl + width * 0.25, 2),
+                    "candle_ts": now.isoformat(),
+                },
+                "position": position,
+                "signals": previous.get("signals") or ["Mock CRT range seeded"],
+                "updated_at": now.isoformat(),
             },
-            "position": position,
-            "signals": previous.get("signals") or ["Mock CRT range seeded"],
-            "updated_at": now.isoformat(),
-        },
-        ttl_seconds=120,
-    )
+            ttl_seconds=120,
+        )
 
     cache_manager.set_json(
         cache_manager.SMC_CRT_HEARTBEAT_KEY,
@@ -367,7 +373,7 @@ def _seed_smc_crt(now: datetime, kill_engaged: bool) -> None:
             "paper_trading": False,
             "mock": True,
             "session_end_ist": "15:30",
-            "instruments": ["NIFTY"],
+            "instruments": instrument_codes,
         },
         ttl_seconds=60,
     )
