@@ -240,7 +240,7 @@ services:
     restart: unless-stopped
     mem_limit: 1g
     memswap_limit: 1g
-    command: ["python", "-m", "streamlit", "run", "src/server/src/app/ui/dashboard.py", "--server.address", "0.0.0.0", "--server.port", "8501", "--server.headless", "true", "--browser.gatherUsageStats", "false"]
+    command: ["python", "-m", "streamlit", "run", "src/server/src/app/ui/dashboard.py", "--server.address", "0.0.0.0", "--server.port", "8501", "--server.headless", "true", "--browser.gatherUsageStats", "false", "--client.showSidebarNavigation", "false"]
     env_file:
       - ../.env
     environment:

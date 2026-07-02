@@ -298,7 +298,23 @@ def try_kite_resume_from_query() -> bool:
     return True
 
 
+def render_auth_sidebar() -> None:
+    """Signed-in user + sign out — call once from nav_config when building logged-in nav."""
+    if not is_logged_in():
+        return
+    user = current_username()
+    role = current_role()
+    with st.sidebar:
+        st.caption(f"Signed in as **{user}** ({role})")
+        if st.button("Sign out", key="ak07_sign_out", use_container_width=True):
+            logout()
+            st.rerun()
+
+
 def render_login_page() -> None:
+    if is_logged_in():
+        st.rerun()
+
     from app.ui.styles import inject_login_page_style, login_background_path
 
     inject_login_page_style(background_path=login_background_path())
@@ -317,23 +333,10 @@ def render_login_page() -> None:
 
 
 def require_login() -> None:
-    if not is_logged_in():
-        if st.session_state.get(LOGOUT_FLAG):
-            render_login_page()
-            st.stop()
-
-        if _try_restore_auth():
-            if st.query_params.get("resume"):
-                st.rerun()
-        else:
-            _try_localstorage_bootstrap_once()
-            render_login_page()
-            st.stop()
-
-    user = current_username()
-    role = current_role()
-    with st.sidebar:
-        st.caption(f"Signed in as **{user}** ({role})")
-        if st.button("Sign out", key="ak07_sign_out", use_container_width=True):
-            logout()
-            st.rerun()
+    """Auth gate for view pages. Login UI is owned by nav_config.render_login_page only."""
+    if is_logged_in():
+        return
+    if _try_restore_auth():
+        st.rerun()
+    _try_localstorage_bootstrap_once()
+    st.rerun()

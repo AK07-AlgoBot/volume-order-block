@@ -17,9 +17,7 @@ def _bootstrap_auth() -> None:
     if auth.is_logged_in() or st.session_state.get(auth.LOGOUT_FLAG):
         return
     if auth._try_restore_auth():
-        if st.query_params.get("resume"):
-            st.rerun()
-        return
+        st.rerun()
     auth._try_localstorage_bootstrap_once()
 
 
@@ -27,12 +25,14 @@ def build_navigation(*, dashboard_runner) -> st.navigation:
     """Return st.navigation for the current user role."""
     _bootstrap_auth()
 
-    from app.ui.auth_session import is_admin, is_logged_in, render_login_page
+    from app.ui.auth_session import is_admin, is_logged_in, render_auth_sidebar, render_login_page
 
     if not is_logged_in():
         return st.navigation(
             [st.Page(render_login_page, title="Sign in", default=True, icon="🔐")],
         )
+
+    render_auth_sidebar()
 
     core = [
         st.Page(dashboard_runner, title="Dashboard", default=True, icon="📊"),
