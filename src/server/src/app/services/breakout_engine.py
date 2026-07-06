@@ -35,7 +35,6 @@ from app.services.backtest_data import parse_candle_ts
 from app.services.engine_intraday import blr_day_review_allows_direction
 from app.services.upstox_engine import (
     INDEX_CONFIGS,
-    ITM_OFFSET_POINTS,
     IndexConfig,
     MOCK_MODE,
     PAPER_TRADING,
@@ -147,14 +146,23 @@ class BreakoutPosition:
     tp2_price: float
     lot_size: int
     instrument_key: str
-    option_strike: int
-    option_type: str
+    contract_label: str
     opened_at: str
     entry_reason: str
+    option_strike: int = 0
+    option_type: str = ""
 
     @property
     def quantity(self) -> int:
         return self.lot_size * LOTS_PER_TRADE
+
+    @property
+    def display_contract(self) -> str:
+        if self.contract_label:
+            return self.contract_label
+        if self.option_strike and self.option_type:
+            return f"{self.option_strike}{self.option_type}"
+        return ""
 
 
 @dataclass
@@ -190,6 +198,7 @@ def _position_to_dict(pos: BreakoutPosition) -> dict[str, Any]:
         "tp2_price": pos.tp2_price,
         "lot_size": pos.lot_size,
         "instrument_key": pos.instrument_key,
+        "contract_label": pos.contract_label,
         "option_strike": pos.option_strike,
         "option_type": pos.option_type,
         "opened_at": pos.opened_at,
@@ -199,6 +208,11 @@ def _position_to_dict(pos: BreakoutPosition) -> dict[str, Any]:
 
 def _position_from_dict(raw: dict[str, Any]) -> BreakoutPosition | None:
     try:
+        contract_label = str(raw.get("contract_label") or "")
+        option_strike = int(raw.get("option_strike") or 0)
+        option_type = str(raw.get("option_type") or "")
+        if not contract_label and option_strike and option_type:
+            contract_label = f"{option_strike}{option_type}"
         return BreakoutPosition(
             direction=str(raw["direction"]),
             entry_price=float(raw["entry_price"]),
@@ -207,10 +221,11 @@ def _position_from_dict(raw: dict[str, Any]) -> BreakoutPosition | None:
             tp2_price=float(raw["tp2_price"]),
             lot_size=int(raw["lot_size"]),
             instrument_key=str(raw.get("instrument_key") or ""),
-            option_strike=int(raw["option_strike"]),
-            option_type=str(raw["option_type"]),
+            contract_label=contract_label,
             opened_at=str(raw.get("opened_at") or ""),
             entry_reason=str(raw.get("entry_reason") or ""),
+            option_strike=option_strike,
+            option_type=option_type,
         )
     except (KeyError, TypeError, ValueError):
         return None
@@ -550,31 +565,34 @@ class BreakoutMarketClient:
             }
         ]
 
-    def resolve_option(self, cfg: IndexConfig, spot: float, direction: str) -> dict[str, Any] | None:
+    def resolve_future(self, cfg: IndexConfig) -> dict[str, Any] | None:
         if self._upstox and not MOCK_MODE:
-            contract = self._upstox.get_itm_option_contract(cfg.spot_instrument_key, spot, direction)
+            contract = self._upstox.get_index_future_contract(cfg.code)
             if contract:
                 return contract
-        desired = spot - ITM_OFFSET_POINTS if direction == "LONG" else spot + ITM_OFFSET_POINTS
-        strike = int(round(desired / cfg.strike_step) * cfg.strike_step)
         return {
             "instrument_key": "",
-            "strike": strike,
-            "option_type": "CE" if direction == "LONG" else "PE",
+            "trading_symbol": cfg.code,
+            "expiry": "",
+            "contract_label": f"{cfg.code} FUT",
         }
 
-    def place_entry(self, instrument_key: str, quantity: int) -> bool:
+    def place_entry(self, instrument_key: str, quantity: int, direction: str) -> bool:
         if PAPER_TRADING or not instrument_key:
             return True
+        side = "BUY" if direction == "LONG" else "SELL"
         if self._upstox:
-            return self._upstox.place_market_order(instrument_key, quantity, "BUY")
+            return self._upstox.place_market_order(instrument_key, quantity, side)
         return False
 
-    def place_exit(self, instrument_key: str, quantity: int) -> bool:
+    def place_exit(self, instrument_key: str, quantity: int, direction: str) -> bool:
         if PAPER_TRADING or not instrument_key:
             return True
+        side = "SELL" if direction == "LONG" else "BUY"
         if self._upstox:
-            return self._upstox.place_market_order(instrument_key, quantity, "SELL")
+            return self._upstox.place_market_order(
+                instrument_key, quantity, side, bypass_profit_guard=True
+            )
         return False
 
 
@@ -912,14 +930,13 @@ class BreakoutEngine:
                 state.position = pos
                 state.setup_label = (
                     f"{pos.direction} open — restored "
-                    f"{pos.option_strike}{pos.option_type} @ spot {pos.entry_price:.2f}"
+                    f"{pos.display_contract} @ spot {pos.entry_price:.2f}"
                 )
                 logger.info(
-                    "[%s] restored breakout position %s %d%s @ %.2f (SL %.2f TP1 %.2f)",
+                    "[%s] restored breakout position %s %s @ %.2f (SL %.2f TP1 %.2f)",
                     state.config.code,
                     pos.direction,
-                    pos.option_strike,
-                    pos.option_type,
+                    pos.display_contract,
                     pos.entry_price,
                     pos.sl_price,
                     pos.tp1_price,
@@ -1043,16 +1060,17 @@ class BreakoutEngine:
             state.red,
             state.gap_regime,
         )
-        contract = self.client.resolve_option(state.config, close, direction)
+        contract = self.client.resolve_future(state.config)
         if contract is None:
-            logger.error("[%s] breakout entry aborted — no option contract", state.config.code)
+            logger.error("[%s] breakout entry aborted — no futures contract", state.config.code)
             return
 
         quantity = state.config.lot_size * LOTS_PER_TRADE
-        if not self.client.place_entry(contract.get("instrument_key", ""), quantity):
+        if not self.client.place_entry(contract.get("instrument_key", ""), quantity, direction):
             logger.error("[%s] breakout entry order failed", state.config.code)
             return
 
+        contract_label = str(contract.get("contract_label") or f"{state.config.code} FUT")
         state.position = BreakoutPosition(
             direction=direction,
             entry_price=close,
@@ -1061,16 +1079,14 @@ class BreakoutEngine:
             tp2_price=tp2,
             lot_size=state.config.lot_size,
             instrument_key=str(contract.get("instrument_key") or ""),
-            option_strike=int(contract["strike"]),
-            option_type=str(contract["option_type"]),
+            contract_label=contract_label,
             opened_at=now.isoformat(),
             entry_reason=reason,
         )
         state.trades_today += 1
-        option_label = f"{contract['strike']}{contract['option_type']}"
         msg = (
             f"{state.config.display} BREAKOUT {direction} @ {close:.2f} "
-            f"via {option_label} x{LOTS_PER_TRADE} lot — {reason} "
+            f"via {contract_label} x{LOTS_PER_TRADE} lot — {reason} "
             f"SL {sl:.2f} TP1 {tp1:.2f} TP2 {tp2:.2f} (book @ TP1)"
         )
         state.setup_label = f"{direction} entry — {reason}"
@@ -1078,7 +1094,7 @@ class BreakoutEngine:
         logger.info(msg)
         self._save_session_state(state)
         telegram_notifier.notify_trade_execution(
-            index_name=f"{state.config.display} Breakout ({option_label} x{LOTS_PER_TRADE})",
+            index_name=f"{state.config.display} Breakout ({contract_label} x{LOTS_PER_TRADE})",
             trade_type=direction,
             entry_price=close,
             target_price=tp1,
@@ -1155,7 +1171,7 @@ class BreakoutEngine:
             return
 
         if pos.instrument_key:
-            if not self.client.place_exit(pos.instrument_key, pos.quantity):
+            if not self.client.place_exit(pos.instrument_key, pos.quantity, pos.direction):
                 logger.error("[%s] breakout exit order failed (%s)", state.config.code, exit_reason)
                 return
 
@@ -1186,7 +1202,7 @@ class BreakoutEngine:
         state.position = None
         self._save_session_state(state)
         telegram_notifier.notify_trade_exit(
-            index_name=f"{state.config.display} Breakout ({pos.option_strike}{pos.option_type})",
+            index_name=f"{state.config.display} Breakout ({pos.display_contract})",
             trade_type=pos.direction,
             exit_price=exit_price,
             pnl_points=pnl,
@@ -1200,7 +1216,7 @@ class BreakoutEngine:
                 spot = state.spot if state.spot is not None else state.position.entry_price
                 pos = state.position
                 if pos.instrument_key:
-                    self.client.place_exit(pos.instrument_key, pos.quantity)
+                    self.client.place_exit(pos.instrument_key, pos.quantity, pos.direction)
                 pnl = (spot - pos.entry_price) if pos.direction == "LONG" else (pos.entry_price - spot)
                 performance_store.record_completed_trade(
                     strategy=performance_store.STRATEGY_BREAKOUT,
@@ -1289,6 +1305,7 @@ class BreakoutEngine:
                 "sl_price": pos.sl_price,
                 "tp1_price": pos.tp1_price,
                 "tp2_price": pos.tp2_price,
+                "contract_label": pos.contract_label,
                 "option_strike": pos.option_strike,
                 "option_type": pos.option_type,
                 "entry_reason": pos.entry_reason,

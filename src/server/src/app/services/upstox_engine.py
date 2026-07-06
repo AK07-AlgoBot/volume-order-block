@@ -256,6 +256,16 @@ def _parse_v3_candle_row(row: Any) -> dict[str, float] | None:
     return None
 
 
+def _format_future_contract_label(trading_symbol: str, expiry: str) -> str:
+    if expiry:
+        try:
+            exp_date = date.fromisoformat(expiry[:10])
+            return f"{trading_symbol} FUT {exp_date.strftime('%d %b')}"
+        except ValueError:
+            pass
+    return f"{trading_symbol} FUT"
+
+
 def _instrument_keys_match(expected: str, actual: str) -> bool:
     """Match Upstox instrument ids across chain (NSE_FO|token) vs positions (token-only)."""
     if not expected or not actual:
@@ -480,6 +490,55 @@ class UpstoxClient:
                     "option_type": "CE" if direction == "LONG" else "PE",
                 }
         return best
+
+    def get_index_future_contract(self, index_code: str) -> dict[str, Any] | None:
+        """Nearest-expiry index futures contract (NSE FUTIDX / BSE)."""
+        cfg = INDEX_CONFIGS.get(index_code.upper())
+        if not cfg:
+            return None
+        code = cfg.code
+        exchange = "BSE" if code == "SENSEX" else "NSE"
+        data = self._get(
+            f"{self.base_url}/instruments/search",
+            {
+                "query": code,
+                "exchanges": exchange,
+                "segments": "FUT",
+                "records": 30,
+            },
+        )
+        if not isinstance(data, list):
+            return None
+        today = date.today().isoformat()
+        candidates: list[tuple[str, dict[str, Any]]] = []
+        for row in data:
+            if not isinstance(row, dict):
+                continue
+            if str(row.get("trading_symbol") or "").upper() != code:
+                continue
+            inst_type = str(row.get("instrument_type") or "").upper()
+            if inst_type not in ("FUTIDX", "FUT"):
+                continue
+            instrument_key = str(row.get("instrument_key") or "")
+            if not instrument_key:
+                continue
+            expiry = str(row.get("expiry") or "")
+            if expiry and expiry[:10] < today:
+                continue
+            candidates.append((expiry or "9999-99-99", row))
+        if not candidates:
+            logger.warning("No %s future contract found via instrument search", code)
+            return None
+        candidates.sort(key=lambda item: item[0])
+        row = candidates[0][1]
+        trading_symbol = str(row.get("trading_symbol") or code)
+        expiry = str(row.get("expiry") or "")[:10]
+        return {
+            "instrument_key": str(row.get("instrument_key") or ""),
+            "trading_symbol": trading_symbol,
+            "expiry": expiry,
+            "contract_label": _format_future_contract_label(trading_symbol, expiry),
+        }
 
     def get_option_chain_with_expiry(self, instrument_key: str) -> tuple[str | None, list[dict[str, Any]]]:
         """Nearest weekly expiry label and full chain rows."""
@@ -813,6 +872,17 @@ class MockUpstoxClient(UpstoxClient):
             "instrument_key": "",
             "strike": strike,
             "option_type": "CE" if direction == "LONG" else "PE",
+        }
+
+    def get_index_future_contract(self, index_code: str) -> dict[str, Any] | None:
+        code = index_code.upper()
+        if code not in INDEX_CONFIGS:
+            return None
+        return {
+            "instrument_key": "",
+            "trading_symbol": code,
+            "expiry": "",
+            "contract_label": _format_future_contract_label(code, ""),
         }
 
     def place_market_order(

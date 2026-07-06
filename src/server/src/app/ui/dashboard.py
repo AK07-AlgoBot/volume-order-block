@@ -392,7 +392,7 @@ def render_breakout_strategy_panel(index_code: str) -> None:
     """Strategy Type 3 — BLR Breakout block (Nifty only)."""
     st.markdown("---")
     st.markdown("#### Strategy Type 3 — BLR Breakout")
-    st.caption("Nifty 50 only — not shown on BankNifty or Sensex tabs.")
+    st.caption("Nifty 50 futures only — not shown on BankNifty or Sensex tabs.")
 
     bo = cache_manager.get_json(cache_manager.BREAKOUT_STATE_KEY_TEMPLATE.format(index=index_code))
     bo_hb = cache_manager.get_json(cache_manager.BREAKOUT_HEARTBEAT_KEY)
@@ -458,8 +458,12 @@ def render_breakout_strategy_panel(index_code: str) -> None:
     bo_pos = bo.get("position")
     if bo_pos:
         p1, p2, p3, p4, p5, p6 = st.columns(6)
-        option = f"{bo_pos.get('option_strike', '')}{bo_pos.get('option_type', '')}"
-        p1.metric("Direction", bo_pos.get("direction", "—"), delta=option or None, delta_color="off")
+        contract = str(bo_pos.get("contract_label") or "").strip()
+        if not contract:
+            strike = bo_pos.get("option_strike", "")
+            ot = bo_pos.get("option_type", "")
+            contract = f"{strike}{ot}" if strike and ot else ""
+        p1.metric("Direction", bo_pos.get("direction", "—"), delta=contract or None, delta_color="off")
         p2.metric("Entry (spot)", fmt(float(bo_pos.get("entry_price", 0))))
         tp_pts = bo.get("tp1_points")
         tp_label = f"TP1 ({int(tp_pts)}pt book)" if tp_pts else "TP1 (book)"
@@ -468,7 +472,7 @@ def render_breakout_strategy_panel(index_code: str) -> None:
         p5.metric("Stop-Loss", fmt(float(bo_pos.get("sl_price", 0))))
         p6.metric("Reason", str(bo_pos.get("entry_reason", "—"))[:18])
     else:
-        st.caption(f"Flat — no breakout position (1 lot · options · max {bo.get('max_trades', 3)}/day).")
+        st.caption(f"Flat — no breakout position (1 lot · Nifty futures · max {bo.get('max_trades', 3)}/day).")
 
     signals = bo.get("signals") or []
     if signals:

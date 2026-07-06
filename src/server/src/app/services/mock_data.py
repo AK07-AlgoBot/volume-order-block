@@ -255,8 +255,7 @@ def _seed_breakout(now: datetime, kill_engaged: bool) -> None:
                 "entry_price": round(entry, 2),
                 "sl_price": round(sl, 2),
                 "tp1_price": round(tp1, 2),
-                "option_strike": int(round((entry - 50) / _BASELINES[code]["step"]) * _BASELINES[code]["step"]),
-                "option_type": "CE",
+                "contract_label": f"{code} FUT",
                 "entry_reason": "green breakout (review side)",
                 "opened_at": previous.get("position", {}).get("opened_at") or now.isoformat(),
             }
