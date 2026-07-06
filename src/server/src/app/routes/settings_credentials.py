@@ -1,4 +1,4 @@
-"""Broker credential read/save/test (Upstox + Kite)."""
+"""Broker credential read/save/test (Upstox + Kite + Groww)."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ from app.services.audit_log import log_action
 
 router = APIRouter(prefix="/api/settings", tags=["settings"])
 
-SUPPORTED = frozenset({"upstox", "kite"})
+SUPPORTED = frozenset({"upstox", "kite", "groww"})
 
 
 def _ensure_repo_on_path() -> None:
@@ -34,6 +34,10 @@ def _read_broker_creds(broker: str, username: str) -> dict[str, str]:
         from kite_credentials_store import read_credentials_file_for_user
 
         return read_credentials_file_for_user(username)
+    if broker == "groww":
+        from groww_credentials_store import read_credentials_file_for_user
+
+        return read_credentials_file_for_user(username)
     from upstox_credentials_store import read_credentials_file_for_user
 
     return read_credentials_file_for_user(username)
@@ -42,6 +46,10 @@ def _read_broker_creds(broker: str, username: str) -> dict[str, str]:
 def _persist_broker_creds(broker: str, username: str, data: dict[str, str]) -> dict[str, str]:
     if broker == "kite":
         from kite_credentials_store import persist_credentials_for_user
+
+        return persist_credentials_for_user(username, data)
+    if broker == "groww":
+        from groww_credentials_store import persist_credentials_for_user
 
         return persist_credentials_for_user(username, data)
     from upstox_credentials_store import normalize_access_token, persist_credentials_for_user
@@ -54,6 +62,10 @@ def _persist_broker_creds(broker: str, username: str, data: dict[str, str]) -> d
 def _cred_path(broker: str, username: str):
     if broker == "kite":
         from kite_credentials_store import credentials_file_for_user
+
+        return credentials_file_for_user(username)
+    if broker == "groww":
+        from groww_credentials_store import credentials_file_for_user
 
         return credentials_file_for_user(username)
     from upstox_credentials_store import credentials_file_for_user
@@ -119,6 +131,41 @@ async def test_broker_credentials(
             raise HTTPException(status_code=400, detail=f"No Kite api_key saved for {safe}.")
         url = f"{base_url.rstrip('/')}/user/profile"
         headers = {"Authorization": f"token {api_key}:{access_token}", "Accept": "application/json"}
+    elif b == "groww":
+        if not base_url:
+            base_url = "https://api.groww.in"
+        from app.services.groww_token import fetch_user_profile
+
+        try:
+            profile = await asyncio.to_thread(
+                fetch_user_profile,
+                access_token=access_token,
+                base_url=base_url,
+            )
+        except RuntimeError as exc:
+            raise HTTPException(status_code=502, detail=f"groww test failed for {safe}: {exc}") from exc
+        profile_out = {
+            "ucc": profile.get("ucc"),
+            "vendor_user_id": profile.get("vendor_user_id"),
+            "active_segments": profile.get("active_segments"),
+            "nse_enabled": profile.get("nse_enabled"),
+            "bse_enabled": profile.get("bse_enabled"),
+        }
+        log_action(
+            actor.username,
+            "broker_credentials_tested",
+            {"credential_subject": safe, "broker": b, "ok": True},
+            target_user=safe,
+        )
+        return {
+            "ok": True,
+            "broker": b,
+            "credential_subject": safe,
+            "base_url": base_url,
+            "tested_endpoint": f"{base_url.rstrip('/')}/v1/user/detail",
+            "profile": profile_out,
+            "message": f"groww auth check succeeded for {safe}.",
+        }
     else:
         if not base_url:
             raise HTTPException(status_code=400, detail=f"No Upstox base URL saved for {safe}.")

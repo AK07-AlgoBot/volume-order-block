@@ -21,6 +21,7 @@ import streamlit as st
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from app.constants import (
+    S3_BREAKOUT_INDICES,
     STRATEGY_GAMMA,
     STRATEGY_S1_OI,
     STRATEGY_S2_SMC,
@@ -31,7 +32,7 @@ from app.constants import (
 from app.services import cache_manager
 from app.services.upstox_engine import INDEX_CONFIGS, INDEX_OI_RISK, DEFAULT_OI_RISK
 import app.ui.auth_session as auth_session
-from app.ui.strategy_access import enabled_strategy_labels_text, user_can_view_strategy
+from app.ui.strategy_access import enabled_strategy_labels_text, tabbed_dashboard_index_codes, user_can_view_strategy
 from app.ui.cockpit_layout import render_compact_sidebar, render_top_status_bar
 from app.ui.nav_config import build_navigation
 from app.ui.styles import inject_dark_theme
@@ -388,9 +389,10 @@ def render_gamma_expiry_panel(index_code: str) -> None:
 
 
 def render_breakout_strategy_panel(index_code: str) -> None:
-    """Strategy Type 3 — BLR Breakout block."""
+    """Strategy Type 3 — BLR Breakout block (Nifty only)."""
     st.markdown("---")
     st.markdown("#### Strategy Type 3 — BLR Breakout")
+    st.caption("Nifty 50 only — not shown on BankNifty or Sensex tabs.")
 
     bo = cache_manager.get_json(cache_manager.BREAKOUT_STATE_KEY_TEMPLATE.format(index=index_code))
     bo_hb = cache_manager.get_json(cache_manager.BREAKOUT_HEARTBEAT_KEY)
@@ -508,10 +510,22 @@ def run_dashboard() -> None:
     with domain_col:
         st.caption(PRODUCTION_DOMAIN)
 
-    ak07_tabs = [cfg.display for cfg in INDEX_CONFIGS.values()]
+    if user_can_view_strategy(STRATEGY_S3_BREAKOUT):
+        for s3_code in S3_BREAKOUT_INDICES:
+            render_breakout_strategy_panel(s3_code)
+
+    tabbed_codes = tabbed_dashboard_index_codes()
+    if not tabbed_codes:
+        if auto_refresh:
+            time.sleep(REFRESH_SECONDS)
+            st.rerun()
+        return
+
+    ak07_tabs = [INDEX_CONFIGS[code].display for code in tabbed_codes]
     tabs = st.tabs(ak07_tabs)
-    
-    for tab, (code, cfg) in zip(tabs, INDEX_CONFIGS.items()):
+
+    for tab, code in zip(tabs, tabbed_codes):
+        cfg = INDEX_CONFIGS[code]
         with tab:
             state = cache_manager.get_json(cache_manager.INDEX_STATE_KEY_TEMPLATE.format(index=code))
             if not state:
@@ -601,8 +615,6 @@ def run_dashboard() -> None:
     
             if user_can_view_strategy(STRATEGY_S2_SMC):
                 render_smc_crt_strategy_panel(code)
-            if user_can_view_strategy(STRATEGY_S3_BREAKOUT):
-                render_breakout_strategy_panel(code)
             if user_can_view_strategy(STRATEGY_S7_ORB):
                 render_s7_strategy_panel(code)
             if user_can_view_strategy(STRATEGY_S8_CHOCH):

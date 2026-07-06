@@ -12,6 +12,9 @@ STRATEGY_S7_ORB = "s7_orb"
 STRATEGY_S8_CHOCH = "s8_choch"
 STRATEGY_GAMMA = "gamma"
 
+# S3 live trading + dashboard panel — Nifty only (BN/Sensex excluded).
+S3_BREAKOUT_INDICES: tuple[str, ...] = ("NIFTY",)
+
 ALL_STRATEGIES: tuple[str, ...] = (
     STRATEGY_S1_OI,
     STRATEGY_S2_SMC,
@@ -24,7 +27,7 @@ ALL_STRATEGIES: tuple[str, ...] = (
 STRATEGY_LABELS: dict[str, str] = {
     STRATEGY_S1_OI: "Strategy 1 — AK07 OI",
     STRATEGY_S2_SMC: "Strategy 2 — SMC+CRT",
-    STRATEGY_S3_BREAKOUT: "Strategy 3 — BLR Breakout",
+    STRATEGY_S3_BREAKOUT: "Strategy 3 — BLR Breakout (Nifty)",
     STRATEGY_S7_ORB: "Strategy 7 — ORB+ ADX",
     STRATEGY_S8_CHOCH: "Strategy 8 — CHOCH",
     STRATEGY_GAMMA: "Gamma Expiry Observer",

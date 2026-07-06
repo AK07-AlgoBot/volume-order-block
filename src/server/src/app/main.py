@@ -13,6 +13,7 @@ from app.config.settings import get_settings
 from app.routes import (
     admin_users,
     auth,
+    groww_token,
     kite_oauth,
     settings_credentials,
     settings_upstox,
@@ -40,6 +41,7 @@ app.add_middleware(
 app.include_router(auth.router)
 app.include_router(admin_users.router)
 app.include_router(kite_oauth.router)
+app.include_router(groww_token.router)
 app.include_router(settings_upstox.router)
 app.include_router(settings_credentials.router)
 app.include_router(upstox_notifier.router)

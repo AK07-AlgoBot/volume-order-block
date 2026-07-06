@@ -102,7 +102,7 @@ NO_ENTRY_AFTER: Final[dtime] = _parse_ist_time("BREAKOUT_NO_ENTRY_AFTER_IST", 13
 
 
 def _parse_entries_indices() -> frozenset[str]:
-    raw = os.environ.get("BREAKOUT_ENTRIES_INDICES", "NIFTY,BANKNIFTY,SENSEX").strip()
+    raw = os.environ.get("BREAKOUT_ENTRIES_INDICES", "NIFTY").strip()
     if not raw or raw.lower() in ("all", "*"):
         return frozenset(INDEX_CONFIGS.keys())
     return frozenset(part.strip().upper() for part in raw.split(",") if part.strip())

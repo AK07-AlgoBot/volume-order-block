@@ -71,3 +71,25 @@ def user_can_view_trade(trade: dict[str, Any]) -> bool:
     if entitlement is None:
         return is_admin()
     return user_can_view_strategy(entitlement)
+
+
+def tabbed_dashboard_index_codes() -> list[str]:
+    """Indices for Nifty / BankNifty / Sensex tabs (S3 is Nifty-only and sits above tabs)."""
+    from app.services.upstox_engine import INDEX_CONFIGS
+
+    codes: set[str] = set()
+    if user_can_view_strategy(STRATEGY_S1_OI):
+        codes.update(INDEX_CONFIGS.keys())
+    if user_can_view_strategy(STRATEGY_S2_SMC):
+        from app.services.smc_crt_engine import SMC_CRT_INSTRUMENTS
+
+        codes.update(SMC_CRT_INSTRUMENTS.keys())
+    if user_can_view_strategy(STRATEGY_S7_ORB):
+        codes.update(INDEX_CONFIGS.keys())
+    if user_can_view_strategy(STRATEGY_S8_CHOCH):
+        from app.services.choch_engine import CHOCH_INSTRUMENTS
+
+        codes.update(CHOCH_INSTRUMENTS)
+    if user_can_view_strategy(STRATEGY_GAMMA):
+        codes.update(INDEX_CONFIGS.keys())
+    return [code for code in INDEX_CONFIGS if code in codes]

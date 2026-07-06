@@ -228,10 +228,12 @@ def _seed_performance_trades(now: datetime) -> None:
 
 
 def _seed_breakout(now: datetime, kill_engaged: bool) -> None:
-    """Strategy Type 3 mock frames for Nifty / BankNifty / Sensex."""
+    """Strategy Type 3 mock frames — Nifty only."""
+    from app.constants import S3_BREAKOUT_INDICES
     from app.services.breakout_engine import compute_blr_levels  # noqa: PLC0415
 
-    for code, cfg in INDEX_CONFIGS.items():
+    for code in S3_BREAKOUT_INDICES:
+        cfg = INDEX_CONFIGS[code]
         key = cache_manager.BREAKOUT_STATE_KEY_TEMPLATE.format(index=code)
         previous = cache_manager.get_json(key) or {}
         spot = _walk(float(previous.get("spot") or _BASELINES[code]["spot"]))
@@ -245,7 +247,7 @@ def _seed_breakout(now: datetime, kill_engaged: bool) -> None:
         day_review = "LONG" if spot > levels.mid else "SHORT"
 
         position = None
-        if code == "BANKNIFTY" and not kill_engaged:
+        if not kill_engaged:
             entry = levels.green - 15
             sl, tp1 = entry - 45, entry + 45
             position = {
@@ -294,7 +296,7 @@ def _seed_breakout(now: datetime, kill_engaged: bool) -> None:
             "paper_trading": True,
             "mock": True,
             "session_end_ist": "15:30",
-            "indices": list(INDEX_CONFIGS.keys()),
+            "indices": list(S3_BREAKOUT_INDICES),
         },
         ttl_seconds=60,
     )

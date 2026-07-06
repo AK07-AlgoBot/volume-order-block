@@ -30,12 +30,14 @@ def kite_redirect_url() -> str:
     explicit = (os.environ.get("KITE_REDIRECT_URL") or "").strip()
     if explicit:
         return explicit
-    api_port = (os.environ.get("AK07_API_PORT") or "8080").strip()
-    domain = get_settings().production_domain
-    # Local/dev default when domain is production but we're on localhost API.
-    if os.environ.get("AK07_LOCAL_DEV") == "1" or api_port == "8080":
+    if os.environ.get("AK07_LOCAL_DEV") == "1":
+        api_port = (os.environ.get("AK07_API_PORT") or "8080").strip()
         return f"http://127.0.0.1:{api_port}/api/brokers/kite/callback"
-    return f"https://{domain}/api/brokers/kite/callback"
+    domain = get_settings().production_domain.strip()
+    if domain:
+        return f"https://{domain}/api/brokers/kite/callback"
+    api_port = (os.environ.get("AK07_API_PORT") or "8080").strip()
+    return f"http://127.0.0.1:{api_port}/api/brokers/kite/callback"
 
 
 def default_cockpit_url() -> str:

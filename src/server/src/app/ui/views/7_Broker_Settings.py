@@ -25,7 +25,7 @@ if not is_admin():
 user = current_username()
 profile = current_profile()
 default_broker = str(profile.get("broker") or "upstox").strip().lower()
-broker_options = ["upstox", "kite"]
+broker_options = ["upstox", "kite", "groww"]
 default_idx = broker_options.index(default_broker) if default_broker in broker_options else 0
 
 st.markdown("# Broker settings")
@@ -62,6 +62,18 @@ if broker == "kite":
         "https://kite.zerodha.com/connect/login?v=3&api_key=YOUR_API_KEY",
         language=None,
     )
+elif broker == "groww":
+    st.markdown(
+        "Daily setup: generate API key + secret on [Groww Trade API](https://groww.in/trade-api), "
+        "then use **Token Update** → **Generate Groww access token** (approve on Groww app). "
+        "Token expires daily ~6:00 AM IST."
+    )
+
+default_base_urls = {
+    "kite": "https://api.kite.trade",
+    "groww": "https://api.groww.in",
+    "upstox": "https://api.upstox.com/v2",
+}
 
 with st.form("broker_cred_form"):
     api_key = st.text_input("API key", value="", placeholder="Leave blank to keep existing")
@@ -69,7 +81,7 @@ with st.form("broker_cred_form"):
     api_secret = st.text_input("API secret (optional)", value="", type="password", placeholder="For future OAuth")
     base_url = st.text_input(
         "Base URL",
-        value="https://api.kite.trade" if broker == "kite" else "https://api.upstox.com/v2",
+        value=default_base_urls.get(broker, "https://api.upstox.com/v2"),
     )
     save = st.form_submit_button("Save credentials", type="primary")
     test = st.form_submit_button("Test saved credentials")

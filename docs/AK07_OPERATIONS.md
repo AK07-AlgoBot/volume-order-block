@@ -69,6 +69,86 @@ docker compose -p ak07 -f configs/docker-compose.yml exec engine python scripts/
 
 If you see `UDAPI1123 Invalid notifier url`, the portal URL is wrong or `/api/` is not reaching FastAPI. Until fixed, paste today's token manually into `upstox_credentials.json`.
 
+### Kite Connect (Zerodha) OAuth
+
+Create a **Personal** app on [developers.kite.trade](https://developers.kite.trade/) (login with your Zerodha credentials).
+
+**Redirect URL** (register exactly — HTTPS, no trailing slash):
+
+```text
+https://ak07.in/api/brokers/kite/callback
+```
+
+Requirements:
+
+1. **`api` container** running and **`ak07-redis`** healthy (OAuth state is stored in Redis).
+2. **nginx** proxies `/api/` → `127.0.0.1:8080` (see `configs/host-nginx-ak07.conf.example`).
+3. **`.env` on the server** (repo root):
+
+```bash
+PRODUCTION_DOMAIN=ak07.in
+AK07_COCKPIT_URL=https://ak07.in
+AK07_API_PUBLIC_URL=https://ak07.in
+# Optional override if auto-detect is wrong:
+# KITE_REDIRECT_URL=https://ak07.in/api/brokers/kite/callback
+```
+
+4. Per-user credentials file (created after first save from cockpit):
+
+```text
+src/server/data/users/AK07/kite_credentials.json
+```
+
+Shape: `src/server/templates/kite_credentials.example.json` (`api_key`, `api_secret`, `access_token`, `base_url`).
+
+**Daily flow (browser):**
+
+1. Sign in at `https://ak07.in` → **Token Update**.
+2. Select broker **kite** (admin) or use profile default broker `kite`.
+3. **Step 1** — paste `api_key` + `api_secret` from [developers.kite.trade](https://developers.kite.trade/) → Save.
+4. **Step 2** — click **Login to Zerodha** → complete User ID + password + TOTP in the new tab.
+5. Zerodha redirects to `/api/brokers/kite/callback`; AK07 exchanges `request_token` → `access_token` and saves to `kite_credentials.json`.
+
+Verify from the server:
+
+```bash
+curl -s https://ak07.in/api/health
+docker compose -p ak07 -f configs/docker-compose.yml exec api \
+  python -c "from app.services.kite_oauth import kite_redirect_url; print(kite_redirect_url())"
+```
+
+Expected output: `https://ak07.in/api/brokers/kite/callback`
+
+If login opens but callback fails, check `docker compose -p ak07 -f configs/docker-compose.yml logs api` and confirm the redirect URL in the Kite app matches exactly.
+
+### Groww Trade API (order placement)
+
+Groww uses **server-side token exchange** (no browser redirect). Subscribe on [Groww Trade API](https://groww.in/trade-api) and generate **API key + secret** on Groww Cloud.
+
+Credentials file:
+
+```text
+src/server/data/users/AK07/groww_credentials.json
+```
+
+**Daily flow (browser):**
+
+1. Sign in at `https://ak07.in` → **Token Update** → broker **Groww**.
+2. **Step 1** — save `api_key` + `api_secret` (one-time).
+3. **Step 2** — click **Generate Groww access token** → approve on the **Groww mobile app** when using approval mode.
+4. Optional: use **TOTP mode** with a 6-digit authenticator code instead.
+5. **Test Groww connection** — should show your UCC and active segments.
+
+Token expires daily (~6:00 AM IST). AK07 uses Groww for **order credentials**; market data still comes from Upstox unless you wire a Groww engine later.
+
+Verify API route:
+
+```bash
+curl -s https://ak07.in/api/health
+docker compose -p ak07 -f configs/docker-compose.yml exec api \
+  python -c "from groww_credentials_store import read_credentials_file_for_user; print(read_credentials_file_for_user('AK07').get('api_key','')[:8])"
+```
+
 ## Docker
 
 ```bash

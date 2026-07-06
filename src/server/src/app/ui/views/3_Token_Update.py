@@ -45,11 +45,6 @@ else:
     broker = DEFAULT_BROKER
     st.sidebar.caption(f"Your broker: **{broker}**")
 
-if broker == "groww":
-    st.markdown("# 🔑 Token Update")
-    st.warning("Groww integration is not available yet.")
-    st.stop()
-
 
 def _flash_result(ok: bool, msg: str) -> None:
     if ok:
@@ -61,6 +56,10 @@ def _flash_result(ok: bool, msg: str) -> None:
 def _read_creds() -> dict[str, str]:
     if broker == "kite":
         from kite_credentials_store import read_credentials_file_for_user
+
+        return read_credentials_file_for_user(USERNAME)
+    if broker == "groww":
+        from groww_credentials_store import read_credentials_file_for_user
 
         return read_credentials_file_for_user(USERNAME)
     from upstox_credentials_store import read_credentials_file_for_user
@@ -115,6 +114,60 @@ def _test_kite(api_key: str, token: str, base_url: str) -> tuple[bool, str]:
     return False, f"HTTP {resp.status_code} — {msg}"
 
 
+def _test_groww(token: str, base_url: str) -> tuple[bool, str]:
+    if not token.strip():
+        return False, "No access token saved yet — generate today's token below."
+    url = f"{base_url.rstrip('/')}/v1/user/detail"
+    try:
+        resp = requests.get(
+            url,
+            headers={
+                "Authorization": f"Bearer {token.strip()}",
+                "Accept": "application/json",
+                "X-API-VERSION": "1.0",
+            },
+            timeout=15,
+        )
+    except requests.RequestException as exc:
+        return False, str(exc)
+    try:
+        payload = resp.json() if resp.text else {}
+    except ValueError:
+        payload = {}
+    if resp.status_code == 200 and isinstance(payload, dict):
+        profile = payload.get("payload") if payload.get("status") == "SUCCESS" else payload
+        if isinstance(profile, dict):
+            ucc = profile.get("ucc") or profile.get("vendor_user_id") or "connected"
+            segments = profile.get("active_segments") or []
+            seg_text = ", ".join(segments) if segments else "n/a"
+            return True, f"Valid — UCC {ucc} · segments {seg_text}"
+    err = payload.get("error") if isinstance(payload, dict) else None
+    if isinstance(err, dict):
+        msg = str(err.get("message") or err)[:200]
+    else:
+        msg = str(payload.get("message") or resp.text)[:200] if isinstance(payload, dict) else resp.text[:200]
+    return False, f"HTTP {resp.status_code} — {msg}"
+
+
+def _refresh_groww_token(*, auth_mode: str, totp: str = "") -> tuple[bool, str]:
+    try:
+        r = api_request(
+            "POST",
+            "/api/brokers/groww/token/refresh",
+            json={"auth_mode": auth_mode, "totp": totp},
+        )
+    except Exception as exc:
+        return False, str(exc)
+    if r.status_code == 200:
+        data = r.json()
+        expiry = data.get("token_expiry") or "saved"
+        return True, f"Token saved · expires {expiry}"
+    try:
+        return False, str(r.json().get("detail", r.text))
+    except Exception:
+        return False, r.text
+
+
 def _test_upstox(token: str, base_url: str) -> tuple[bool, str]:
     url = f"{base_url.rstrip('/')}/user/profile"
     try:
@@ -142,16 +195,106 @@ elif _kite_flag == "error":
     st.session_state.pop(KITE_OPENED_KEY, None)
     st.error(f"Zerodha login failed: {st.query_params.get('msg', 'unknown error')}")
 
-broker_label = "Kite (Zerodha)" if broker == "kite" else "Upstox"
+broker_label = {"kite": "Kite (Zerodha)", "groww": "Groww", "upstox": "Upstox"}.get(broker, broker.title())
 st.markdown("# 🔑 Token Update")
 st.caption(f"**{broker_label}** · user **{USERNAME}** · paper **{PROFILE.get('paper_trading', True)}**")
 
 creds = _read_creds()
-default_base = creds.get("base_url") or (
-    "https://api.kite.trade" if broker == "kite" else "https://api.upstox.com/v2"
-)
+default_base = creds.get("base_url") or {
+    "kite": "https://api.kite.trade",
+    "groww": "https://api.groww.in",
+    "upstox": "https://api.upstox.com/v2",
+}.get(broker, "https://api.upstox.com/v2")
 
-if broker == "kite":
+if broker == "groww":
+    st.markdown("### Step 1 — API credentials (one-time)")
+    st.caption(
+        "From [Groww Trade API](https://groww.in/trade-api) → Cloud → **Generate API key**. "
+        "Use **API key + secret** (approval flow) for daily token generation."
+    )
+    with st.form("groww_app_creds"):
+        g1, g2 = st.columns(2)
+        with g1:
+            groww_key_in = st.text_input("Groww api_key", value="", placeholder="Leave blank to keep saved key")
+        with g2:
+            groww_secret_in = st.text_input(
+                "Groww api_secret",
+                value="",
+                type="password",
+                placeholder="Leave blank to keep saved secret",
+            )
+        save_groww_app = st.form_submit_button("💾 Save api_key + secret", type="primary")
+    if save_groww_app:
+        body_key = groww_key_in.strip() or creds.get("api_key", "")
+        body_secret = groww_secret_in.strip() or creds.get("api_secret", "")
+        if not body_key or not body_secret:
+            st.error("Both api_key and api_secret are required the first time.")
+        else:
+            ok, msg = _save_via_api(body_key, creds.get("access_token", ""), body_secret, default_base)
+            _flash_result(ok, msg)
+            if ok:
+                time.sleep(0.3)
+                st.rerun()
+
+    creds = _read_creds()
+    has_app = bool(creds.get("api_key") and creds.get("api_secret"))
+    has_token = bool(creds.get("access_token"))
+    token_expiry = str(creds.get("token_expiry") or "").strip()
+
+    st.markdown("### Step 2 — Generate today's token (daily ~6 AM expiry)")
+    if not has_app:
+        st.warning("Complete Step 1 first — save api_key and api_secret.")
+    else:
+        auth_mode = st.radio(
+            "Auth mode",
+            ["approval", "totp"],
+            format_func=lambda x: "API key + secret (approve on Groww app)" if x == "approval" else "TOTP (authenticator code)",
+            horizontal=True,
+        )
+        totp_code = ""
+        if auth_mode == "totp":
+            totp_code = st.text_input("6-digit TOTP", max_chars=8, placeholder="123456")
+        if auth_mode == "approval":
+            st.caption("Click generate, then **approve the login on your Groww mobile app** when prompted.")
+        if st.button("⚡ Generate Groww access token", type="primary", use_container_width=True):
+            ok, msg = _refresh_groww_token(auth_mode=auth_mode, totp=totp_code)
+            _flash_result(ok, msg)
+            if ok:
+                time.sleep(0.3)
+                st.rerun()
+
+    st.markdown("### Status")
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        st.metric("App credentials", "Ready" if has_app else "Missing")
+    with c2:
+        st.metric("Session token", "Connected" if has_token else "Not connected")
+    with c3:
+        st.metric("Token expiry", token_expiry[:16] if token_expiry else "—")
+
+    if has_token and token_expiry:
+        st.caption(f"Saved token expires **{token_expiry}** (Groww resets daily ~6:00 AM IST).")
+
+    if st.button("🔍 Test Groww connection"):
+        ok, msg = _test_groww(str(creds.get("access_token", "")), default_base)
+        _flash_result(ok, msg)
+
+    with st.expander("Advanced — paste access_token manually"):
+        st.caption("Only if automatic token generation fails.")
+        manual_token = st.text_input("access_token", type="password")
+        if st.button("Save manual Groww token"):
+            if not manual_token.strip():
+                st.warning("Paste a token first.")
+            else:
+                ok, msg = _save_via_api(
+                    str(creds.get("api_key", "")),
+                    manual_token.strip(),
+                    str(creds.get("api_secret", "")),
+                    default_base,
+                )
+                _flash_result(ok, msg)
+
+elif broker == "kite":
     st.markdown("### Step 1 — App credentials (one-time)")
     st.caption(
         "From your [Kite Personal app](https://developers.kite.trade/). "
@@ -322,4 +465,7 @@ else:
             )
             st.markdown(f'[Open Upstox login ↗]({url})')
 
-st.caption(f"API: {api_base_url()} · Redirect (Kite): `{kite_redirect_url()}`")
+st.caption(
+    f"API: {api_base_url()}"
+    + (f" · Redirect (Kite): `{kite_redirect_url()}`" if broker == "kite" else "")
+)

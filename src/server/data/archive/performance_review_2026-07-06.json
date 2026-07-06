@@ -1,0 +1,398 @@
+{
+  "date": "2026-07-06",
+  "generated_at": "2026-07-06T19:52:41.050582+05:30",
+  "paper_trading": true,
+  "pnl_points_by_index": {
+    "NIFTY": 0.0,
+    "BANKNIFTY": 0.0,
+    "SENSEX": 0.0
+  },
+  "pnl_points_total": 0.0,
+  "trade_log": [
+    {
+      "at": "2026-07-06T19:52:41.050582+05:30",
+      "index": "NIFTY",
+      "event": "ENTRY",
+      "direction": "LONG",
+      "entry_spot": 21210.0,
+      "target": 21270.0,
+      "stop_loss": 21180.0,
+      "option": "21150CE",
+      "instrument_key": "",
+      "lots": 2,
+      "quantity": 130,
+      "component_bias": "BULLISH",
+      "trade_number": 1
+    },
+    {
+      "at": "2026-07-06T19:52:41.050582+05:30",
+      "index": "BANKNIFTY",
+      "event": "ENTRY",
+      "direction": "LONG",
+      "entry_spot": 50810.0,
+      "target": 50870.0,
+      "stop_loss": 50780.0,
+      "option": "50800CE",
+      "instrument_key": "",
+      "lots": 2,
+      "quantity": 60,
+      "component_bias": "BULLISH",
+      "trade_number": 1
+    },
+    {
+      "at": "2026-07-06T19:52:41.050582+05:30",
+      "index": "SENSEX",
+      "event": "ENTRY",
+      "direction": "LONG",
+      "entry_spot": 77910.0,
+      "target": 78030.0,
+      "stop_loss": 77850.0,
+      "option": "77900CE",
+      "instrument_key": "",
+      "lots": 2,
+      "quantity": 40,
+      "component_bias": "BULLISH",
+      "trade_number": 1
+    }
+  ],
+  "spot_tracking": {
+    "NIFTY": [
+      {
+        "at": "2026-07-06T19:52:41.050582+05:30",
+        "spot": 21210.0
+      }
+    ],
+    "BANKNIFTY": [
+      {
+        "at": "2026-07-06T19:52:41.050582+05:30",
+        "spot": 50810.0
+      }
+    ],
+    "SENSEX": [
+      {
+        "at": "2026-07-06T19:52:41.050582+05:30",
+        "spot": 77910.0
+      }
+    ]
+  },
+  "component_sentiment_tracking": {
+    "NIFTY": [
+      {
+        "at": "2026-07-06T19:52:41.050582+05:30",
+        "bias": "BULLISH",
+        "components": {
+          "RELIANCE": 3.03,
+          "HDFCBANK": 3.03,
+          "ICICIBANK": 3.03,
+          "INFY": 3.03,
+          "TCS": 3.03
+        }
+      }
+    ],
+    "BANKNIFTY": [
+      {
+        "at": "2026-07-06T19:52:41.050582+05:30",
+        "bias": "BULLISH",
+        "components": {
+          "HDFCBANK": 3.03,
+          "ICICIBANK": 3.03,
+          "SBIN": 3.03,
+          "AXISBANK": 3.03,
+          "KOTAKBANK": 3.03
+        }
+      }
+    ],
+    "SENSEX": [
+      {
+        "at": "2026-07-06T19:52:41.050582+05:30",
+        "bias": "BULLISH",
+        "components": {
+          "RELIANCE": 3.03,
+          "HDFCBANK": 3.03,
+          "ICICIBANK": 3.03,
+          "INFY": 3.03,
+          "TCS": 3.03,
+          "ITC": 3.03
+        }
+      }
+    ]
+  },
+  "redis_cache_dump": {
+    "live_state": {
+      "spot_price": 21210.0,
+      "volume": 120000,
+      "highest_call_oi_strike": 24000,
+      "highest_put_oi_strike": 21200,
+      "timestamp": "2026-07-06T19:52:41.050582+05:30"
+    },
+    "system_mode": "NEUTRAL",
+    "kill_switch": null,
+    "positions": {
+      "NIFTY": {
+        "index_code": "NIFTY",
+        "direction": "LONG",
+        "entry_price": 21210.0,
+        "target_price": 21270.0,
+        "sl_price": 21180.0,
+        "lot_size": 65,
+        "lots_remaining": 2,
+        "partial_booked": false,
+        "instrument_key": "",
+        "option_strike": 21150,
+        "option_type": "CE",
+        "opened_at": "2026-07-06T19:52:41.050582+05:30",
+        "quantity": 130
+      },
+      "BANKNIFTY": {
+        "index_code": "BANKNIFTY",
+        "direction": "LONG",
+        "entry_price": 50810.0,
+        "target_price": 50870.0,
+        "sl_price": 50780.0,
+        "lot_size": 30,
+        "lots_remaining": 2,
+        "partial_booked": false,
+        "instrument_key": "",
+        "option_strike": 50800,
+        "option_type": "CE",
+        "opened_at": "2026-07-06T19:52:41.050582+05:30",
+        "quantity": 60
+      },
+      "SENSEX": {
+        "index_code": "SENSEX",
+        "direction": "LONG",
+        "entry_price": 77910.0,
+        "target_price": 78030.0,
+        "sl_price": 77850.0,
+        "lot_size": 20,
+        "lots_remaining": 2,
+        "partial_booked": false,
+        "instrument_key": "",
+        "option_strike": 77900,
+        "option_type": "CE",
+        "opened_at": "2026-07-06T19:52:41.050582+05:30",
+        "quantity": 40
+      }
+    },
+    "index_states": {
+      "NIFTY": {
+        "index": "NIFTY",
+        "display": "Nifty 50",
+        "spot": 21210.0,
+        "call_wall": 24000,
+        "put_floor": 21200,
+        "pcr": null,
+        "max_ce_writing_strike": null,
+        "max_pe_writing_strike": null,
+        "component_bias": "BULLISH",
+        "components": {
+          "RELIANCE": 3.03,
+          "HDFCBANK": 3.03,
+          "ICICIBANK": 3.03,
+          "INFY": 3.03,
+          "TCS": 3.03
+        },
+        "trades_today": 1,
+        "max_trades": 2,
+        "position": {
+          "index_code": "NIFTY",
+          "direction": "LONG",
+          "entry_price": 21210.0,
+          "target_price": 21270.0,
+          "sl_price": 21180.0,
+          "lot_size": 65,
+          "lots_remaining": 2,
+          "partial_booked": false,
+          "instrument_key": "",
+          "option_strike": 21150,
+          "option_type": "CE",
+          "opened_at": "2026-07-06T19:52:41.050582+05:30",
+          "quantity": 130
+        },
+        "entries_blocked": false,
+        "monitoring_active": true,
+        "paper_trading": true,
+        "recent_trades": [
+          "2026-07-06 19:52:41 ENTRY LONG @ 21210.0 via 21150CE"
+        ],
+        "updated_at": "2026-07-06T19:52:41.050582+05:30"
+      },
+      "BANKNIFTY": {
+        "index": "BANKNIFTY",
+        "display": "BankNifty",
+        "spot": 50810.0,
+        "call_wall": 52500,
+        "put_floor": 50800,
+        "pcr": null,
+        "max_ce_writing_strike": null,
+        "max_pe_writing_strike": null,
+        "component_bias": "BULLISH",
+        "components": {
+          "HDFCBANK": 3.03,
+          "ICICIBANK": 3.03,
+          "SBIN": 3.03,
+          "AXISBANK": 3.03,
+          "KOTAKBANK": 3.03
+        },
+        "trades_today": 1,
+        "max_trades": 2,
+        "position": {
+          "index_code": "BANKNIFTY",
+          "direction": "LONG",
+          "entry_price": 50810.0,
+          "target_price": 50870.0,
+          "sl_price": 50780.0,
+          "lot_size": 30,
+          "lots_remaining": 2,
+          "partial_booked": false,
+          "instrument_key": "",
+          "option_strike": 50800,
+          "option_type": "CE",
+          "opened_at": "2026-07-06T19:52:41.050582+05:30",
+          "quantity": 60
+        },
+        "entries_blocked": false,
+        "monitoring_active": true,
+        "paper_trading": true,
+        "recent_trades": [
+          "2026-07-06 19:52:41 ENTRY LONG @ 50810.0 via 50800CE"
+        ],
+        "updated_at": "2026-07-06T19:52:41.050582+05:30"
+      },
+      "SENSEX": {
+        "index": "SENSEX",
+        "display": "Sensex",
+        "spot": 77910.0,
+        "call_wall": 79800,
+        "put_floor": 77900,
+        "pcr": null,
+        "max_ce_writing_strike": null,
+        "max_pe_writing_strike": null,
+        "component_bias": "BULLISH",
+        "components": {
+          "RELIANCE": 3.03,
+          "HDFCBANK": 3.03,
+          "ICICIBANK": 3.03,
+          "INFY": 3.03,
+          "TCS": 3.03,
+          "ITC": 3.03
+        },
+        "trades_today": 1,
+        "max_trades": 2,
+        "position": {
+          "index_code": "SENSEX",
+          "direction": "LONG",
+          "entry_price": 77910.0,
+          "target_price": 78030.0,
+          "sl_price": 77850.0,
+          "lot_size": 20,
+          "lots_remaining": 2,
+          "partial_booked": false,
+          "instrument_key": "",
+          "option_strike": 77900,
+          "option_type": "CE",
+          "opened_at": "2026-07-06T19:52:41.050582+05:30",
+          "quantity": 40
+        },
+        "entries_blocked": false,
+        "monitoring_active": true,
+        "paper_trading": true,
+        "recent_trades": [
+          "2026-07-06 19:52:41 ENTRY LONG @ 77910.0 via 77900CE"
+        ],
+        "updated_at": "2026-07-06T19:52:41.050582+05:30"
+      }
+    }
+  },
+  "completed_trades_summary": {
+    "trade_count": 0,
+    "wins": 0,
+    "losses": 0,
+    "win_pct": 0.0,
+    "pnl_points_total": 0.0,
+    "by_strategy": [
+      {
+        "Strategy": "Strategy 1 — AK07 OI",
+        "Trades": 0,
+        "Wins": 0,
+        "Losses": 0,
+        "Win %": 0.0,
+        "Profit (pts)": 0
+      },
+      {
+        "Strategy": "Strategy 2 — SMC+CRT",
+        "Trades": 0,
+        "Wins": 0,
+        "Losses": 0,
+        "Win %": 0.0,
+        "Profit (pts)": 0
+      },
+      {
+        "Strategy": "Strategy 3 — BLR Breakout",
+        "Trades": 0,
+        "Wins": 0,
+        "Losses": 0,
+        "Win %": 0.0,
+        "Profit (pts)": 0
+      },
+      {
+        "Strategy": "Strategy 4 — Price Action",
+        "Trades": 0,
+        "Wins": 0,
+        "Losses": 0,
+        "Win %": 0.0,
+        "Profit (pts)": 0
+      },
+      {
+        "Strategy": "Strategy 5 — Greeks",
+        "Trades": 0,
+        "Wins": 0,
+        "Losses": 0,
+        "Win %": 0.0,
+        "Profit (pts)": 0
+      },
+      {
+        "Strategy": "Strategy 6 — S/R Reversal",
+        "Trades": 0,
+        "Wins": 0,
+        "Losses": 0,
+        "Win %": 0.0,
+        "Profit (pts)": 0
+      },
+      {
+        "Strategy": "Strategy 7 — ORB+",
+        "Trades": 0,
+        "Wins": 0,
+        "Losses": 0,
+        "Win %": 0.0,
+        "Profit (pts)": 0
+      },
+      {
+        "Strategy": "Strategy 8 — CHOCH",
+        "Trades": 0,
+        "Wins": 0,
+        "Losses": 0,
+        "Win %": 0.0,
+        "Profit (pts)": 0
+      },
+      {
+        "Strategy": "Gamma Expiry Observer",
+        "Trades": 0,
+        "Wins": 0,
+        "Losses": 0,
+        "Win %": 0.0,
+        "Profit (pts)": 0
+      },
+      {
+        "Strategy": "TOTAL",
+        "Trades": 0,
+        "Wins": 0,
+        "Losses": 0,
+        "Win %": 0.0,
+        "Profit (pts)": 0.0
+      }
+    ],
+    "by_index": [],
+    "by_strategy_and_index": []
+  }
+}

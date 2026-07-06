@@ -11,11 +11,16 @@ class UpstoxSettingsBody(BaseModel):
 
 
 class BrokerCredentialsBody(BaseModel):
-    broker: Literal["upstox", "kite"] = "upstox"
+    broker: Literal["upstox", "kite", "groww"] = "upstox"
     access_token: str = ""
     api_key: str = ""
     api_secret: str = ""
     base_url: str = ""
+
+
+class GrowwTokenRefreshBody(BaseModel):
+    auth_mode: Literal["approval", "totp"] = "approval"
+    totp: str = ""
 
 
 class LoginBody(BaseModel):
