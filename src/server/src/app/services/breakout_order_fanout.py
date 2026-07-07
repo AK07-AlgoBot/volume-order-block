@@ -55,10 +55,13 @@ def place_s3_entries(
     lots: int,
     upstox_market_client: UpstoxClient | None,
     global_paper: bool,
+    only_usernames: frozenset[str] | None = None,
 ) -> list[dict[str, Any]]:
     """Place entry on every live S3 trader's broker. Returns successful legs."""
     if global_paper:
         traders = list_live_s3_traders()
+        if only_usernames:
+            traders = [t for t in traders if t.username in only_usernames]
         return [
             {
                 "username": t.username,
@@ -76,6 +79,8 @@ def place_s3_entries(
     legs: list[dict[str, Any]] = []
 
     for trader in list_live_s3_traders():
+        if only_usernames and trader.username not in only_usernames:
+            continue
         if trader.broker == "groww":
             groww = GrowwClient(trader.username)
             if not groww.has_token():
@@ -151,6 +156,43 @@ def place_s3_entries(
     if upstox_market_client and not legs:
         logger.warning("No per-user S3 legs placed (check profiles/tokens)")
     return legs
+
+
+def missing_s3_traders(existing_legs: list[dict[str, Any]], *, assume_upstox_filled: bool) -> list[S3Trader]:
+    """Live traders who did not get an entry leg yet."""
+    covered = {str(leg.get("username") or "") for leg in existing_legs if leg.get("username")}
+    if assume_upstox_filled and not covered:
+        for trader in list_live_s3_traders():
+            if trader.broker == "upstox":
+                covered.add(trader.username)
+    return [t for t in list_live_s3_traders() if t.username not in covered]
+
+
+def catchup_s3_legs(
+    *,
+    index_code: str,
+    direction: str,
+    lot_size: int,
+    lots: int,
+    existing_legs: list[dict[str, Any]],
+    upstox_market_client: UpstoxClient | None,
+    global_paper: bool,
+) -> list[dict[str, Any]]:
+    """Place entries for live traders missing from an open position's legs."""
+    missing = missing_s3_traders(existing_legs, assume_upstox_filled=not existing_legs)
+    if not missing:
+        return []
+    names = frozenset(t.username for t in missing)
+    logger.info("S3 catch-up entry for missing traders: %s", ", ".join(sorted(names)))
+    return place_s3_entries(
+        index_code=index_code,
+        direction=direction,
+        lot_size=lot_size,
+        lots=lots,
+        upstox_market_client=upstox_market_client,
+        global_paper=global_paper,
+        only_usernames=names,
+    )
 
 
 def place_s3_exits(

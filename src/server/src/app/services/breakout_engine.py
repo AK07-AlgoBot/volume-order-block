@@ -34,6 +34,7 @@ from app.services import performance_store
 from app.services.backtest_data import parse_candle_ts
 from app.services.engine_intraday import blr_day_review_allows_direction
 from app.services.breakout_order_fanout import (
+    catchup_s3_legs,
     legs_summary,
     list_live_s3_traders,
     place_s3_entries,
@@ -211,6 +212,7 @@ class IndexBreakoutState:
     last_candle_ts: str = ""
     setup_label: str = "Waiting for session"
     signal_log: list[str] = field(default_factory=list)
+    last_fanout_catchup_mono: float = 0.0
 
 
 def _position_to_dict(pos: BreakoutPosition) -> dict[str, Any]:
@@ -745,6 +747,7 @@ class BreakoutEngine:
         self._refresh_levels(state, candles, now, spot)
 
         if state.position:
+            self._catchup_missing_fanout_legs(state)
             self._manage_position(state, now, candles)
         elif (
             not entries_blocked
@@ -1233,6 +1236,35 @@ class BreakoutEngine:
             high = max(high, float(candle["high"]))
             low = min(low, float(candle["low"]))
         return high, low
+
+    def _catchup_missing_fanout_legs(self, state: IndexBreakoutState) -> None:
+        """Retry S3 entry for live traders who missed the initial fan-out (e.g. Groww ref error)."""
+        pos = state.position
+        if pos is None or PAPER_TRADING or MOCK_MODE:
+            return
+        now_mono = time.monotonic()
+        if now_mono - state.last_fanout_catchup_mono < 60.0:
+            return
+        state.last_fanout_catchup_mono = now_mono
+
+        existing = list(pos.order_legs or [])
+        new_legs = catchup_s3_legs(
+            index_code=state.config.code,
+            direction=pos.direction,
+            lot_size=state.config.lot_size,
+            lots=LOTS_PER_TRADE,
+            existing_legs=existing,
+            upstox_market_client=self.client._upstox,
+            global_paper=False,
+        )
+        if not new_legs:
+            return
+        pos.order_legs = existing + new_legs
+        note = legs_summary(new_legs)
+        msg = f"{state.config.display} S3 catch-up entry [{note}]"
+        state.signal_log.append(msg)
+        logger.info(msg)
+        self._save_session_state(state)
 
     def _manage_position(
         self,

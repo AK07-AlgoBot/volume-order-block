@@ -170,12 +170,13 @@ class GrowwClient:
             except ValueError:
                 payload = {}
             if response.status_code != 200 or payload.get("status") != "SUCCESS":
+                err = payload.get("error") or payload.get("message") or payload.get("remark") or response.text[:300]
                 logger.warning(
-                    "[%s] Groww POST %s failed HTTP %d %s",
+                    "[%s] Groww POST %s failed HTTP %d — %s",
                     self.username,
                     path,
                     response.status_code,
-                    str(payload)[:250],
+                    err,
                 )
                 return None
             data = payload.get("payload")
