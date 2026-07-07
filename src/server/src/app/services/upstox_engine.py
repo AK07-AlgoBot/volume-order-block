@@ -266,6 +266,71 @@ def _format_future_contract_label(trading_symbol: str, expiry: str) -> str:
     return f"{trading_symbol} FUT"
 
 
+_INDEX_FUTURE_SEGMENT: Final[dict[str, str]] = {
+    "NIFTY": "NSE_FO",
+    "BANKNIFTY": "NSE_FO",
+    "SENSEX": "BSE_FO",
+}
+
+_INDEX_FUTURE_SYMBOL_PREFIX: Final[dict[str, str]] = {
+    "NIFTY": "NIFTY",
+    "BANKNIFTY": "BANKNIFTY",
+    "SENSEX": "SENSEX",
+}
+
+
+def _row_is_index_future(row: dict[str, Any], index_code: str) -> bool:
+    """True for NIFTY/BANKNIFTY/SENSEX index futures rows (not options)."""
+    code = index_code.upper()
+    want_seg = _INDEX_FUTURE_SEGMENT.get(code)
+    if not want_seg:
+        return False
+    if str(row.get("segment") or "") != want_seg:
+        return False
+    inst = str(row.get("instrument_type") or "").upper()
+    if inst in ("CE", "PE", "OPTIDX", "OPTSTK"):
+        return False
+    sym = str(row.get("trading_symbol") or "").upper()
+    prefix = _INDEX_FUTURE_SYMBOL_PREFIX.get(code, code)
+    if not sym.startswith(prefix):
+        return False
+    if sym.endswith("CE") or sym.endswith("PE"):
+        return False
+    return bool(str(row.get("instrument_key") or ""))
+
+
+def _future_expiry_key(row: dict[str, Any]) -> str:
+    raw = row.get("expiry")
+    if raw is None:
+        return "9999-99-99"
+    if isinstance(raw, (int, float)):
+        return str(int(raw))
+    text = str(raw).strip()
+    return text[:10] if text else "9999-99-99"
+
+
+def _index_futures_from_master(index_code: str) -> list[dict[str, Any]]:
+    """Fallback: scan Upstox complete.json.gz for index futures."""
+    import gzip
+    import json
+
+    from app.services.instrument_catalog import CACHE_DIR, COMPLETE_URL, GZ_FILE  # noqa: PLC0415
+
+    try:
+        CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        if not GZ_FILE.exists():
+            logger.info("Downloading Upstox instrument master for %s futures lookup…", index_code)
+            response = requests.get(COMPLETE_URL, timeout=120)
+            response.raise_for_status()
+            GZ_FILE.write_bytes(response.content)
+        with gzip.open(GZ_FILE, "rt", encoding="utf-8") as handle:
+            rows = json.load(handle)
+    except (OSError, ValueError, requests.RequestException) as exc:
+        logger.warning("Instrument master scan failed for %s: %s", index_code, exc)
+        return []
+    return [row for row in rows if isinstance(row, dict) and _row_is_index_future(row, index_code)]
+
+
 def _instrument_keys_match(expected: str, actual: str) -> bool:
     """Match Upstox instrument ids across chain (NSE_FO|token) vs positions (token-only)."""
     if not expected or not actual:
@@ -498,46 +563,58 @@ class UpstoxClient:
             return None
         code = cfg.code
         exchange = "BSE" if code == "SENSEX" else "NSE"
-        data = self._get(
-            f"{self.base_url}/instruments/search",
-            {
-                "query": code,
-                "exchanges": exchange,
-                "segments": "FUT",
-                "records": 30,
-            },
-        )
-        if not isinstance(data, list):
-            return None
         today = date.today().isoformat()
+
+        search_specs: list[dict[str, Any]] = [
+            {"query": code, "exchanges": exchange, "segments": "FO", "expiry": "current_month", "records": 30},
+            {"query": code, "exchanges": exchange, "segments": "FO", "expiry": "near_month", "records": 30},
+            {"query": code, "exchanges": exchange, "segments": "FO", "records": 30},
+        ]
+
+        seen_keys: set[str] = set()
+        merged: list[dict[str, Any]] = []
+        for params in search_specs:
+            data = self._get(f"{self.base_url}/instruments/search", params)
+            if not isinstance(data, list):
+                continue
+            for row in data:
+                if not isinstance(row, dict):
+                    continue
+                key = str(row.get("instrument_key") or "")
+                if not key or key in seen_keys:
+                    continue
+                seen_keys.add(key)
+                merged.append(row)
+
+        if not merged:
+            merged = _index_futures_from_master(code)
+
         candidates: list[tuple[str, dict[str, Any]]] = []
-        for row in data:
-            if not isinstance(row, dict):
+        for row in merged:
+            if not _row_is_index_future(row, code):
                 continue
-            if str(row.get("trading_symbol") or "").upper() != code:
+            expiry = _future_expiry_key(row)
+            if expiry[:10] < today:
                 continue
-            inst_type = str(row.get("instrument_type") or "").upper()
-            if inst_type not in ("FUTIDX", "FUT"):
-                continue
-            instrument_key = str(row.get("instrument_key") or "")
-            if not instrument_key:
-                continue
-            expiry = str(row.get("expiry") or "")
-            if expiry and expiry[:10] < today:
-                continue
-            candidates.append((expiry or "9999-99-99", row))
+            candidates.append((expiry, row))
+
         if not candidates:
-            logger.warning("No %s future contract found via instrument search", code)
+            logger.warning(
+                "No %s future contract found (search rows=%d, after filter=0)",
+                code,
+                len(merged),
+            )
             return None
+
         candidates.sort(key=lambda item: item[0])
         row = candidates[0][1]
         trading_symbol = str(row.get("trading_symbol") or code)
-        expiry = str(row.get("expiry") or "")[:10]
+        expiry = _future_expiry_key(row)[:10]
         return {
             "instrument_key": str(row.get("instrument_key") or ""),
             "trading_symbol": trading_symbol,
             "expiry": expiry,
-            "contract_label": _format_future_contract_label(trading_symbol, expiry),
+            "contract_label": _format_future_contract_label(code, expiry),
         }
 
     def get_option_chain_with_expiry(self, instrument_key: str) -> tuple[str | None, list[dict[str, Any]]]:
