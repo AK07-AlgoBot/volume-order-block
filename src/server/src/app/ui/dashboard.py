@@ -30,6 +30,12 @@ from app.constants import (
     STRATEGY_S8_CHOCH,
 )
 from app.services import cache_manager
+from app.services.broker_pnl_store import (
+    broker_pnl_label,
+    format_pnl_inr,
+    get_user_broker_pnl,
+    refresh_groww_pnl_if_stale,
+)
 from app.services.upstox_engine import INDEX_CONFIGS, INDEX_OI_RISK, DEFAULT_OI_RISK
 import app.ui.auth_session as auth_session
 from app.ui.strategy_access import enabled_strategy_labels_text, tabbed_dashboard_index_codes, user_can_view_strategy
@@ -433,6 +439,20 @@ def render_breakout_strategy_panel(index_code: str) -> None:
     review = str(bo.get("day_review") or "PENDING")
     b5.metric("Day review", review)
 
+    profile = auth_session.current_profile()
+    username = auth_session.current_username()
+    broker = str(profile.get("broker") or "upstox").strip().lower()
+    if broker == "groww" and username:
+        pnl_snap = refresh_groww_pnl_if_stale(username)
+    else:
+        pnl_snap = get_user_broker_pnl(username, broker)
+    pnl_total = pnl_snap.get("total_pnl_inr")
+    pnl_realised = pnl_snap.get("realised_inr")
+    pnl_updated = str(pnl_snap.get("updated_at") or "")[:19].replace("T", " ")
+    d1, d2 = st.columns(2)
+    d1.metric(broker_pnl_label(broker), format_pnl_inr(float(pnl_total) if pnl_total is not None else None))
+    d2.metric("Realised today", format_pnl_inr(float(pnl_realised) if pnl_realised is not None else None))
+
     meta = []
     if bo.get("session_open") is not None:
         src = str(bo.get("session_open_source") or "")
@@ -517,7 +537,7 @@ def render_breakout_strategy_panel(index_code: str) -> None:
     st.markdown(
         f'<p class="ak07-muted-line">Breakout state updated {updated} · trades today '
         f'{bo.get("trades_today", 0)}/{bo.get("max_trades", 3)} · '
-        f'top-bar ₹ P&L is Upstox-only (Groww users: use Groww app or check script)</p>',
+        f'{broker_pnl_label(broker)} updated {pnl_updated or "—"}</p>',
         unsafe_allow_html=True,
     )
 
@@ -527,12 +547,15 @@ def render_breakout_strategy_panel(index_code: str) -> None:
 # ---------------------------------------------------------------------------
 def run_dashboard() -> None:
     auth_session.require_login()
+    profile = auth_session.current_profile()
     render_compact_sidebar(mock_mode=MOCK_MODE, admin_mode=auth_session.is_admin())
     auto_refresh = render_top_status_bar(
         mock_mode=MOCK_MODE,
         production_domain=PRODUCTION_DOMAIN,
         refresh_seconds=REFRESH_SECONDS,
         can_view_strategy=user_can_view_strategy,
+        username=auth_session.current_username(),
+        broker=str(profile.get("broker") or "upstox"),
     )
 
     # ---------------------------------------------------------------------------

@@ -618,6 +618,7 @@ class BreakoutMarketClient:
 class BreakoutEngine:
     def __init__(self) -> None:
         self.client = BreakoutMarketClient()
+        self._last_pnl_refresh_mono = 0.0
         self.states = {code: IndexBreakoutState(config=cfg) for code, cfg in INDEX_CONFIGS.items()}
         now = datetime.now(IST)
         for state in self.states.values():
@@ -698,7 +699,38 @@ class BreakoutEngine:
                         f"(live indices: {', '.join(sorted(ENTRIES_INDICES))})"
                     )
             self._process_index(state, now, index_blocked, index_block)
+        self._refresh_live_trader_pnl(now)
         self._publish_heartbeat(now)
+
+    def _refresh_live_trader_pnl(self, now: datetime) -> None:
+        if PAPER_TRADING or MOCK_MODE:
+            return
+        if now.time() < SESSION_START or now.time() >= SESSION_END:
+            return
+        if time.monotonic() - self._last_pnl_refresh_mono < 30.0:
+            return
+        self._last_pnl_refresh_mono = time.monotonic()
+
+        from app.services.broker_pnl_store import publish_groww_pnl_snapshot
+        from app.services.daily_profit_guard import publish_upstox_pnl_snapshot
+        from app.services.groww_engine import GrowwClient
+        from app.services.upstox_engine import build_upstox_client
+
+        for trader in list_live_s3_traders():
+            try:
+                if trader.broker == "groww":
+                    pnl = GrowwClient(trader.username).get_fno_day_pnl()
+                    if pnl is not None:
+                        publish_groww_pnl_snapshot(trader.username, pnl)
+                elif trader.broker == "upstox":
+                    upstox = build_upstox_client(trader.username)
+                    if upstox is not None:
+                        upstox.refresh_access_token_from_disk()
+                        pnl = upstox.get_portfolio_day_pnl()
+                        if pnl is not None:
+                            publish_upstox_pnl_snapshot(pnl)
+            except Exception as exc:
+                logger.warning("[%s] broker P&L refresh failed: %s", trader.username, exc)
 
     def _roll_trade_day(self, now: datetime) -> None:
         today = now.date().isoformat()

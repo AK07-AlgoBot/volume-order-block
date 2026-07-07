@@ -16,6 +16,12 @@ from app.constants import (
     STRATEGY_S8_CHOCH,
 )
 from app.services import cache_manager
+from app.services.broker_pnl_store import (
+    broker_pnl_label,
+    format_pnl_inr,
+    get_user_broker_pnl,
+    refresh_groww_pnl_if_stale,
+)
 from app.services.upstox_engine import emergency_square_off_all, release_kill_switch
 from app.ui.styles import status_pill
 
@@ -26,6 +32,8 @@ def render_top_status_bar(
     production_domain: str,
     refresh_seconds: int,
     can_view_strategy: Callable[[str], bool] | None = None,
+    username: str = "",
+    broker: str = "upstox",
 ) -> bool:
     """One-line engine status + auto-refresh toggle. Returns auto_refresh flag."""
     can_view = can_view_strategy or (lambda _sid: True)
@@ -49,10 +57,19 @@ def render_top_status_bar(
 
     upstox_pnl = cache_manager.get_json(cache_manager.UPSTOX_DAILY_PNL_KEY) or {}
     upstox_total = upstox_pnl.get("total_pnl_inr")
-    if upstox_total is not None:
+    broker_key = (broker or "upstox").strip().lower()
+    pnl_label = broker_pnl_label(broker_key)
+    if broker_key == "groww" and username:
+        pnl_snap = refresh_groww_pnl_if_stale(username)
+    else:
+        pnl_snap = get_user_broker_pnl(username, broker_key)
+    total_pnl = pnl_snap.get("total_pnl_inr")
+    if total_pnl is not None:
+        target_pill = status_pill(pnl_label, True, f"Rs.{float(total_pnl):+,.0f}")
+    elif upstox_total is not None and broker_key == "upstox":
         target_pill = status_pill("Upstox P&L", True, f"Rs.{float(upstox_total):+,.0f}")
     else:
-        target_pill = status_pill("Upstox P&L", False, "pending")
+        target_pill = status_pill(pnl_label, False, "pending")
 
     pill_specs: list[tuple[str, str, bool, str]] = []
     if can_view(STRATEGY_S1_OI):

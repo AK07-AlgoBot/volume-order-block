@@ -206,6 +206,66 @@ class GrowwClient:
             open_rows.append(row)
         return open_rows
 
+    def get_fno_order_list(self) -> list[dict[str, Any]]:
+        payload = self._get("/v1/order/list", {"segment": "FNO", "page": 0, "page_size": 100})
+        if not isinstance(payload, dict):
+            return []
+        rows = payload.get("order_list") or []
+        return [row for row in rows if isinstance(row, dict)]
+
+    def get_fno_day_pnl(self) -> dict[str, float] | None:
+        """Today's FNO P&L from executed orders + open position realised fields."""
+        if not self.has_token():
+            return None
+        today = datetime.now(IST).date().isoformat()
+        buckets: dict[str, dict[str, float | int]] = {}
+        for row in self.get_fno_order_list():
+            stamp = " ".join(
+                str(row.get(key) or "")
+                for key in ("created_at", "trade_date", "exchange_time")
+            )
+            if today not in stamp:
+                continue
+            status = str(row.get("order_status") or "").upper()
+            if status not in ("EXECUTED", "COMPLETE", "COMPLETED", "TRADED"):
+                continue
+            filled = int(row.get("filled_quantity") or 0)
+            if filled <= 0:
+                continue
+            sym = str(row.get("trading_symbol") or "")
+            side = str(row.get("transaction_type") or "").upper()
+            avg = float(row.get("average_fill_price") or 0)
+            bucket = buckets.setdefault(sym, {"buy_v": 0.0, "buy_q": 0, "sell_v": 0.0, "sell_q": 0})
+            if side == "BUY":
+                bucket["buy_v"] = float(bucket["buy_v"]) + filled * avg
+                bucket["buy_q"] = int(bucket["buy_q"]) + filled
+            elif side == "SELL":
+                bucket["sell_v"] = float(bucket["sell_v"]) + filled * avg
+                bucket["sell_q"] = int(bucket["sell_q"]) + filled
+
+        realised = 0.0
+        open_positions = 0
+        for bucket in buckets.values():
+            buy_q = int(bucket["buy_q"])
+            sell_q = int(bucket["sell_q"])
+            closed = min(buy_q, sell_q)
+            if closed > 0 and buy_q > 0 and sell_q > 0:
+                avg_buy = float(bucket["buy_v"]) / buy_q
+                avg_sell = float(bucket["sell_v"]) / sell_q
+                realised += closed * (avg_sell - avg_buy)
+            if buy_q != sell_q:
+                open_positions += 1
+
+        for row in self.get_fno_positions():
+            realised += float(row.get("realised_pnl") or 0)
+
+        return {
+            "total_pnl": realised,
+            "realised": realised,
+            "unrealised": 0.0,
+            "open_positions": float(open_positions),
+        }
+
     def get_index_future_contract(self, index_code: str) -> dict[str, Any] | None:
         """Nearest-expiry index future for Groww order placement."""
         code = index_code.upper()
