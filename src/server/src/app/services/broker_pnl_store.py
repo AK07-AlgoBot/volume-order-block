@@ -42,19 +42,17 @@ def get_upstox_pnl_snapshot() -> dict[str, Any]:
     return raw if isinstance(raw, dict) else {}
 
 
-def get_user_broker_pnl(username: str, broker: str) -> dict[str, Any]:
+def get_user_broker_pnl(username: str, broker: str | float | None) -> dict[str, Any]:
     """Day P&L snapshot for dashboard — keyed by logged-in user's broker."""
-    b = (broker or "upstox").strip().lower()
+    b = str(broker or "upstox").strip().lower()
     if b == "groww":
         return get_groww_pnl_snapshot(username)
     return get_upstox_pnl_snapshot()
 
 
-def broker_pnl_label(broker: str) -> str:
-    return {"groww": "Groww P&L", "upstox": "Upstox P&L", "kite": "Kite P&L"}.get(
-        (broker or "upstox").strip().lower(),
-        "Broker P&L",
-    )
+def broker_pnl_label(broker: str | float | None) -> str:
+    key = str(broker or "upstox").strip().lower()
+    return {"groww": "Groww P&L", "upstox": "Upstox P&L", "kite": "Kite P&L"}.get(key, "Broker P&L")
 
 
 def format_pnl_inr(value: float | None) -> str:

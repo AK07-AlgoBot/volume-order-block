@@ -441,16 +441,16 @@ def render_breakout_strategy_panel(index_code: str) -> None:
 
     profile = auth_session.current_profile()
     username = auth_session.current_username()
-    broker = str(profile.get("broker") or "upstox").strip().lower()
-    if broker == "groww" and username:
+    user_broker = str(profile.get("broker") or "upstox").strip().lower()
+    if user_broker == "groww" and username:
         pnl_snap = refresh_groww_pnl_if_stale(username)
     else:
-        pnl_snap = get_user_broker_pnl(username, broker)
+        pnl_snap = get_user_broker_pnl(username, user_broker)
     pnl_total = pnl_snap.get("total_pnl_inr")
     pnl_realised = pnl_snap.get("realised_inr")
     pnl_updated = str(pnl_snap.get("updated_at") or "")[:19].replace("T", " ")
     d1, d2 = st.columns(2)
-    d1.metric(broker_pnl_label(broker), format_pnl_inr(float(pnl_total) if pnl_total is not None else None))
+    d1.metric(broker_pnl_label(user_broker), format_pnl_inr(float(pnl_total) if pnl_total is not None else None))
     d2.metric("Realised today", format_pnl_inr(float(pnl_realised) if pnl_realised is not None else None))
 
     meta = []
@@ -462,10 +462,10 @@ def render_breakout_strategy_panel(index_code: str) -> None:
             "ltp_provisional": "LTP*",
         }.get(src, src)
         open_txt = fmt(float(bo["session_open"]))
-        broker = bo.get("broker_session_open")
+        broker_session_open = bo.get("broker_session_open")
         tv_off = float(bo.get("session_open_tv_offset") or 0)
-        if broker is not None and tv_off:
-            open_txt = f"{open_txt} (Upstox {fmt(float(broker))} + {tv_off:+.0f} TV)"
+        if broker_session_open is not None and tv_off:
+            open_txt = f"{open_txt} (Upstox {fmt(float(broker_session_open))} + {tv_off:+.0f} TV)"
         meta.append(f"9:15 open {open_txt} ({src_label})")
     if bo.get("prev_close") is not None:
         meta.append(f"prev close {fmt(float(bo['prev_close']))}")
@@ -537,7 +537,7 @@ def render_breakout_strategy_panel(index_code: str) -> None:
     st.markdown(
         f'<p class="ak07-muted-line">Breakout state updated {updated} · trades today '
         f'{bo.get("trades_today", 0)}/{bo.get("max_trades", 3)} · '
-        f'{broker_pnl_label(broker)} updated {pnl_updated or "—"}</p>',
+        f'{broker_pnl_label(user_broker)} updated {pnl_updated or "—"}</p>',
         unsafe_allow_html=True,
     )
 
