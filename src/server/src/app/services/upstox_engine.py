@@ -477,12 +477,26 @@ class UpstoxClient:
         if not isinstance(data, dict):
             return out
         for row in data.values():
-            key = row.get("instrument_token") or ""
+            key = row.get("instrument_key") or row.get("instrument_token") or ""
             ltp = row.get("last_price")
             day_open = (row.get("ohlc") or {}).get("open")
             if key and ltp is not None and day_open:
                 out[key] = {"ltp": float(ltp), "open": float(day_open)}
         return out
+
+    def get_index_day_open(self, instrument_key: str) -> float | None:
+        """NSE session open from daily OHLC quote (often matches TradingView index open)."""
+        data = self._get(
+            f"{self.base_url}/market-quote/ohlc",
+            {"instrument_key": instrument_key, "interval": "1d"},
+        )
+        if not isinstance(data, dict):
+            return None
+        for row in data.values():
+            day_open = (row.get("ohlc") or {}).get("open")
+            if day_open is not None:
+                return float(day_open)
+        return None
 
     def get_closed_5min_candles(self, instrument_key: str) -> list[dict[str, float]] | None:
         """Today's completed 5-min candles from V3 intraday. None = legacy payload rejected."""

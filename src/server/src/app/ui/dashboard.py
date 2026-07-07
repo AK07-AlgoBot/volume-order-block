@@ -436,7 +436,11 @@ def render_breakout_strategy_panel(index_code: str) -> None:
     meta = []
     if bo.get("session_open") is not None:
         src = str(bo.get("session_open_source") or "")
-        src_label = "candle" if src == "candle" else ("LTP*" if src == "ltp_provisional" else src)
+        src_label = {
+            "candle": "candle",
+            "day_ohlc": "NSE day",
+            "ltp_provisional": "LTP*",
+        }.get(src, src)
         meta.append(f"9:15 open {fmt(float(bo['session_open']))} ({src_label})")
     if bo.get("prev_close") is not None:
         meta.append(f"prev close {fmt(float(bo['prev_close']))}")

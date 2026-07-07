@@ -88,6 +88,12 @@ FLAT_GAP_PCT: Final[float] = 0.10
 # Pine BLR line tweaks (index points). RED=-3 lowers red line; GREEN=+3 raises green.
 GREEN_OFFSET: Final[float] = float(os.environ.get("BREAKOUT_GREEN_OFFSET", "0"))
 RED_OFFSET: Final[float] = float(os.environ.get("BREAKOUT_RED_OFFSET", "0"))
+# Wait for NSE day OHLC / 5m candle open; do not lock BLR on live LTP before 9:15 bar exists.
+ALLOW_PROVISIONAL_LTP: Final[bool] = os.environ.get("BREAKOUT_ALLOW_PROVISIONAL_LTP", "0").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+)
 
 
 def _parse_ist_time(env_key: str, default_hour: int, default_minute: int) -> dtime:
@@ -486,6 +492,13 @@ class BreakoutMarketClient:
         )
         return parse_v3_intraday_candles(data, datetime.now(IST))
 
+    def get_session_day_open(self, cfg: IndexConfig) -> float | None:
+        if MOCK_MODE:
+            return self._mock_spots.get(cfg.code)
+        if not self._upstox:
+            return None
+        return self._upstox.get_index_day_open(cfg.spot_instrument_key)
+
     def get_previous_day_ohlc(self, cfg: IndexConfig) -> dict[str, float] | None:
         if MOCK_MODE:
             spot = self._mock_spots.get(cfg.code, 23_100.0)
@@ -733,6 +746,59 @@ class BreakoutEngine:
 
         self._publish_state(state, now, entries_blocked, block_reason)
 
+    _SESSION_OPEN_RANK: Final[dict[str, int]] = {
+        "ltp_provisional": 0,
+        "candle": 1,
+        "day_ohlc": 2,
+    }
+
+    def _session_open_source_rank(self, source: str) -> int:
+        return self._SESSION_OPEN_RANK.get(source, -1)
+
+    def _best_session_open(
+        self,
+        state: IndexBreakoutState,
+        candles: list[dict[str, float]],
+        now: datetime,
+        spot: float | None,
+    ) -> tuple[float | None, str]:
+        """Best available 9:15 open: NSE day OHLC (TV parity) > 5m candle > optional LTP."""
+        if now.time() < SESSION_START:
+            return None, ""
+
+        day_open = self.client.get_session_day_open(state.config)
+        candle_open: float | None = None
+        first = self._first_session_candle(candles, now.date())
+        if first is not None:
+            candle_open = float(first["open"])
+
+        if day_open is not None and candle_open is not None and abs(day_open - candle_open) >= 0.5:
+            logger.info(
+                "[%s] session open day_ohlc=%.2f vs 5m candle=%.2f — using day_ohlc",
+                state.config.code,
+                day_open,
+                candle_open,
+            )
+
+        if day_open is not None:
+            return day_open, "day_ohlc"
+        if candle_open is not None:
+            return candle_open, "candle"
+        if ALLOW_PROVISIONAL_LTP and spot is not None:
+            return spot, "ltp_provisional"
+        return None, ""
+
+    def _should_upgrade_session_open(
+        self,
+        cur_source: str,
+        cur_open: float,
+        new_open: float,
+        new_source: str,
+    ) -> bool:
+        if self._session_open_source_rank(new_source) <= self._session_open_source_rank(cur_source):
+            return False
+        return abs(new_open - cur_open) >= 0.01
+
     def _resolve_session_open(
         self,
         state: IndexBreakoutState,
@@ -740,21 +806,9 @@ class BreakoutEngine:
         now: datetime,
         spot: float | None,
     ) -> tuple[float | None, str]:
-        """Match Pine: prefer 9:15 5m candle OPEN; LTP only until that bar exists."""
         if state.session_open is not None:
             return state.session_open, state.session_open_source or "frozen"
-
-        if now.time() < SESSION_START:
-            return None, ""
-
-        first = self._first_session_candle(candles, now.date())
-        if first is not None:
-            return float(first["open"]), "candle"
-
-        if spot is not None:
-            return spot, "ltp_provisional"
-
-        return None, ""
+        return self._best_session_open(state, candles, now, spot)
 
     def _first_session_candle(self, candles: list[dict[str, float]], day: date) -> dict[str, float] | None:
         for candle in candles:
@@ -796,7 +850,12 @@ class BreakoutEngine:
         state.band_half = levels.band_half
         state.band_half_pct = levels.band_half_pct
         state.levels_ready = True
-        src_note = "9:15 candle open" if open_source == "candle" else "provisional LTP"
+        src_notes = {
+            "candle": "9:15 candle open",
+            "day_ohlc": "NSE day open",
+            "ltp_provisional": "provisional LTP",
+        }
+        src_note = src_notes.get(open_source, open_source or "session open")
         base_label = (
             f"BLR locked — G {levels.green:.2f} / M {levels.mid:.2f} / R {levels.red:.2f} "
             f"({levels.gap_regime} · {levels.band_half_pct:.3f}% half · {src_note} {opening_915:.2f})"
@@ -825,37 +884,26 @@ class BreakoutEngine:
         spot: float | None,
     ) -> None:
         if state.levels_ready:
-            first = self._first_session_candle(candles, now.date())
-            if first is not None and state.session_open_source == "ltp_provisional":
-                candle_open = float(first["open"])
-                if abs(candle_open - (state.session_open or 0)) >= 0.01:
-                    logger.info(
-                        "[%s] Re-locking BLR from 9:15 candle open %.2f (was LTP %.2f)",
-                        state.config.code,
-                        candle_open,
-                        state.session_open or 0,
-                    )
-                    state.levels_ready = False
-                    state.session_open = None
-                    state.session_open_source = ""
-                    state.mid = state.green = state.red = None
-                elif first and state.day_review == "PENDING":
-                    close = float(first["close"])
-                    state.first_candle_close = close
-                    if state.mid is not None:
-                        state.day_review = day_review_from_first_close(close, state.mid)
-                        state.setup_label = (
-                            f"Review {state.day_review} side "
-                            f"(1st 5m close {close:.2f} vs mid {state.mid:.2f})"
-                        )
-                        msg = (
-                            f"{state.config.display} day review={state.day_review} "
-                            f"(1st 5m {close:.2f} vs mid {state.mid:.2f})"
-                        )
-                        state.signal_log.append(msg)
-                        logger.info(msg)
-
-            if state.levels_ready:
+            best_open, best_source = self._best_session_open(state, candles, now, spot)
+            cur_open = state.session_open or 0.0
+            cur_source = state.session_open_source or ""
+            if best_open is not None and self._should_upgrade_session_open(
+                cur_source, cur_open, best_open, best_source
+            ):
+                logger.info(
+                    "[%s] Re-locking BLR from %s %.2f -> %s %.2f",
+                    state.config.code,
+                    cur_source or "unknown",
+                    cur_open,
+                    best_source,
+                    best_open,
+                )
+                state.levels_ready = False
+                state.session_open = None
+                state.session_open_source = ""
+                state.mid = state.green = state.red = None
+            else:
+                first = self._first_session_candle(candles, now.date())
                 if first and state.day_review == "PENDING":
                     close = float(first["close"])
                     state.first_candle_close = close
@@ -875,7 +923,7 @@ class BreakoutEngine:
 
         opening_915, open_source = self._resolve_session_open(state, candles, now, spot)
         if opening_915 is None:
-            state.setup_label = "Waiting for 9:15 open (5m candle or live LTP)"
+            state.setup_label = "Waiting for 9:15 open (NSE day OHLC or 5m candle)"
             return
 
         prev = self.client.get_previous_day_ohlc(state.config)
