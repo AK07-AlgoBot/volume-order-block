@@ -1415,6 +1415,7 @@ class BreakoutEngine:
                 "option_type": pos.option_type,
                 "entry_reason": pos.entry_reason,
                 "opened_at": pos.opened_at,
+                "order_legs": pos.order_legs,
             }
         key = cache_manager.BREAKOUT_STATE_KEY_TEMPLATE.format(index=state.config.code)
         cache_manager.set_json(key, payload, ttl_seconds=86_400)

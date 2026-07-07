@@ -473,13 +473,37 @@ def render_breakout_strategy_panel(index_code: str) -> None:
             ot = bo_pos.get("option_type", "")
             contract = f"{strike}{ot}" if strike and ot else ""
         p1.metric("Direction", bo_pos.get("direction", "—"), delta=contract or None, delta_color="off")
-        p2.metric("Entry (spot)", fmt(float(bo_pos.get("entry_price", 0))))
+        entry = float(bo_pos.get("entry_price", 0))
+        p2.metric("Entry (spot)", fmt(entry))
         tp_pts = bo.get("tp1_points")
-        tp_label = f"TP1 ({int(tp_pts)}pt book)" if tp_pts else "TP1 (book)"
+        tp_label = f"TP1 ({int(tp_pts)}pt)" if tp_pts else "TP1"
         p3.metric(tp_label, fmt(float(bo_pos.get("tp1_price", 0))))
-        p4.metric("TP2 (2× ref)", fmt(float(bo_pos.get("tp2_price", 0))))
-        p5.metric("Stop-Loss", fmt(float(bo_pos.get("sl_price", 0))))
+        p4.metric("Stop-Loss", fmt(float(bo_pos.get("sl_price", 0))))
+        spot = bo.get("spot")
+        if spot is not None:
+            live_pnl = (
+                float(spot) - entry
+                if bo_pos.get("direction") == "LONG"
+                else entry - float(spot)
+            )
+            p5.metric("Live P&L (pts)", f"{live_pnl:+.2f}")
+        else:
+            p5.metric("Live P&L (pts)", "—")
         p6.metric("Reason", str(bo_pos.get("entry_reason", "—"))[:18])
+        legs = bo_pos.get("order_legs") or []
+        if legs:
+            with st.expander("Broker execution legs", expanded=True):
+                for leg in legs:
+                    if not isinstance(leg, dict):
+                        continue
+                    user = leg.get("username", "?")
+                    broker = leg.get("broker", "?")
+                    oid = leg.get("groww_order_id") or leg.get("upstox_order_id") or "—"
+                    sym = leg.get("contract_label") or leg.get("trading_symbol") or leg.get("groww_symbol") or ""
+                    st.markdown(
+                        f"**{user}** @{broker} · {sym} · order `{oid}`"
+                    )
+        st.caption(str(bo_pos.get("entry_reason", "")))
     else:
         st.caption(f"Flat — no breakout position (1 lot · Nifty futures · max {bo.get('max_trades', 3)}/day).")
 
@@ -492,7 +516,8 @@ def render_breakout_strategy_panel(index_code: str) -> None:
     updated = str(bo.get("updated_at", ""))[:19].replace("T", " ")
     st.markdown(
         f'<p class="ak07-muted-line">Breakout state updated {updated} · trades today '
-        f'{bo.get("trades_today", 0)}/{bo.get("max_trades", 3)}</p>',
+        f'{bo.get("trades_today", 0)}/{bo.get("max_trades", 3)} · '
+        f'top-bar ₹ P&L is Upstox-only (Groww users: use Groww app or check script)</p>',
         unsafe_allow_html=True,
     )
 

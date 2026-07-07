@@ -184,6 +184,27 @@ class GrowwClient:
             logger.warning("[%s] Groww POST %s error: %s", self.username, path, exc)
             return None
 
+    def get_fno_positions(self) -> list[dict[str, Any]]:
+        """Open FNO positions from Groww portfolio API."""
+        payload = self._get("/v1/positions/user", {"segment": "FNO"})
+        if not isinstance(payload, dict):
+            return []
+        rows = payload.get("positions") or []
+        if not isinstance(rows, list):
+            return []
+        open_rows: list[dict[str, Any]] = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            qty = int(row.get("quantity") or row.get("net_quantity") or 0)
+            if qty == 0:
+                cf = int(row.get("net_carry_forward_quantity") or 0)
+                if cf == 0:
+                    continue
+                qty = cf
+            open_rows.append(row)
+        return open_rows
+
     def get_index_future_contract(self, index_code: str) -> dict[str, Any] | None:
         """Nearest-expiry index future for Groww order placement."""
         code = index_code.upper()
