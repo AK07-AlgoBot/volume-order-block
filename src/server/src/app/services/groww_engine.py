@@ -38,10 +38,11 @@ _INDEX_UNDERLYING: Final[dict[str, tuple[str, str]]] = {
 
 
 def _order_reference_id(username: str) -> str:
-    safe = re.sub(r"[^a-zA-Z0-9-]", "", username)[:8] or "user"
-    ts = int(time.time()) % 100_000_000
-    ref = f"ak07-s3-{safe}-{ts}"
-    return ref[:20]
+    """Groww: 8–20 chars, alphanumeric, at most two hyphens (GA001 if violated)."""
+    safe = re.sub(r"[^a-zA-Z0-9]", "", username)[:6] or "user"
+    ts = int(time.time()) % 10_000_000
+    ref = f"ak07s3{safe}{ts}"
+    return ref[:20] if len(ref) >= 8 else ref.ljust(8, "0")[:20]
 
 
 def _ensure_groww_csv() -> bool:
