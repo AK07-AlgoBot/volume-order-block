@@ -441,7 +441,12 @@ def render_breakout_strategy_panel(index_code: str) -> None:
             "day_ohlc": "NSE day",
             "ltp_provisional": "LTP*",
         }.get(src, src)
-        meta.append(f"9:15 open {fmt(float(bo['session_open']))} ({src_label})")
+        open_txt = fmt(float(bo["session_open"]))
+        broker = bo.get("broker_session_open")
+        tv_off = float(bo.get("session_open_tv_offset") or 0)
+        if broker is not None and tv_off:
+            open_txt = f"{open_txt} (Upstox {fmt(float(broker))} + {tv_off:+.0f} TV)"
+        meta.append(f"9:15 open {open_txt} ({src_label})")
     if bo.get("prev_close") is not None:
         meta.append(f"prev close {fmt(float(bo['prev_close']))}")
     if bo.get("gap_regime"):

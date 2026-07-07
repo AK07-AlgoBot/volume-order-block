@@ -96,6 +96,14 @@ ALLOW_PROVISIONAL_LTP: Final[bool] = os.environ.get("BREAKOUT_ALLOW_PROVISIONAL_
 )
 
 
+def session_open_offset_pts(index_code: str) -> float:
+    """Shift 9:15 open to match TradingView when broker feed differs (e.g. NIFTY ~+7)."""
+    specific = os.environ.get(f"BREAKOUT_SESSION_OPEN_OFFSET_{index_code}", "").strip()
+    if specific:
+        return float(specific)
+    return float(os.environ.get("BREAKOUT_SESSION_OPEN_OFFSET_PTS", "0") or "0")
+
+
 def _parse_ist_time(env_key: str, default_hour: int, default_minute: int) -> dtime:
     raw = (os.environ.get(env_key) or "").strip()
     if raw:
@@ -190,6 +198,8 @@ class IndexBreakoutState:
     band_half: float | None = None
     band_half_pct: float | None = None
     session_open: float | None = None
+    broker_session_open: float | None = None
+    session_open_tv_offset: float = 0.0
     session_open_source: str = ""
     prev_close: float | None = None
     levels_ready: bool = False
@@ -703,6 +713,8 @@ class BreakoutEngine:
                 state.levels_ready = False
                 state.mid = state.green = state.red = None
                 state.session_open = None
+                state.broker_session_open = None
+                state.session_open_tv_offset = 0.0
                 state.session_open_source = ""
                 state.prev_close = None
                 state.band_half = state.band_half_pct = None
@@ -806,8 +818,8 @@ class BreakoutEngine:
         now: datetime,
         spot: float | None,
     ) -> tuple[float | None, str]:
-        if state.session_open is not None:
-            return state.session_open, state.session_open_source or "frozen"
+        if state.broker_session_open is not None:
+            return state.broker_session_open, state.session_open_source or "frozen"
         return self._best_session_open(state, candles, now, spot)
 
     def _first_session_candle(self, candles: list[dict[str, float]], day: date) -> dict[str, float] | None:
@@ -832,15 +844,20 @@ class BreakoutEngine:
         open_source: str,
         prev: dict[str, float],
     ) -> None:
+        broker_open = opening_915
+        tv_offset = session_open_offset_pts(state.config.code)
+        effective_open = broker_open + tv_offset
         levels = compute_blr_levels(
             prev["open"],
             prev["high"],
             prev["low"],
             prev["close"],
-            opening_915,
+            effective_open,
             state.config.code,
         )
-        state.session_open = opening_915
+        state.broker_session_open = broker_open
+        state.session_open_tv_offset = tv_offset
+        state.session_open = effective_open
         state.session_open_source = open_source
         state.prev_close = prev["close"]
         state.mid = levels.mid
@@ -856,23 +873,25 @@ class BreakoutEngine:
             "ltp_provisional": "provisional LTP",
         }
         src_note = src_notes.get(open_source, open_source or "session open")
+        open_note = f"{src_note} {broker_open:.2f}"
+        if tv_offset:
+            open_note = f"{open_note} + TV {tv_offset:+.2f} = {effective_open:.2f}"
         base_label = (
             f"BLR locked — G {levels.green:.2f} / M {levels.mid:.2f} / R {levels.red:.2f} "
-            f"({levels.gap_regime} · {levels.band_half_pct:.3f}% half · {src_note} {opening_915:.2f})"
+            f"({levels.gap_regime} · {levels.band_half_pct:.3f}% half · {open_note})"
         )
         state.setup_label = base_label
         state.signal_log.append(base_label)
         self._save_frozen_levels(state)
         logger.info(
-            "[%s] BLR locked — G %.2f / M %.2f / R %.2f (%s · %.3f%% half · %s %.2f · prevC %.2f)",
+            "[%s] BLR locked — G %.2f / M %.2f / R %.2f (%s · %.3f%% half · %s · prevC %.2f)",
             state.config.code,
             levels.green,
             levels.mid,
             levels.red,
             levels.gap_regime,
             levels.band_half_pct,
-            src_note,
-            opening_915,
+            open_note,
             prev["close"],
         )
 
@@ -885,21 +904,41 @@ class BreakoutEngine:
     ) -> None:
         if state.levels_ready:
             best_open, best_source = self._best_session_open(state, candles, now, spot)
-            cur_open = state.session_open or 0.0
+            cur_broker = state.broker_session_open
+            if cur_broker is None and state.session_open is not None:
+                cur_broker = state.session_open - state.session_open_tv_offset
+            cur_broker = cur_broker or 0.0
             cur_source = state.session_open_source or ""
+            tv_offset = session_open_offset_pts(state.config.code)
+            offset_changed = abs(tv_offset - state.session_open_tv_offset) >= 0.01
             if best_open is not None and self._should_upgrade_session_open(
-                cur_source, cur_open, best_open, best_source
+                cur_source, cur_broker, best_open, best_source
             ):
                 logger.info(
                     "[%s] Re-locking BLR from %s %.2f -> %s %.2f",
                     state.config.code,
                     cur_source or "unknown",
-                    cur_open,
+                    cur_broker,
                     best_source,
                     best_open,
                 )
                 state.levels_ready = False
                 state.session_open = None
+                state.broker_session_open = None
+                state.session_open_tv_offset = 0.0
+                state.session_open_source = ""
+                state.mid = state.green = state.red = None
+            elif offset_changed:
+                logger.info(
+                    "[%s] Re-locking BLR — TV offset %.2f -> %.2f",
+                    state.config.code,
+                    state.session_open_tv_offset,
+                    tv_offset,
+                )
+                state.levels_ready = False
+                state.session_open = None
+                state.broker_session_open = None
+                state.session_open_tv_offset = 0.0
                 state.session_open_source = ""
                 state.mid = state.green = state.red = None
             else:
@@ -1011,6 +1050,8 @@ class BreakoutEngine:
                 "band_half": state.band_half,
                 "band_half_pct": state.band_half_pct,
                 "session_open": state.session_open,
+                "broker_session_open": state.broker_session_open,
+                "session_open_tv_offset": state.session_open_tv_offset,
                 "session_open_source": state.session_open_source,
                 "prev_close": state.prev_close,
                 "day_review": state.day_review,
@@ -1032,6 +1073,13 @@ class BreakoutEngine:
         state.band_half = frozen.get("band_half")
         state.band_half_pct = frozen.get("band_half_pct")
         state.session_open = frozen.get("session_open")
+        if frozen.get("broker_session_open") is not None:
+            state.broker_session_open = float(frozen["broker_session_open"])
+        elif state.session_open is not None:
+            state.broker_session_open = float(state.session_open) - float(
+                frozen.get("session_open_tv_offset") or 0
+            )
+        state.session_open_tv_offset = float(frozen.get("session_open_tv_offset") or 0)
         state.session_open_source = str(frozen.get("session_open_source") or "frozen")
         state.prev_close = frozen.get("prev_close")
         state.day_review = str(frozen.get("day_review") or state.day_review)
@@ -1334,6 +1382,8 @@ class BreakoutEngine:
             "fixed_sl_pts": FIXED_SL_PTS,
             "fixed_tp_pts": FIXED_TP_PTS,
             "session_open": state.session_open,
+            "broker_session_open": state.broker_session_open,
+            "session_open_tv_offset": state.session_open_tv_offset,
             "session_open_source": state.session_open_source,
             "prev_close": state.prev_close,
             "levels_ready": state.levels_ready,

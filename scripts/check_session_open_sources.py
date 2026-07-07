@@ -28,6 +28,7 @@ from app.services.breakout_engine import (  # noqa: E402
     SESSION_START,
     compute_blr_levels,
     parse_v3_intraday_candles,
+    session_open_offset_pts,
 )
 from app.services.upstox_engine import UpstoxClient, build_upstox_client  # noqa: E402
 
@@ -73,19 +74,37 @@ def main() -> None:
         print("Previous day OHLC unavailable — cannot compute BLR preview")
         return
     print(f"Prev close: {prev['close']:.2f}")
-    for label, src, opening in (
-        ("day_ohlc (live engine)", "day_ohlc", day_open),
-        ("5m candle (old engine)", "candle", candle_open),
-        ("LTP", "ltp", ltp),
+    tv_offset = session_open_offset_pts(cfg.code)
+    if tv_offset:
+        print(f"TV offset env     : {tv_offset:+.2f} pts (BREAKOUT_SESSION_OPEN_OFFSET_{cfg.code})")
+    else:
+        print("TV offset env     : 0 (set BREAKOUT_SESSION_OPEN_OFFSET_NIFTY=7 for TV parity)")
+    print()
+    for label, opening in (
+        ("day_ohlc (Upstox)", day_open),
+        ("5m candle (Upstox)", candle_open),
     ):
         if opening is None:
             continue
+        raw = float(opening)
+        effective = raw + tv_offset
         levels = compute_blr_levels(
-            prev["open"], prev["high"], prev["low"], prev["close"], float(opening), cfg.code
+            prev["open"], prev["high"], prev["low"], prev["close"], effective, cfg.code
+        )
+        suffix = f"raw {raw:.2f}" if tv_offset else f"open {raw:.2f}"
+        if tv_offset:
+            suffix = f"{suffix} + TV {tv_offset:+.2f} = {effective:.2f}"
+        print(
+            f"BLR [{label}] G {levels.green:.2f} / M {levels.mid:.2f} / R {levels.red:.2f} ({suffix})"
+        )
+    if day_open is not None:
+        tv_mid = float(day_open) + 7.0
+        levels_tv = compute_blr_levels(
+            prev["open"], prev["high"], prev["low"], prev["close"], tv_mid, cfg.code
         )
         print(
-            f"BLR [{label}] G {levels.green:.2f} / M {levels.mid:.2f} / R {levels.red:.2f} "
-            f"(open {float(opening):.2f})"
+            f"BLR [TV ref +7]     G {levels_tv.green:.2f} / M {levels_tv.mid:.2f} / "
+            f"R {levels_tv.red:.2f} (if TV open ~{tv_mid:.2f})"
         )
 
 
