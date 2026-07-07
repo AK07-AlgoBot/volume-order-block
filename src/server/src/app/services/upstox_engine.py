@@ -294,6 +294,8 @@ def _row_is_index_future(row: dict[str, Any], index_code: str) -> bool:
     prefix = _INDEX_FUTURE_SYMBOL_PREFIX.get(code, code)
     if not sym.startswith(prefix):
         return False
+    if code == "NIFTY" and ("NXT" in sym or sym.startswith("FINNIFTY") or sym.startswith("MIDCPNIFTY")):
+        return False
     if sym.endswith("CE") or sym.endswith("PE"):
         return False
     return bool(str(row.get("instrument_key") or ""))
@@ -993,11 +995,11 @@ def _index_code_for_spot_key(instrument_key: str) -> str | None:
     return None
 
 
-def build_upstox_client() -> UpstoxClient:
+def build_upstox_client(username: str = "AK07") -> UpstoxClient:
     if MOCK_MODE:
         logger.info("AK07_MOCK=1 -> using MockUpstoxClient (simulated V3 feed)")
         return MockUpstoxClient()
-    return UpstoxClient()
+    return UpstoxClient(username=username)
 
 
 # ---------------------------------------------------------------------------
