@@ -175,11 +175,11 @@ def main() -> None:
         gap = candle_open - tv_mid
         print()
         print(f"TV mid reference    : {tv_mid:.2f}")
-        print(f"Engine mid gap      : {gap:+.2f} pts (Upstox 9:15 open − TV mid)")
-        if candle_close_915 is not None and abs(candle_close_915 - tv_mid) < abs(gap):
+        print(f"Upstox 9:15 open gap: {gap:+.2f} pts (auction/day open − TV first tick)")
+        if bar_1m_915 and abs(float(bar_1m_915["close"]) - float(tv_mid)) > abs(gap):
             print(
-                f"Hint: TV mid is closer to 9:15 bar CLOSE ({candle_close_915:.2f}) "
-                f"than OPEN ({candle_open:.2f}) — check TV Data Window on 9:15 bar."
+                f"Note: Upstox 1m close ({float(bar_1m_915['close']):.2f}) matches TV; "
+                f"only OPEN differs — Upstox uses NSE auction open, TV uses first trade."
             )
 
 

@@ -95,6 +95,17 @@ ALLOW_PROVISIONAL_LTP: Final[bool] = os.environ.get("BREAKOUT_ALLOW_PROVISIONAL_
     "true",
     "yes",
 )
+# Upstox candle/day OHLC open = NSE official auction price; TV uses first regular-session tick.
+# Capture live LTP in the first ~2 minutes after 9:15 for Pine parity (sessionOpen := open).
+SESSION_OPEN_TICK_WINDOW_SEC: Final[int] = int(
+    os.environ.get("BREAKOUT_SESSION_OPEN_TICK_WINDOW_SEC", "120")
+)
+SESSION_OPEN_TICK_WAIT: Final[bool] = os.environ.get(
+    "BREAKOUT_SESSION_OPEN_WAIT_FOR_TICK", "1"
+).strip().lower() in ("1", "true", "yes")
+SESSION_OPEN_POLL_SECONDS: Final[float] = float(
+    os.environ.get("BREAKOUT_SESSION_OPEN_POLL_SECONDS", "1")
+)
 
 
 def _prior_session_last_5m_close(
@@ -222,6 +233,7 @@ class IndexBreakoutState:
     broker_session_open: float | None = None
     session_open_tv_offset: float = 0.0
     session_open_source: str = ""
+    session_open_tick: float | None = None
     prev_close: float | None = None
     levels_ready: bool = False
     day_review: str = "PENDING"
@@ -683,6 +695,11 @@ class BreakoutEngine:
                 "Set BREAKOUT_ENTRIES_ENABLED=1 to trade."
             )
 
+    def _poll_interval_seconds(self, now: datetime) -> float:
+        if self._in_session_open_capture_window(now):
+            return SESSION_OPEN_POLL_SECONDS
+        return POLL_SECONDS
+
     def run(self) -> None:
         while True:
             started = time.monotonic()
@@ -690,7 +707,9 @@ class BreakoutEngine:
                 self.tick()
             except Exception as exc:
                 logger.exception("Breakout tick failed: %s", exc)
-            time.sleep(max(1.0, POLL_SECONDS - (time.monotonic() - started)))
+            now = datetime.now(IST)
+            interval = self._poll_interval_seconds(now)
+            time.sleep(max(0.5, interval - (time.monotonic() - started)))
 
     def tick(self) -> None:
         now = datetime.now(IST)
@@ -787,6 +806,7 @@ class BreakoutEngine:
                 state.broker_session_open = None
                 state.session_open_tv_offset = 0.0
                 state.session_open_source = ""
+                state.session_open_tick = None
                 state.prev_close = None
                 state.band_half = state.band_half_pct = None
                 state.gap_regime = ""
@@ -811,6 +831,8 @@ class BreakoutEngine:
         spot = self.client.get_spot(cfg)
         if spot is not None:
             state.spot = spot
+        self._restore_session_open_tick(state, now)
+        self._maybe_capture_session_open_tick(state, now, spot)
 
         candles = self.client.get_5m_candles(cfg) or []
         self._refresh_levels(state, candles, now, spot)
@@ -834,7 +856,61 @@ class BreakoutEngine:
         "ltp_provisional": 0,
         "day_ohlc": 1,
         "candle": 2,
+        "first_ltp": 3,
     }
+
+    def _session_open_capture_deadline(self, day: date) -> datetime:
+        return datetime.combine(day, SESSION_START, tzinfo=IST) + timedelta(
+            seconds=SESSION_OPEN_TICK_WINDOW_SEC
+        )
+
+    def _in_session_open_capture_window(self, now: datetime) -> bool:
+        if now.time() < SESSION_START:
+            return False
+        return now < self._session_open_capture_deadline(now.date())
+
+    def _open_tick_key(self, day: str, index_code: str) -> str:
+        return cache_manager.BREAKOUT_OPEN_TICK_KEY_TEMPLATE.format(day=day, index=index_code)
+
+    def _restore_session_open_tick(self, state: IndexBreakoutState, now: datetime) -> None:
+        if state.session_open_tick is not None:
+            return
+        day = state.trade_day or now.date().isoformat()
+        raw = cache_manager.get_json(self._open_tick_key(day, state.config.code))
+        if isinstance(raw, dict) and raw.get("price") is not None:
+            state.session_open_tick = float(raw["price"])
+
+    def _save_session_open_tick(self, state: IndexBreakoutState, now: datetime) -> None:
+        if state.session_open_tick is None:
+            return
+        day = state.trade_day or now.date().isoformat()
+        cache_manager.set_json(
+            self._open_tick_key(day, state.config.code),
+            {
+                "price": state.session_open_tick,
+                "captured_at": now.isoformat(),
+            },
+            ttl_seconds=86_400 * 2,
+        )
+
+    def _maybe_capture_session_open_tick(
+        self,
+        state: IndexBreakoutState,
+        now: datetime,
+        spot: float | None,
+    ) -> None:
+        if state.session_open_tick is not None or spot is None:
+            return
+        if not self._in_session_open_capture_window(now):
+            return
+        state.session_open_tick = float(spot)
+        self._save_session_open_tick(state, now)
+        logger.info(
+            "[%s] session open first LTP captured %.2f at %s (TV parity tick)",
+            state.config.code,
+            state.session_open_tick,
+            now.strftime("%H:%M:%S"),
+        )
 
     def _best_session_open(
         self,
@@ -843,9 +919,12 @@ class BreakoutEngine:
         now: datetime,
         spot: float | None,
     ) -> tuple[float | None, str]:
-        """Pine parity: 9:15 5m candle OPEN (same as TradingView sessionOpen := open)."""
+        """Pine parity: first regular-session tick at 9:15 (TV open), not Upstox auction day open."""
         if now.time() < SESSION_START:
             return None, ""
+
+        if state.session_open_tick is not None:
+            return state.session_open_tick, "first_ltp"
 
         first = self._first_session_candle(candles, now.date())
         if first is not None:
@@ -927,6 +1006,7 @@ class BreakoutEngine:
         state.levels_ready = True
         src_notes = {
             "candle": "9:15 candle open",
+            "first_ltp": "9:15 first tick",
             "day_ohlc": "NSE day open",
             "ltp_provisional": "provisional LTP",
         }
@@ -1007,7 +1087,15 @@ class BreakoutEngine:
 
         opening_915, open_source = self._resolve_session_open(state, candles, now, spot)
         if opening_915 is None:
-            state.setup_label = "Waiting for 9:15 open (NSE day OHLC or 5m candle)"
+            state.setup_label = "Waiting for 9:15 open (first tick or 5m candle)"
+            return
+        if (
+            SESSION_OPEN_TICK_WAIT
+            and open_source == "candle"
+            and state.session_open_tick is None
+            and self._in_session_open_capture_window(now)
+        ):
+            state.setup_label = "Waiting for 9:15 first tick (Upstox candle uses NSE auction open)"
             return
 
         prev = self.client.get_previous_day_ohlc(state.config)
