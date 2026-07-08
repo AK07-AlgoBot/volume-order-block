@@ -463,9 +463,8 @@ def render_breakout_strategy_panel(index_code: str) -> None:
         }.get(src, src)
         open_txt = fmt(float(bo["session_open"]))
         broker_session_open = bo.get("broker_session_open")
-        tv_off = float(bo.get("session_open_tv_offset") or 0)
-        if broker_session_open is not None and tv_off:
-            open_txt = f"{open_txt} (Upstox {fmt(float(broker_session_open))} + {tv_off:+.0f} TV)"
+        if broker_session_open is not None and abs(float(broker_session_open) - float(bo["session_open"])) >= 0.01:
+            open_txt = f"{open_txt} (5m open {fmt(float(broker_session_open))})"
         meta.append(f"9:15 open {open_txt} ({src_label})")
     if bo.get("prev_close") is not None:
         meta.append(f"prev close {fmt(float(bo['prev_close']))}")

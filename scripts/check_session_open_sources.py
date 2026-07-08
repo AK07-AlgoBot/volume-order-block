@@ -26,11 +26,11 @@ from app.services.breakout_engine import (  # noqa: E402
     INDEX_CONFIGS,
     IST,
     SESSION_START,
+    BreakoutMarketClient,
     compute_blr_levels,
     parse_v3_intraday_candles,
-    session_open_offset_pts,
 )
-from app.services.upstox_engine import UpstoxClient, build_upstox_client  # noqa: E402
+from app.services.upstox_engine import build_upstox_client  # noqa: E402
 
 
 def main() -> None:
@@ -49,7 +49,7 @@ def main() -> None:
 
     day_open = client.get_index_day_open(key)
     ltp = client.get_ltp(key)
-    print(f"NSE day OHLC open : {day_open if day_open is not None else '—'}")
+    print(f"NSE day OHLC open : {day_open if day_open is not None else '—'}  (NOT used — TV uses 5m open)")
     print(f"LTP               : {ltp if ltp is not None else '—'}")
 
     v3_base = client.base_url.replace("/v2", "/v3")
@@ -64,81 +64,32 @@ def main() -> None:
         if ts.date() == now.date() and ts.time() == SESSION_START:
             candle_open = float(candle["open"])
             break
-    print(f"9:15 5m candle open: {candle_open if candle_open is not None else '—'}")
+    print(f"9:15 5m candle open: {candle_open if candle_open is not None else '—'}  (engine + TV)")
     if day_open is not None and candle_open is not None:
         print(f"day vs candle diff : {day_open - candle_open:+.2f} pts")
     print()
 
-    prev = _prev_day_ohlc(client, key)
+    market = BreakoutMarketClient()
+    prev = market.get_previous_day_ohlc(cfg)
     if prev is None:
         print("Previous day OHLC unavailable — cannot compute BLR preview")
         return
-    print(f"Prev close: {prev['close']:.2f}")
-    tv_offset = session_open_offset_pts(cfg.code)
-    if tv_offset:
-        print(f"TV offset env     : {tv_offset:+.2f} pts (BREAKOUT_SESSION_OPEN_OFFSET_{cfg.code})")
-    else:
-        print("TV offset env     : 0 (set BREAKOUT_SESSION_OPEN_OFFSET_NIFTY=7 for TV parity)")
+    prev_src = prev.get("prev_close_source", "daily")
+    print(f"Prev close: {prev['close']:.2f} ({prev_src})")
     print()
     for label, opening in (
-        ("day_ohlc (Upstox)", day_open),
-        ("5m candle (Upstox)", candle_open),
+        ("5m candle (live engine)", candle_open),
+        ("day_ohlc (ignored)", day_open),
     ):
         if opening is None:
             continue
-        raw = float(opening)
-        effective = raw + tv_offset
         levels = compute_blr_levels(
-            prev["open"], prev["high"], prev["low"], prev["close"], effective, cfg.code
-        )
-        suffix = f"raw {raw:.2f}" if tv_offset else f"open {raw:.2f}"
-        if tv_offset:
-            suffix = f"{suffix} + TV {tv_offset:+.2f} = {effective:.2f}"
-        print(
-            f"BLR [{label}] G {levels.green:.2f} / M {levels.mid:.2f} / R {levels.red:.2f} ({suffix})"
-        )
-    if day_open is not None:
-        tv_mid = float(day_open) + 7.0
-        levels_tv = compute_blr_levels(
-            prev["open"], prev["high"], prev["low"], prev["close"], tv_mid, cfg.code
+            prev["open"], prev["high"], prev["low"], prev["close"], float(opening), cfg.code
         )
         print(
-            f"BLR [TV ref +7]     G {levels_tv.green:.2f} / M {levels_tv.mid:.2f} / "
-            f"R {levels_tv.red:.2f} (if TV open ~{tv_mid:.2f})"
+            f"BLR [{label}] G {levels.green:.2f} / M {levels.mid:.2f} / R {levels.red:.2f} "
+            f"(open {float(opening):.2f})"
         )
-
-
-def _prev_day_ohlc(client: UpstoxClient, instrument_key: str) -> dict[str, float] | None:
-    from datetime import date, timedelta
-
-    today = datetime.now(IST).date()
-    to_date = today - timedelta(days=1)
-    from_date = today - timedelta(days=14)
-    enc = quote(instrument_key, safe="")
-    v3_base = client.base_url.replace("/v2", "/v3")
-    data = client._get(f"{v3_base}/historical-candle/{enc}/days/1/{to_date}/{from_date}")  # noqa: SLF001
-    if not isinstance(data, dict):
-        return None
-    rows = data.get("candles") or []
-    best: dict[str, float] | None = None
-    best_day: date | None = None
-    for row in rows:
-        if not isinstance(row, (list, tuple)) or len(row) < 5:
-            continue
-        row_day = date.fromisoformat(str(row[0])[:10])
-        if row_day >= today:
-            continue
-        parsed = {
-            "date": row_day.isoformat(),
-            "open": float(row[1]),
-            "high": float(row[2]),
-            "low": float(row[3]),
-            "close": float(row[4]),
-        }
-        if best_day is None or row_day > best_day:
-            best_day = row_day
-            best = parsed
-    return best
 
 
 if __name__ == "__main__":

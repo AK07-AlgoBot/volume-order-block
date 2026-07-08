@@ -97,12 +97,32 @@ ALLOW_PROVISIONAL_LTP: Final[bool] = os.environ.get("BREAKOUT_ALLOW_PROVISIONAL_
 )
 
 
-def session_open_offset_pts(index_code: str) -> float:
-    """Shift 9:15 open to match TradingView when broker feed differs (e.g. NIFTY ~+7)."""
-    specific = os.environ.get(f"BREAKOUT_SESSION_OPEN_OFFSET_{index_code}", "").strip()
-    if specific:
-        return float(specific)
-    return float(os.environ.get("BREAKOUT_SESSION_OPEN_OFFSET_PTS", "0") or "0")
+def _prior_session_last_5m_close(
+    instrument_key: str,
+    prior_day: date,
+    *,
+    username: str = "AK07",
+) -> float | None:
+    """Last 5m body close of the prior session — matches TradingView daily close[1] on index."""
+    try:
+        from app.services.backtest_data import HistoricalDataClient, parse_candle_ts
+
+        client = HistoricalDataClient(username=username)
+        start = prior_day - timedelta(days=5)
+        candles = client.fetch_5m(instrument_key, start, prior_day, use_cache=True)
+        session_bars = [
+            c
+            for c in candles
+            if (ts := parse_candle_ts(c["timestamp"])).date() == prior_day
+            and SESSION_START <= ts.time() < SESSION_END
+        ]
+        if not session_bars:
+            return None
+        last_bar = max(session_bars, key=lambda c: c["timestamp"])
+        return float(last_bar["close"])
+    except Exception as exc:
+        logger.warning("prior session 5m close fetch failed for %s: %s", prior_day, exc)
+        return None
 
 
 def _parse_ist_time(env_key: str, default_hour: int, default_minute: int) -> dtime:
@@ -560,6 +580,23 @@ class BreakoutMarketClient:
                 best_day = row_day
                 best = parsed
         if best:
+            last_5m_close = _prior_session_last_5m_close(
+                cfg.spot_instrument_key,
+                best_day,
+            )
+            if last_5m_close is not None:
+                daily_close = float(best["close"])
+                best["close"] = last_5m_close
+                best["prev_close_source"] = "5m_last"
+                if abs(last_5m_close - daily_close) >= 0.01:
+                    logger.info(
+                        "[%s] prev close from last 5m bar %.2f (daily API %.2f)",
+                        cfg.code,
+                        last_5m_close,
+                        daily_close,
+                    )
+            else:
+                best["prev_close_source"] = "daily"
             logger.info("[%s] previous-day OHLC from %s", cfg.code, best_day)
             return best
         logger.warning("[%s] no prior session OHLC before %s in %d rows", cfg.code, today, len(rows))
@@ -795,12 +832,9 @@ class BreakoutEngine:
 
     _SESSION_OPEN_RANK: Final[dict[str, int]] = {
         "ltp_provisional": 0,
-        "candle": 1,
-        "day_ohlc": 2,
+        "day_ohlc": 1,
+        "candle": 2,
     }
-
-    def _session_open_source_rank(self, source: str) -> int:
-        return self._SESSION_OPEN_RANK.get(source, -1)
 
     def _best_session_open(
         self,
@@ -809,31 +843,23 @@ class BreakoutEngine:
         now: datetime,
         spot: float | None,
     ) -> tuple[float | None, str]:
-        """Best available 9:15 open: NSE day OHLC (TV parity) > 5m candle > optional LTP."""
+        """Pine parity: 9:15 5m candle OPEN (same as TradingView sessionOpen := open)."""
         if now.time() < SESSION_START:
             return None, ""
 
-        day_open = self.client.get_session_day_open(state.config)
-        candle_open: float | None = None
         first = self._first_session_candle(candles, now.date())
         if first is not None:
-            candle_open = float(first["open"])
+            return float(first["open"]), "candle"
 
-        if day_open is not None and candle_open is not None and abs(day_open - candle_open) >= 0.5:
-            logger.info(
-                "[%s] session open day_ohlc=%.2f vs 5m candle=%.2f — using day_ohlc",
-                state.config.code,
-                day_open,
-                candle_open,
-            )
-
+        day_open = self.client.get_session_day_open(state.config)
         if day_open is not None:
             return day_open, "day_ohlc"
-        if candle_open is not None:
-            return candle_open, "candle"
         if ALLOW_PROVISIONAL_LTP and spot is not None:
             return spot, "ltp_provisional"
         return None, ""
+
+    def _session_open_source_rank(self, source: str) -> int:
+        return self._SESSION_OPEN_RANK.get(source, -1)
 
     def _should_upgrade_session_open(
         self,
@@ -879,20 +905,17 @@ class BreakoutEngine:
         open_source: str,
         prev: dict[str, float],
     ) -> None:
-        broker_open = opening_915
-        tv_offset = session_open_offset_pts(state.config.code)
-        effective_open = broker_open + tv_offset
         levels = compute_blr_levels(
             prev["open"],
             prev["high"],
             prev["low"],
             prev["close"],
-            effective_open,
+            opening_915,
             state.config.code,
         )
-        state.broker_session_open = broker_open
-        state.session_open_tv_offset = tv_offset
-        state.session_open = effective_open
+        state.broker_session_open = opening_915
+        state.session_open_tv_offset = 0.0
+        state.session_open = opening_915
         state.session_open_source = open_source
         state.prev_close = prev["close"]
         state.mid = levels.mid
@@ -908,9 +931,11 @@ class BreakoutEngine:
             "ltp_provisional": "provisional LTP",
         }
         src_note = src_notes.get(open_source, open_source or "session open")
-        open_note = f"{src_note} {broker_open:.2f}"
-        if tv_offset:
-            open_note = f"{open_note} + TV {tv_offset:+.2f} = {effective_open:.2f}"
+        prev_src = str(prev.get("prev_close_source") or "daily")
+        prev_note = f"prevC {prev['close']:.2f}"
+        if prev_src == "5m_last":
+            prev_note = f"prevC {prev['close']:.2f} (last 5m)"
+        open_note = f"{src_note} {opening_915:.2f} · {prev_note}"
         base_label = (
             f"BLR locked — G {levels.green:.2f} / M {levels.mid:.2f} / R {levels.red:.2f} "
             f"({levels.gap_regime} · {levels.band_half_pct:.3f}% half · {open_note})"
@@ -944,8 +969,6 @@ class BreakoutEngine:
                 cur_broker = state.session_open - state.session_open_tv_offset
             cur_broker = cur_broker or 0.0
             cur_source = state.session_open_source or ""
-            tv_offset = session_open_offset_pts(state.config.code)
-            offset_changed = abs(tv_offset - state.session_open_tv_offset) >= 0.01
             if best_open is not None and self._should_upgrade_session_open(
                 cur_source, cur_broker, best_open, best_source
             ):
@@ -956,19 +979,6 @@ class BreakoutEngine:
                     cur_broker,
                     best_source,
                     best_open,
-                )
-                state.levels_ready = False
-                state.session_open = None
-                state.broker_session_open = None
-                state.session_open_tv_offset = 0.0
-                state.session_open_source = ""
-                state.mid = state.green = state.red = None
-            elif offset_changed:
-                logger.info(
-                    "[%s] Re-locking BLR — TV offset %.2f -> %.2f",
-                    state.config.code,
-                    state.session_open_tv_offset,
-                    tv_offset,
                 )
                 state.levels_ready = False
                 state.session_open = None
