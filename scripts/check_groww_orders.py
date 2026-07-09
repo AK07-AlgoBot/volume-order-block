@@ -63,7 +63,7 @@ def main() -> int:
             continue
         ref = str(row.get("order_reference_id") or "")
         created = str(row.get("created_at") or row.get("trade_date") or "")
-        if today in created or ref.startswith("ak07-s3"):
+        if today in created or ref.startswith("ak07s3") or ref.startswith("ak07-s3"):
             today_orders.append(row)
         else:
             other.append(row)
@@ -83,6 +83,7 @@ def main() -> int:
         avg = row.get("average_fill_price", "?")
         oid = row.get("groww_order_id", "?")
         ref = row.get("order_reference_id", "")
+        remark = str(row.get("remark") or "")
         created = row.get("created_at") or row.get("exchange_time") or ""
         print(
             f"{created}  {side:4}  {qty:>3} x {sym:<18}  "
@@ -90,8 +91,14 @@ def main() -> int:
         )
         if ref:
             print(f"           ref={ref}")
+        if remark and status.upper() in ("REJECTED", "FAILED", "CANCELLED"):
+            print(f"           reason={remark[:200]}")
 
-    s3 = [r for r in rows if str(r.get("order_reference_id") or "").startswith("ak07-s3")]
+    s3 = [
+        r
+        for r in rows
+        if str(r.get("order_reference_id") or "").startswith(("ak07s3", "ak07-s3"))
+    ]
     if s3:
         print(f"\nOK — {len(s3)} AK07 S3 order(s) found on Groww.")
     elif today_orders:

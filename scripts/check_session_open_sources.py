@@ -23,6 +23,7 @@ from app.config.paths import ensure_repo_and_lib_on_path  # noqa: E402
 
 ensure_repo_and_lib_on_path()
 
+from app.services import cache_manager  # noqa: E402
 from app.services.breakout_engine import (  # noqa: E402
     CANDLE_5M,
     INDEX_CONFIGS,
@@ -94,6 +95,29 @@ def main() -> None:
     print(f"Instrument: {key}")
     print()
 
+    tick_key = cache_manager.BREAKOUT_OPEN_TICK_KEY_TEMPLATE.format(day=today, index=cfg.code)
+    frozen_key = cache_manager.BREAKOUT_FROZEN_KEY_TEMPLATE.format(day=today, index=cfg.code)
+    state_key = cache_manager.BREAKOUT_STATE_KEY_TEMPLATE.format(index=cfg.code)
+    tick_raw = cache_manager.get_json(tick_key) or {}
+    frozen_raw = cache_manager.get_json(frozen_key) or {}
+    state_raw = cache_manager.get_json(state_key) or {}
+    if isinstance(tick_raw, dict) and tick_raw.get("price") is not None:
+        print(f"Redis open tick     : {float(tick_raw['price']):.2f}  captured {tick_raw.get('captured_at', '?')}")
+    if isinstance(frozen_raw, dict) and frozen_raw.get("mid") is not None:
+        print(
+            f"Redis frozen BLR    : G {float(frozen_raw.get('green', 0)):.2f} / "
+            f"M {float(frozen_raw['mid']):.2f} / R {float(frozen_raw.get('red', 0)):.2f}  "
+            f"source={frozen_raw.get('session_open_source', '?')}"
+        )
+    if isinstance(state_raw, dict) and state_raw.get("mid") is not None:
+        print(
+            f"Dashboard BLR       : G {float(state_raw.get('green', 0)):.2f} / "
+            f"M {float(state_raw['mid']):.2f} / R {float(state_raw.get('red', 0)):.2f}  "
+            f"source={state_raw.get('session_open_source', '?')}"
+        )
+    if isinstance(tick_raw, dict) or isinstance(frozen_raw, dict):
+        print()
+
     day_open = client.get_index_day_open(key)
     ltp = client.get_ltp(key)
     print(f"NSE day OHLC open : {day_open if day_open is not None else '—'}")
@@ -107,7 +131,7 @@ def main() -> None:
     candle_close_915 = float(bar_915["close"]) if bar_915 else None
     candle_open_920 = float(bar_920["open"]) if bar_920 else None
 
-    print(f"9:15 5m candle open : {candle_open if candle_open is not None else '—'}  (engine uses this)")
+    print(f"9:15 5m candle open : {candle_open if candle_open is not None else '—'}  (Upstox auction — NOT used if == day open)")
     if candle_close_915 is not None:
         print(f"9:15 5m candle close: {candle_close_915:.2f}  (first bar close @ ~9:20)")
     if candle_open_920 is not None:

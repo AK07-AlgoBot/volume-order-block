@@ -106,6 +106,13 @@ SESSION_OPEN_TICK_WAIT: Final[bool] = os.environ.get(
 SESSION_OPEN_POLL_SECONDS: Final[float] = float(
     os.environ.get("BREAKOUT_SESSION_OPEN_POLL_SECONDS", "1")
 )
+SESSION_OPEN_PRESTART_SEC: Final[int] = int(
+    os.environ.get("BREAKOUT_SESSION_OPEN_PRESTART_SEC", "10")
+)
+# Only accept LTP captured within this many seconds after 9:15 (TV 1m bar open).
+SESSION_OPEN_TICK_MAX_DELAY_SEC: Final[int] = int(
+    os.environ.get("BREAKOUT_SESSION_OPEN_TICK_MAX_DELAY_SEC", "45")
+)
 
 
 def _prior_session_last_5m_close(
@@ -672,7 +679,9 @@ class BreakoutEngine:
         now = datetime.now(IST)
         for state in self.states.values():
             state.trade_day = now.date().isoformat()
+            self._restore_session_open_tick(state, now)
             self._restore_frozen_levels(state, now.date().isoformat())
+            self._invalidate_auction_frozen(state, now)
             self._restore_session_state(state, now.date().isoformat())
         traders = list_live_s3_traders()
         logger.info(
@@ -696,9 +705,68 @@ class BreakoutEngine:
             )
 
     def _poll_interval_seconds(self, now: datetime) -> float:
-        if self._in_session_open_capture_window(now):
+        if self._in_session_open_fast_poll(now):
             return SESSION_OPEN_POLL_SECONDS
         return POLL_SECONDS
+
+    def _session_open_deadline(self, day: date) -> datetime:
+        return datetime.combine(day, SESSION_START, tzinfo=IST) + timedelta(
+            seconds=SESSION_OPEN_TICK_WINDOW_SEC
+        )
+
+    def _session_open_fast_poll_start(self, day: date) -> datetime:
+        return datetime.combine(day, SESSION_START, tzinfo=IST) - timedelta(
+            seconds=SESSION_OPEN_PRESTART_SEC
+        )
+
+    def _session_open_tick_deadline(self, day: date) -> datetime:
+        return datetime.combine(day, SESSION_START, tzinfo=IST) + timedelta(
+            seconds=SESSION_OPEN_TICK_MAX_DELAY_SEC
+        )
+
+    def _in_session_open_fast_poll(self, now: datetime) -> bool:
+        day = now.date()
+        return self._session_open_fast_poll_start(day) <= now < self._session_open_deadline(day)
+
+    def _in_session_open_capture_window(self, now: datetime) -> bool:
+        if now.time() < SESSION_START:
+            return False
+        return now < self._session_open_deadline(now.date())
+
+    def _in_session_open_tick_capture_phase(self, now: datetime) -> bool:
+        if now.time() < SESSION_START:
+            return False
+        return now < self._session_open_tick_deadline(now.date())
+
+    def _is_auction_open(self, candle_open: float, day_open: float | None) -> bool:
+        if day_open is None:
+            return False
+        return abs(candle_open - day_open) < 0.01
+
+    def _invalidate_auction_frozen(self, state: IndexBreakoutState, now: datetime) -> None:
+        """Drop frozen BLR locked on Upstox auction open when a TV tick exists."""
+        if not state.levels_ready or state.session_open_tick is None:
+            return
+        source = str(state.session_open_source or "")
+        mid = state.mid
+        if mid is None:
+            return
+        if source not in ("candle", "day_ohlc", "frozen") or abs(mid - state.session_open_tick) < 0.01:
+            return
+        logger.warning(
+            "[%s] Clearing frozen BLR mid %.2f (%s) — TV tick %.2f available",
+            state.config.code,
+            mid,
+            source,
+            state.session_open_tick,
+        )
+        day = state.trade_day or now.date().isoformat()
+        cache_manager.delete_key(self._frozen_key(day, state.config.code))
+        state.levels_ready = False
+        state.mid = state.green = state.red = None
+        state.session_open = None
+        state.broker_session_open = None
+        state.session_open_source = ""
 
     def run(self) -> None:
         while True:
@@ -833,6 +901,7 @@ class BreakoutEngine:
             state.spot = spot
         self._restore_session_open_tick(state, now)
         self._maybe_capture_session_open_tick(state, now, spot)
+        self._invalidate_auction_frozen(state, now)
 
         candles = self.client.get_5m_candles(cfg) or []
         self._refresh_levels(state, candles, now, spot)
@@ -858,16 +927,6 @@ class BreakoutEngine:
         "candle": 2,
         "first_ltp": 3,
     }
-
-    def _session_open_capture_deadline(self, day: date) -> datetime:
-        return datetime.combine(day, SESSION_START, tzinfo=IST) + timedelta(
-            seconds=SESSION_OPEN_TICK_WINDOW_SEC
-        )
-
-    def _in_session_open_capture_window(self, now: datetime) -> bool:
-        if now.time() < SESSION_START:
-            return False
-        return now < self._session_open_capture_deadline(now.date())
 
     def _open_tick_key(self, day: str, index_code: str) -> str:
         return cache_manager.BREAKOUT_OPEN_TICK_KEY_TEMPLATE.format(day=day, index=index_code)
@@ -901,7 +960,7 @@ class BreakoutEngine:
     ) -> None:
         if state.session_open_tick is not None or spot is None:
             return
-        if not self._in_session_open_capture_window(now):
+        if not self._in_session_open_tick_capture_phase(now):
             return
         state.session_open_tick = float(spot)
         self._save_session_open_tick(state, now)
@@ -928,10 +987,13 @@ class BreakoutEngine:
 
         first = self._first_session_candle(candles, now.date())
         if first is not None:
-            return float(first["open"]), "candle"
+            candle_open = float(first["open"])
+            day_open = self.client.get_session_day_open(state.config)
+            if not self._is_auction_open(candle_open, day_open):
+                return candle_open, "candle"
 
         day_open = self.client.get_session_day_open(state.config)
-        if day_open is not None:
+        if day_open is not None and first is None:
             return day_open, "day_ohlc"
         if ALLOW_PROVISIONAL_LTP and spot is not None:
             return spot, "ltp_provisional"
@@ -1087,11 +1149,21 @@ class BreakoutEngine:
 
         opening_915, open_source = self._resolve_session_open(state, candles, now, spot)
         if opening_915 is None:
-            state.setup_label = "Waiting for 9:15 open (first tick or 5m candle)"
+            if (
+                state.session_open_tick is None
+                and now.time() >= SESSION_START
+                and now >= self._session_open_tick_deadline(now.date())
+            ):
+                state.setup_label = (
+                    "BLR blocked — no 9:15 first tick captured; "
+                    "run relock_blr_session_open.py with TV mid"
+                )
+            else:
+                state.setup_label = "Waiting for 9:15 open (first tick — not auction candle)"
             return
         if (
             SESSION_OPEN_TICK_WAIT
-            and open_source == "candle"
+            and open_source in ("candle", "day_ohlc")
             and state.session_open_tick is None
             and self._in_session_open_capture_window(now)
         ):
@@ -1547,6 +1619,7 @@ class BreakoutEngine:
             "broker_session_open": state.broker_session_open,
             "session_open_tv_offset": state.session_open_tv_offset,
             "session_open_source": state.session_open_source,
+            "session_open_tick": state.session_open_tick,
             "prev_close": state.prev_close,
             "levels_ready": state.levels_ready,
             "day_review": state.day_review,

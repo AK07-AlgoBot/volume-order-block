@@ -5,6 +5,7 @@ from __future__ import annotations
 import csv
 import io
 import logging
+import os
 import re
 import time
 from datetime import date, datetime
@@ -35,6 +36,15 @@ _INDEX_UNDERLYING: Final[dict[str, tuple[str, str]]] = {
     "BANKNIFTY": ("BANKNIFTY", "NSE"),
     "SENSEX": ("SENSEX", "BSE"),
 }
+# Groww MARKET FNO orders can be rejected by RMS LPP rules; LIMIT at live LTP avoids breach.
+GROWW_FNO_ORDER_TYPE: Final[str] = (os.environ.get("GROWW_FNO_ORDER_TYPE") or "LIMIT").strip().upper()
+GROWW_LIMIT_SLIPPAGE_PTS: Final[float] = float(os.environ.get("GROWW_LIMIT_SLIPPAGE_PTS", "2"))
+GROWW_ORDER_STATUS_POLLS: Final[int] = int(os.environ.get("GROWW_ORDER_STATUS_POLLS", "4"))
+GROWW_ORDER_STATUS_POLL_SEC: Final[float] = float(os.environ.get("GROWW_ORDER_STATUS_POLL_SEC", "1"))
+_FILL_STATUSES: Final[frozenset[str]] = frozenset(
+    {"EXECUTED", "COMPLETED", "COMPLETE", "TRADED", "PARTIALLY_EXECUTED"}
+)
+_REJECT_STATUSES: Final[frozenset[str]] = frozenset({"REJECTED", "FAILED", "CANCELLED"})
 
 
 def _order_reference_id(username: str) -> str:
@@ -327,6 +337,64 @@ class GrowwClient:
             "instrument_key": f"groww:{row['groww_symbol']}",
         }
 
+    def get_fno_ltp(self, trading_symbol: str, *, exchange: str = "NSE") -> float | None:
+        """Last traded price for an FNO contract (NSE_SYMBOL format)."""
+        symbol_key = f"{exchange}_{trading_symbol}"
+        payload = self._get(
+            "/v1/live-data/ltp",
+            {"segment": "FNO", "exchange_symbols": symbol_key},
+        )
+        if not isinstance(payload, dict):
+            return None
+        if symbol_key in payload:
+            try:
+                return float(payload[symbol_key])
+            except (TypeError, ValueError):
+                pass
+        for value in payload.values():
+            if isinstance(value, (int, float)):
+                return float(value)
+        return None
+
+    def get_order_status(self, groww_order_id: str, *, segment: str = "FNO") -> dict[str, Any] | None:
+        payload = self._get(f"/v1/order/status/{groww_order_id}", {"segment": segment})
+        return payload if isinstance(payload, dict) else None
+
+    def _limit_price(self, ltp: float, transaction_type: str) -> float:
+        slip = GROWW_LIMIT_SLIPPAGE_PTS
+        side = transaction_type.upper()
+        if side == "BUY":
+            return round(ltp + slip, 2)
+        return round(max(ltp - slip, 0.05), 2)
+
+    def _order_filled(self, status_row: dict[str, Any]) -> bool:
+        status = str(status_row.get("order_status") or "").upper()
+        if status in _FILL_STATUSES:
+            return True
+        try:
+            return int(status_row.get("filled_quantity") or 0) > 0
+        except (TypeError, ValueError):
+            return False
+
+    def _order_rejected(self, status_row: dict[str, Any]) -> bool:
+        status = str(status_row.get("order_status") or "").upper()
+        return status in _REJECT_STATUSES
+
+    def _wait_for_fill(self, groww_order_id: str, *, segment: str = "FNO") -> dict[str, Any] | None:
+        last: dict[str, Any] | None = None
+        for _ in range(max(1, GROWW_ORDER_STATUS_POLLS)):
+            row = self.get_order_status(groww_order_id, segment=segment)
+            if not row:
+                time.sleep(GROWW_ORDER_STATUS_POLL_SEC)
+                continue
+            last = row
+            if self._order_filled(row):
+                return row
+            if self._order_rejected(row):
+                return row
+            time.sleep(GROWW_ORDER_STATUS_POLL_SEC)
+        return last
+
     def place_market_order(
         self,
         trading_symbol: str,
@@ -336,30 +404,70 @@ class GrowwClient:
         exchange: str = "NSE",
         segment: str = "FNO",
     ) -> str | None:
-        """Place MIS market order. Returns groww_order_id on success."""
+        """Place MIS FNO order. Default LIMIT@LTP (Groww MARKET can fail LPP RMS)."""
         ref = _order_reference_id(self.username)
-        body = {
+        side = transaction_type.upper()
+        order_type = GROWW_FNO_ORDER_TYPE
+        limit_price: float | None = None
+        if order_type == "LIMIT":
+            limit_price = self.get_fno_ltp(trading_symbol, exchange=exchange)
+            if limit_price is None:
+                logger.warning(
+                    "[%s] Groww LTP unavailable for %s — falling back to MARKET",
+                    self.username,
+                    trading_symbol,
+                )
+                order_type = "MARKET"
+            else:
+                limit_price = self._limit_price(limit_price, side)
+
+        body: dict[str, Any] = {
             "trading_symbol": trading_symbol,
             "quantity": int(quantity),
             "validity": "DAY",
             "exchange": exchange,
             "segment": segment,
             "product": "MIS",
-            "order_type": "MARKET",
-            "transaction_type": transaction_type.upper(),
+            "order_type": order_type,
+            "transaction_type": side,
             "order_reference_id": ref,
         }
+        if order_type == "LIMIT" and limit_price is not None:
+            body["price"] = limit_price
+
         data = self._post("/v1/order/create", body)
         if not data:
             return None
         order_id = str(data.get("groww_order_id") or "")
-        if order_id:
-            logger.info(
-                "[%s] Groww order OK: %s %d x %s (%s)",
+        if not order_id:
+            return None
+
+        status_row = self._wait_for_fill(order_id, segment=segment)
+        if status_row is None:
+            logger.error("[%s] Groww order %s — status poll failed", self.username, order_id)
+            return None
+        if not self._order_filled(status_row):
+            remark = str(status_row.get("remark") or data.get("remark") or status_row.get("order_status") or "")
+            logger.error(
+                "[%s] Groww order NOT filled: %s %d x %s (%s) — %s",
                 self.username,
-                transaction_type.upper(),
+                side,
                 quantity,
                 trading_symbol,
                 order_id,
+                remark[:240],
             )
-        return order_id or None
+            return None
+
+        avg = status_row.get("average_fill_price")
+        logger.info(
+            "[%s] Groww order filled: %s %d x %s @ %s (%s %s)",
+            self.username,
+            side,
+            quantity,
+            trading_symbol,
+            avg if avg is not None else limit_price,
+            order_id,
+            order_type,
+        )
+        return order_id
