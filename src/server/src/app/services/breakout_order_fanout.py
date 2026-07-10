@@ -91,8 +91,18 @@ def place_s3_entries(
                 logger.error("[%s] S3 entry skipped — no Groww %s future", trader.username, index_code)
                 continue
             qty = int(contract.get("lot_size") or lot_size) * lots
+            sym = str(contract["trading_symbol"])
+            if groww.has_directional_exposure(sym, direction, qty):
+                logger.warning(
+                    "[%s] Groww already has %s exposure on %s — skipping duplicate entry",
+                    trader.username,
+                    direction,
+                    sym,
+                )
+                legs.append(_groww_entry_leg_from_position(trader, contract, direction, lots))
+                continue
             order_id = groww.place_market_order(
-                str(contract["trading_symbol"]),
+                sym,
                 qty,
                 side,
                 exchange=str(contract.get("exchange") or "NSE"),
@@ -158,12 +168,61 @@ def place_s3_entries(
     return legs
 
 
-def missing_s3_traders(existing_legs: list[dict[str, Any]], *, assume_upstox_filled: bool) -> list[S3Trader]:
+def _groww_entry_leg_from_position(
+    trader: S3Trader,
+    contract: dict[str, Any],
+    direction: str,
+    lots: int,
+) -> dict[str, Any]:
+    """Synthetic leg when Groww already holds the S3 entry (prevents duplicate orders)."""
+    qty = int(contract.get("lot_size") or 65) * lots
+    return {
+        "username": trader.username,
+        "broker": "groww",
+        "trading_symbol": contract["trading_symbol"],
+        "groww_symbol": contract.get("groww_symbol"),
+        "instrument_key": contract.get("instrument_key") or "",
+        "contract_label": contract.get("contract_label") or "",
+        "quantity": qty,
+        "groww_order_id": "existing_position",
+        "recovered": True,
+    }
+
+
+def missing_s3_traders(
+    existing_legs: list[dict[str, Any]],
+    *,
+    assume_upstox_filled: bool,
+    index_code: str | None = None,
+    direction: str | None = None,
+    lot_size: int = 65,
+    lots: int = 1,
+) -> list[S3Trader]:
     """Live traders who did not get an entry leg yet."""
     covered = {str(leg.get("username") or "") for leg in existing_legs if leg.get("username")}
     if assume_upstox_filled and not covered:
         for trader in list_live_s3_traders():
             if trader.broker == "upstox":
+                covered.add(trader.username)
+    if index_code and direction:
+        qty = lot_size * lots
+        for trader in list_live_s3_traders():
+            if trader.username in covered or trader.broker != "groww":
+                continue
+            groww = GrowwClient(trader.username)
+            contract = groww.get_index_future_contract(index_code)
+            if not contract:
+                continue
+            sym = str(contract.get("trading_symbol") or "")
+            need = int(contract.get("lot_size") or lot_size) * lots
+            if groww.has_directional_exposure(sym, direction, need):
+                logger.info(
+                    "[%s] Groww already has %s %s on %s — treating as covered",
+                    trader.username,
+                    direction,
+                    sym,
+                    need,
+                )
                 covered.add(trader.username)
     return [t for t in list_live_s3_traders() if t.username not in covered]
 
@@ -179,7 +238,14 @@ def catchup_s3_legs(
     global_paper: bool,
 ) -> list[dict[str, Any]]:
     """Place entries for live traders missing from an open position's legs."""
-    missing = missing_s3_traders(existing_legs, assume_upstox_filled=not existing_legs)
+    missing = missing_s3_traders(
+        existing_legs,
+        assume_upstox_filled=not existing_legs,
+        index_code=index_code,
+        direction=direction,
+        lot_size=lot_size,
+        lots=lots,
+    )
     if not missing:
         return []
     names = frozenset(t.username for t in missing)

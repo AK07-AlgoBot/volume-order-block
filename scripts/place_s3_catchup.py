@@ -60,7 +60,15 @@ def main() -> int:
 
     direction = str(pos.get("direction") or "")
     legs = pos.get("order_legs") if isinstance(pos.get("order_legs"), list) else []
-    missing = missing_s3_traders(legs, assume_upstox_filled=not legs)
+    cfg = INDEX_CONFIGS[index_code]
+    missing = missing_s3_traders(
+        legs,
+        assume_upstox_filled=not legs,
+        index_code=index_code,
+        direction=direction or None,
+        lot_size=cfg.lot_size,
+        lots=LOTS_PER_TRADE,
+    )
     targets = [t for t in missing if t.username == username]
     if not targets:
         print(f"{username} is not in missing traders list.")
@@ -69,7 +77,6 @@ def main() -> int:
         return 0
 
     print(f"Open position: {direction} @ {pos.get('entry_price')} — catching up {username}")
-    cfg = INDEX_CONFIGS[index_code]
     upstox = build_upstox_client("AK07")
     new_legs = place_s3_entries(
         index_code=index_code,

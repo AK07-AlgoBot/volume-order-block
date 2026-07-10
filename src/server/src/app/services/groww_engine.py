@@ -39,11 +39,12 @@ _INDEX_UNDERLYING: Final[dict[str, tuple[str, str]]] = {
 # Groww MARKET FNO orders can be rejected by RMS LPP rules; LIMIT at live LTP avoids breach.
 GROWW_FNO_ORDER_TYPE: Final[str] = (os.environ.get("GROWW_FNO_ORDER_TYPE") or "LIMIT").strip().upper()
 GROWW_LIMIT_SLIPPAGE_PTS: Final[float] = float(os.environ.get("GROWW_LIMIT_SLIPPAGE_PTS", "2"))
-GROWW_ORDER_STATUS_POLLS: Final[int] = int(os.environ.get("GROWW_ORDER_STATUS_POLLS", "4"))
+GROWW_ORDER_STATUS_POLLS: Final[int] = int(os.environ.get("GROWW_ORDER_STATUS_POLLS", "12"))
 GROWW_ORDER_STATUS_POLL_SEC: Final[float] = float(os.environ.get("GROWW_ORDER_STATUS_POLL_SEC", "1"))
 _FILL_STATUSES: Final[frozenset[str]] = frozenset(
     {"EXECUTED", "COMPLETED", "COMPLETE", "TRADED", "PARTIALLY_EXECUTED"}
 )
+_OPEN_ORDER_STATUSES: Final[frozenset[str]] = frozenset({"OPEN", "NEW", "ACKED", "APPROVED", "TRIGGER_PENDING"})
 _REJECT_STATUSES: Final[frozenset[str]] = frozenset({"REJECTED", "FAILED", "CANCELLED"})
 
 
@@ -215,6 +216,38 @@ class GrowwClient:
                 qty = cf
             open_rows.append(row)
         return open_rows
+
+    def net_fno_quantity(self, trading_symbol: str) -> int:
+        """Signed net qty for a futures symbol (negative = short)."""
+        sym = trading_symbol.upper()
+        for row in self.get_fno_positions():
+            if str(row.get("trading_symbol") or "").upper() != sym:
+                continue
+            for key in ("net_quantity", "quantity", "net_qty"):
+                if row.get(key) is not None:
+                    try:
+                        return int(row[key])
+                    except (TypeError, ValueError):
+                        continue
+        return 0
+
+    def has_directional_exposure(
+        self,
+        trading_symbol: str,
+        direction: str,
+        min_qty: int = 1,
+    ) -> bool:
+        qty = self.net_fno_quantity(trading_symbol)
+        if direction == "LONG":
+            return qty >= min_qty
+        return qty <= -min_qty
+
+    def cancel_order(self, groww_order_id: str, *, segment: str = "FNO") -> bool:
+        data = self._post(
+            "/v1/order/cancel",
+            {"groww_order_id": groww_order_id, "segment": segment},
+        )
+        return bool(data)
 
     def get_fno_order_list(self) -> list[dict[str, Any]]:
         payload = self._get("/v1/order/list", {"segment": "FNO", "page": 0, "page_size": 100})
@@ -448,6 +481,15 @@ class GrowwClient:
             return None
         if not self._order_filled(status_row):
             remark = str(status_row.get("remark") or data.get("remark") or status_row.get("order_status") or "")
+            status = str(status_row.get("order_status") or "").upper()
+            if status in _OPEN_ORDER_STATUSES:
+                logger.warning(
+                    "[%s] Groww order %s still %s — cancelling to avoid duplicate catch-up entry",
+                    self.username,
+                    order_id,
+                    status,
+                )
+                self.cancel_order(order_id, segment=segment)
             logger.error(
                 "[%s] Groww order NOT filled: %s %d x %s (%s) — %s",
                 self.username,

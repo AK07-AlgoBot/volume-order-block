@@ -63,9 +63,17 @@ def main() -> int:
     elif isinstance(pos_session, dict):
         legs = pos_session.get("order_legs") or []
 
+    direction = ""
+    if isinstance(pos_state, dict):
+        direction = str(pos_state.get("direction") or "")
+    elif isinstance(pos_session, dict):
+        direction = str(pos_session.get("direction") or "")
+
     missing = missing_s3_traders(
         legs if isinstance(legs, list) else [],
         assume_upstox_filled=not legs,
+        index_code=index_code,
+        direction=direction or None,
     )
     print(f"\n--- fan-out ---")
     print(f"  legs: {[leg.get('username') for leg in legs if isinstance(leg, dict)]}")

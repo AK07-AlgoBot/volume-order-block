@@ -216,6 +216,7 @@ class BreakoutPosition:
     order_legs: list[dict[str, Any]] = field(default_factory=list)
     option_strike: int = 0
     option_type: str = ""
+    exit_pending: bool = False
 
     @property
     def quantity(self) -> int:
@@ -1522,7 +1523,12 @@ class BreakoutEngine:
         if not exit_reason:
             return
 
+        if pos.exit_pending:
+            return
+
+        pos.exit_pending = True
         if not place_s3_exits(position_legs(pos), pos.direction, global_paper=PAPER_TRADING or MOCK_MODE):
+            pos.exit_pending = False
             logger.error("[%s] breakout exit order failed (%s)", state.config.code, exit_reason)
             return
 
