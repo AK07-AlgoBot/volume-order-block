@@ -77,6 +77,11 @@ SENSEX_COST_SL_PTS: Final[float] = float(os.environ.get("BREAKOUT_SENSEX_COST_SL
 SIZING_MODE: Final[str] = os.environ.get("BREAKOUT_SIZING_MODE", "fixed_sl_tp").strip().lower()
 FIXED_SL_PTS: Final[float] = float(os.environ.get("BREAKOUT_FIXED_SL_PTS", "30"))
 FIXED_TP_PTS: Final[float] = float(os.environ.get("BREAKOUT_FIXED_TP_PTS", "60"))
+FRIDAY_1TO1_TP: Final[bool] = os.environ.get("BREAKOUT_FRIDAY_1TO1_TP", "1").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+)
 
 # Pine v6 band half-width (% of 9:15 session open / Mid)
 BAND_HALF_PCT: Final[dict[str, float]] = {
@@ -442,16 +447,22 @@ def trade_levels(
     green: float,
     red: float,
     gap_regime: str,
+    *,
+    session_date: date | None = None,
 ) -> tuple[float, float, float]:
     """Spot SL, TP1, TP2 from BREAKOUT_SIZING_MODE.
 
     fixed_sl_tp — entry ± FIXED_SL_PTS / FIXED_TP_PTS (default 30 / 60, 1:2 R:R).
+    On Fridays (IST session), TP1 uses 1:1 (same pts as SL) when BREAKOUT_FRIDAY_1TO1_TP=1.
     band — SL at band_half + buffer, TP at 1.5× / 3× band (legacy production).
     """
     if SIZING_MODE in ("fixed", "fixed_sl_tp", "fixed_sl_and_tp"):
         sl_dist = FIXED_SL_PTS
         tp1_pts = FIXED_TP_PTS
         tp2_pts = FIXED_TP_PTS * 2
+        if FRIDAY_1TO1_TP and session_date is not None and session_date.weekday() == 4:
+            tp1_pts = sl_dist
+            tp2_pts = FIXED_TP_PTS
     else:
         band_half = green - mid  # same day, same band for every bar
         sl_dist = band_half + SL_BUFFER
@@ -690,7 +701,7 @@ class BreakoutEngine:
             self._restore_session_state(state, now.date().isoformat())
         traders = list_live_s3_traders()
         logger.info(
-            "Breakout engine started (paper=%s mock=%s entries=%s indices=%s sizing=%s sl=%.0f tp=%.0f max_trades=%d no_entry_after=%s lot=%d live_traders=%s)",
+            "Breakout engine started (paper=%s mock=%s entries=%s indices=%s sizing=%s sl=%.0f tp=%.0f friday_1to1=%s max_trades=%d no_entry_after=%s lot=%d live_traders=%s)",
             PAPER_TRADING,
             MOCK_MODE,
             ENTRIES_ENABLED,
@@ -698,6 +709,7 @@ class BreakoutEngine:
             SIZING_MODE,
             FIXED_SL_PTS,
             FIXED_TP_PTS,
+            FRIDAY_1TO1_TP,
             MAX_TRADES_PER_DAY,
             NO_ENTRY_AFTER.strftime("%H:%M"),
             LOTS_PER_TRADE,
@@ -1370,6 +1382,7 @@ class BreakoutEngine:
             state.green,
             state.red,
             state.gap_regime,
+            session_date=now.date(),
         )
         contract = self.client.resolve_future(state.config)
         if contract is None:

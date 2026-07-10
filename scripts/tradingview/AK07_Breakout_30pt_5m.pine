@@ -15,7 +15,7 @@
 //   3. Confirm inputs (defaults match live server):
 //        Override Auto Band %  = OFF  (NIFTY auto 0.211%)
 //        Risk sizing mode      = Fixed SL and TP
-//        Stop / Target         = 30 / 60  (1:2)
+//        Stop / Target         = 30 / 60  (1:2); Friday = 30 / 30 (1:1)
 //        Stop for day @ 1st TP = OFF
 //        Max trades/day        = 3
 //        No new entries after  = 13:00 IST (last entry on 1 PM 5m close; flat 14:55)
@@ -247,10 +247,11 @@ tradeSlPrice(isLong, entry) =>
         structuralSlShort()
 
 tradeTpPrice(isLong, entry) =>
+    float tgtPts = useFixedTarget and dayofweek(time, "Asia/Kolkata") == dayofweek.friday ? fixedSlPts : fixedTargetPts
     if useBandRrTarget
         bandTpPrice(isLong, entry)
     else
-        isLong ? entry + fixedTargetPts : entry - fixedTargetPts
+        isLong ? entry + tgtPts : entry - tgtPts
 
 tradeRiskPts(isLong, entry) =>
     float sl = tradeSlPrice(isLong, entry)

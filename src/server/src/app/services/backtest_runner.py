@@ -493,7 +493,16 @@ def backtest_strategy_3(
             return None
 
         entry = close
-        sl, tp1, _ = trade_levels(cfg.code, direction, entry, blr.mid, blr.green, blr.red, blr.gap_regime)
+        sl, tp1, _ = trade_levels(
+            cfg.code,
+            direction,
+            entry,
+            blr.mid,
+            blr.green,
+            blr.red,
+            blr.gap_regime,
+            session_date=candle_ts.date(),
+        )
         return SimPosition(
             direction=direction,
             entry_price=entry,
