@@ -699,6 +699,7 @@ class BreakoutEngine:
             self._restore_frozen_levels(state, now.date().isoformat())
             self._invalidate_auction_frozen(state, now)
             self._restore_session_state(state, now.date().isoformat())
+            self._reconcile_session_position_if_flat(state, now.date().isoformat())
         traders = list_live_s3_traders()
         logger.info(
             "Breakout engine started (paper=%s mock=%s entries=%s indices=%s sizing=%s sl=%.0f tp=%.0f friday_1to1=%s max_trades=%d no_entry_after=%s lot=%d live_traders=%s)",
@@ -917,6 +918,8 @@ class BreakoutEngine:
             state.setup_label = f"Pre-market — session from {SESSION_START.strftime('%H:%M')} IST"
             self._publish_state(state, now, entries_blocked=True)
             return
+
+        self._reconcile_session_position_if_flat(state, now.date().isoformat())
 
         spot = self.client.get_spot(cfg)
         if spot is not None:
@@ -1263,6 +1266,40 @@ class BreakoutEngine:
                 "open" if state.position else "flat",
             )
         return bool(state.trades_today or state.position)
+
+    def _reconcile_session_position_if_flat(self, state: IndexBreakoutState, day: str) -> bool:
+        """Recover in-memory position when session Redis still has an open leg."""
+        if state.position is not None:
+            return False
+        raw = cache_manager.get_json(self._session_key(day, state.config.code))
+        if not isinstance(raw, dict):
+            return False
+        pos_raw = raw.get("position")
+        if not isinstance(pos_raw, dict):
+            return False
+        pos = _position_from_dict(pos_raw)
+        if pos is None:
+            logger.error("[%s] session has position blob but parse failed — check Redis", state.config.code)
+            return False
+        state.position = pos
+        state.trades_today = max(state.trades_today, int(raw.get("trades_today") or 0))
+        logs = raw.get("signal_log")
+        if isinstance(logs, list) and logs:
+            state.signal_log = [str(line) for line in logs[-20:]]
+        state.setup_label = (
+            f"{pos.direction} open — reconciled from session "
+            f"{pos.display_contract} @ {pos.entry_price:.2f}"
+        )
+        logger.warning(
+            "[%s] reconciled open position from session (engine was flat): %s %s @ %.2f SL %.2f TP1 %.2f",
+            state.config.code,
+            pos.direction,
+            pos.display_contract,
+            pos.entry_price,
+            pos.sl_price,
+            pos.tp1_price,
+        )
+        return True
 
     def _frozen_key(self, day: str, index_code: str) -> str:
         return cache_manager.BREAKOUT_FROZEN_KEY_TEMPLATE.format(day=day, index=index_code)
