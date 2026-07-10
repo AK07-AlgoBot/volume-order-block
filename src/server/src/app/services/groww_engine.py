@@ -45,6 +45,8 @@ _FILL_STATUSES: Final[frozenset[str]] = frozenset(
     {"EXECUTED", "COMPLETED", "COMPLETE", "TRADED", "PARTIALLY_EXECUTED"}
 )
 _OPEN_ORDER_STATUSES: Final[frozenset[str]] = frozenset({"OPEN", "NEW", "ACKED", "APPROVED", "TRIGGER_PENDING"})
+_CANCELLABLE_ORDER_STATUSES: Final[frozenset[str]] = frozenset({"OPEN", "NEW", "ACKED"})
+_IN_FLIGHT_ORDER_STATUSES: Final[frozenset[str]] = frozenset({"APPROVED", "TRIGGER_PENDING"})
 _REJECT_STATUSES: Final[frozenset[str]] = frozenset({"REJECTED", "FAILED", "CANCELLED"})
 
 
@@ -415,7 +417,8 @@ class GrowwClient:
 
     def _wait_for_fill(self, groww_order_id: str, *, segment: str = "FNO") -> dict[str, Any] | None:
         last: dict[str, Any] | None = None
-        for _ in range(max(1, GROWW_ORDER_STATUS_POLLS)):
+        polls = max(1, GROWW_ORDER_STATUS_POLLS)
+        for i in range(polls):
             row = self.get_order_status(groww_order_id, segment=segment)
             if not row:
                 time.sleep(GROWW_ORDER_STATUS_POLL_SEC)
@@ -425,6 +428,19 @@ class GrowwClient:
                 return row
             if self._order_rejected(row):
                 return row
+            status = str(row.get("order_status") or "").upper()
+            # Groww often reports APPROVED before EXECUTED; keep polling in-flight orders.
+            if status in _IN_FLIGHT_ORDER_STATUSES and i == polls - 1:
+                for _ in range(8):
+                    time.sleep(GROWW_ORDER_STATUS_POLL_SEC)
+                    row = self.get_order_status(groww_order_id, segment=segment)
+                    if not row:
+                        continue
+                    last = row
+                    if self._order_filled(row):
+                        return row
+                    if self._order_rejected(row):
+                        return row
             time.sleep(GROWW_ORDER_STATUS_POLL_SEC)
         return last
 
@@ -482,7 +498,7 @@ class GrowwClient:
         if not self._order_filled(status_row):
             remark = str(status_row.get("remark") or data.get("remark") or status_row.get("order_status") or "")
             status = str(status_row.get("order_status") or "").upper()
-            if status in _OPEN_ORDER_STATUSES:
+            if status in _CANCELLABLE_ORDER_STATUSES:
                 logger.warning(
                     "[%s] Groww order %s still %s — cancelling to avoid duplicate catch-up entry",
                     self.username,
@@ -490,6 +506,13 @@ class GrowwClient:
                     status,
                 )
                 self.cancel_order(order_id, segment=segment)
+            elif status in _IN_FLIGHT_ORDER_STATUSES:
+                logger.warning(
+                    "[%s] Groww order %s still %s after extended poll — not cancelling in-flight order",
+                    self.username,
+                    order_id,
+                    status,
+                )
             logger.error(
                 "[%s] Groww order NOT filled: %s %d x %s (%s) — %s",
                 self.username,

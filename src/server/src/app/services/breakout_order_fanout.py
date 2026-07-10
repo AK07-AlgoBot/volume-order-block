@@ -290,12 +290,37 @@ def place_s3_exits(
                 logger.error("[%s] Groww exit skipped — missing trading_symbol", username)
                 all_ok = False
                 continue
-            order_id = groww.place_market_order(trading_symbol, qty, side)
+            net = groww.net_fno_quantity(trading_symbol)
+            if direction == "LONG" and net <= 0:
+                logger.warning(
+                    "[%s] Groww exit skipped — already flat/short on %s (net=%d)",
+                    username,
+                    trading_symbol,
+                    net,
+                )
+                continue
+            if direction == "SHORT" and net >= 0:
+                logger.warning(
+                    "[%s] Groww exit skipped — already flat/long on %s (net=%d)",
+                    username,
+                    trading_symbol,
+                    net,
+                )
+                continue
+            exit_qty = min(qty, abs(net)) if net != 0 else qty
+            order_id = groww.place_market_order(trading_symbol, exit_qty, side)
             if not order_id:
                 logger.error("[%s] Groww S3 exit order failed", username)
                 all_ok = False
             else:
-                logger.info("[%s] S3 Groww exit %s %d x %s (%s)", username, side, qty, trading_symbol, order_id)
+                logger.info(
+                    "[%s] S3 Groww exit %s %d x %s (%s)",
+                    username,
+                    side,
+                    exit_qty,
+                    trading_symbol,
+                    order_id,
+                )
             continue
 
         if broker == "upstox":
