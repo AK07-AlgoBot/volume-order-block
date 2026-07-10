@@ -113,6 +113,10 @@ SESSION_OPEN_PRESTART_SEC: Final[int] = int(
 SESSION_OPEN_TICK_MAX_DELAY_SEC: Final[int] = int(
     os.environ.get("BREAKOUT_SESSION_OPEN_TICK_MAX_DELAY_SEC", "45")
 )
+# Upstox LTP can sit at NSE auction price for seconds; wait until it diverges (TV first trade).
+AUCTION_LTP_TOLERANCE_PTS: Final[float] = float(
+    os.environ.get("BREAKOUT_AUCTION_LTP_TOLERANCE_PTS", "1.5")
+)
 
 
 def _prior_session_last_5m_close(
@@ -743,6 +747,11 @@ class BreakoutEngine:
             return False
         return abs(candle_open - day_open) < 0.01
 
+    def _ltp_still_auction(self, ltp: float, day_open: float | None) -> bool:
+        if day_open is None:
+            return False
+        return abs(ltp - day_open) < AUCTION_LTP_TOLERANCE_PTS
+
     def _invalidate_auction_frozen(self, state: IndexBreakoutState, now: datetime) -> None:
         """Drop frozen BLR locked on Upstox auction open when a TV tick exists."""
         if not state.levels_ready or state.session_open_tick is None:
@@ -962,13 +971,17 @@ class BreakoutEngine:
             return
         if not self._in_session_open_tick_capture_phase(now):
             return
+        day_open = self.client.get_session_day_open(state.config)
+        if self._ltp_still_auction(float(spot), day_open):
+            return
         state.session_open_tick = float(spot)
         self._save_session_open_tick(state, now)
         logger.info(
-            "[%s] session open first LTP captured %.2f at %s (TV parity tick)",
+            "[%s] session open first LTP captured %.2f at %s (TV parity — diverged from auction %.2f)",
             state.config.code,
             state.session_open_tick,
             now.strftime("%H:%M:%S"),
+            day_open if day_open is not None else 0.0,
         )
 
     def _best_session_open(
