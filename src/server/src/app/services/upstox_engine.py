@@ -76,7 +76,11 @@ INDEX_OI_RISK: Final[dict[str, tuple[float, float, float]]] = {
 }
 DEFAULT_OI_RISK: Final[tuple[float, float, float]] = (60.0, 60.0, 120.0)
 INITIAL_LOTS: Final[int] = 2
-ITM_OFFSET_POINTS: Final[float] = 50.0  # LONG -> CE near spot-50, SHORT -> PE near spot+50
+ITM_OFFSET_POINTS: Final[float] = 50.0  # legacy fallback when chain/greeks unavailable
+# Spot-aligned option pick: target |delta| so premium tracks Nifty (ATM ~0.5, mild ITM ~0.55–0.65).
+OPTION_TARGET_DELTA: Final[float] = float(os.environ.get("AK07_OPTION_TARGET_DELTA", "0.55"))
+OPTION_DELTA_MIN: Final[float] = float(os.environ.get("AK07_OPTION_DELTA_MIN", "0.40"))
+OPTION_DELTA_MAX: Final[float] = float(os.environ.get("AK07_OPTION_DELTA_MAX", "0.75"))
 MAX_TRADES_PER_INDEX_PER_DAY: Final[int] = 2
 SUPPORT_POCKET_POINTS: Final[float] = float(os.environ.get("AK07_SUPPORT_POCKET_PTS", "20"))
 RESISTANCE_POCKET_POINTS: Final[float] = float(os.environ.get("AK07_RESISTANCE_POCKET_PTS", "20"))
@@ -545,13 +549,53 @@ class UpstoxClient:
     def get_itm_option_contract(
         self, instrument_key: str, spot: float, direction: str
     ) -> dict[str, Any] | None:
-        """Exact instrument for the closest ITM contract from the weekly chain."""
-        rows = self._fetch_nearest_expiry_chain(instrument_key)
-        if not rows:
-            return None
+        """ATM / mild-ITM option whose |delta| best tracks spot (greeks-aware).
+
+        LONG → CE near ATM–1 ITM with |delta|≈0.55.
+        SHORT → PE near ATM–1 ITM with |delta|≈0.55.
+        Falls back to fixed ITM offset when chain/greeks unavailable.
+        """
+        from app.services.options_greeks import pick_spot_aligned_option
+
+        expiry = self._nearest_expiry(instrument_key)
+        rows = self.get_option_chain_for_expiry(instrument_key, expiry) if expiry else []
+        code = _index_code_for_spot_key(instrument_key)
+        step = INDEX_CONFIGS[code].strike_step if code and code in INDEX_CONFIGS else 50
+        if expiry and rows:
+            picked = pick_spot_aligned_option(
+                spot=spot,
+                chain_rows=rows,
+                expiry=expiry,
+                direction=direction,
+                strike_step=step,
+                target_delta=OPTION_TARGET_DELTA,
+                delta_min=OPTION_DELTA_MIN,
+                delta_max=OPTION_DELTA_MAX,
+            )
+            if picked and picked.get("instrument_key"):
+                logger.info(
+                    "Option pick %s %s%d delta=%s selection=%s (spot=%.2f target_δ=%.2f)",
+                    direction,
+                    picked.get("option_type"),
+                    picked.get("strike"),
+                    picked.get("abs_delta") or picked.get("delta"),
+                    picked.get("selection"),
+                    spot,
+                    OPTION_TARGET_DELTA,
+                )
+                return {
+                    "instrument_key": str(picked["instrument_key"]),
+                    "strike": int(picked["strike"]),
+                    "option_type": str(picked["option_type"]),
+                    "delta": picked.get("delta"),
+                    "abs_delta": picked.get("abs_delta"),
+                    "selection": picked.get("selection"),
+                    "expiry": picked.get("expiry") or expiry,
+                }
+
+        # Legacy geometric ITM (~50 pts)
         leg = "call_options" if direction == "LONG" else "put_options"
         desired = spot - ITM_OFFSET_POINTS if direction == "LONG" else spot + ITM_OFFSET_POINTS
-
         best: dict[str, Any] | None = None
         best_distance = float("inf")
         for row in rows:
@@ -569,6 +613,8 @@ class UpstoxClient:
                     "instrument_key": contract_key,
                     "strike": int(strike),
                     "option_type": "CE" if direction == "LONG" else "PE",
+                    "selection": "itm_offset_fallback",
+                    "expiry": expiry,
                 }
         return best
 

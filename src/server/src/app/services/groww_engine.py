@@ -74,7 +74,12 @@ def _ensure_groww_csv() -> bool:
         return GROWW_CSV_CACHE.exists()
 
 
-def _load_index_futures_from_csv(index_code: str) -> list[dict[str, str]]:
+def _load_index_fno_rows_from_csv(
+    index_code: str,
+    *,
+    option_types: frozenset[str] | None = None,
+) -> list[dict[str, str]]:
+    """Load FNO rows for an index. option_types=None → futures only; {'CE'} / {'PE'} → options."""
     underlying, exchange = _INDEX_UNDERLYING.get(index_code.upper(), (index_code.upper(), "NSE"))
     if not _ensure_groww_csv():
         return []
@@ -85,6 +90,7 @@ def _load_index_futures_from_csv(index_code: str) -> list[dict[str, str]]:
         return []
 
     rows: list[dict[str, str]] = []
+    want_opts = option_types is not None
     for row in csv.DictReader(io.StringIO(text)):
         if str(row.get("exchange") or "").upper() != exchange:
             continue
@@ -93,7 +99,10 @@ def _load_index_futures_from_csv(index_code: str) -> list[dict[str, str]]:
         if str(row.get("underlying_symbol") or "").upper() != underlying:
             continue
         inst = str(row.get("instrument_type") or "").upper()
-        if inst in ("CE", "PE"):
+        if want_opts:
+            if inst not in option_types:
+                continue
+        elif inst in ("CE", "PE"):
             continue
         sym = str(row.get("trading_symbol") or "").upper()
         if underlying == "NIFTY" and ("NXT" in sym or sym.startswith("FINNIFTY") or sym.startswith("MIDCPNIFTY")):
@@ -108,10 +117,16 @@ def _load_index_futures_from_csv(index_code: str) -> list[dict[str, str]]:
                 "expiry_date": expiry,
                 "lot_size": str(row.get("lot_size") or "65").strip(),
                 "exchange": exchange,
+                "instrument_type": inst,
+                "strike_price": str(row.get("strike_price") or row.get("strike") or "").strip(),
             }
         )
-    rows.sort(key=lambda r: r["expiry_date"])
+    rows.sort(key=lambda r: (r["expiry_date"], r.get("strike_price") or "0"))
     return rows
+
+
+def _load_index_futures_from_csv(index_code: str) -> list[dict[str, str]]:
+    return _load_index_fno_rows_from_csv(index_code, option_types=None)
 
 
 def _trading_symbol_for_groww_symbol(groww_symbol: str) -> str:
@@ -370,6 +385,97 @@ class GrowwClient:
             "contract_label": _format_future_contract_label(code, row["expiry_date"]),
             "lot_size": int(row.get("lot_size") or 65),
             "instrument_key": f"groww:{row['groww_symbol']}",
+        }
+
+    def get_itm_option_contract(
+        self,
+        index_code: str,
+        spot: float,
+        direction: str,
+        *,
+        itm_offset: float = 50.0,
+    ) -> dict[str, Any] | None:
+        """ATM / mild-ITM CE (LONG) or PE (SHORT) — aligned with spot movement.
+
+        Groww CSV has no live greeks; pick nearest weekly ATM, or 1-step ITM
+        when spot is past the half-step (tracks Nifty better than deep OTM).
+        """
+        code = index_code.upper()
+        today = date.today().isoformat()
+        opt = "CE" if direction == "LONG" else "PE"
+        step = 50 if code == "NIFTY" else 100 if code == "BANKNIFTY" else 100
+        atm = int(round(spot / step) * step)
+        # Mild ITM preference when spot has clearly crossed the ATM mid.
+        if direction == "LONG":
+            preferred = [atm, atm - step, atm + step] if spot >= atm else [atm, atm - step]
+            if spot >= atm + step * 0.35:
+                preferred = [atm, atm - step, atm - 2 * step]
+        else:
+            preferred = [atm, atm + step, atm - step] if spot <= atm else [atm, atm + step]
+            if spot <= atm - step * 0.35:
+                preferred = [atm, atm + step, atm + 2 * step]
+
+        rows = _load_index_fno_rows_from_csv(code, option_types=frozenset({opt}))
+        by_expiry: dict[str, list[dict[str, str]]] = {}
+        for row in rows:
+            exp = row["expiry_date"]
+            if exp < today:
+                continue
+            by_expiry.setdefault(exp, []).append(row)
+        if not by_expiry:
+            logger.warning("[%s] No Groww %s %s options found", self.username, code, opt)
+            return None
+        nearest_exp = sorted(by_expiry.keys())[0]
+        pool = by_expiry[nearest_exp]
+        by_strike: dict[int, dict[str, str]] = {}
+        for row in pool:
+            try:
+                strike = int(float(row.get("strike_price") or 0))
+            except (TypeError, ValueError):
+                continue
+            if strike > 0:
+                by_strike[strike] = row
+
+        best: dict[str, str] | None = None
+        for strike in preferred:
+            if strike in by_strike:
+                best = by_strike[strike]
+                break
+        if not best:
+            # Closest to ATM
+            if not by_strike:
+                return None
+            strike_i = min(by_strike.keys(), key=lambda s: abs(s - atm))
+            best = by_strike[strike_i]
+        strike_i = int(float(best.get("strike_price") or 0))
+        # Approximate delta for logging (no live IV on Groww CSV path)
+        try:
+            from app.services.options_greeks import bs_delta, years_to_expiry
+
+            delta = bs_delta(spot, strike_i, years_to_expiry(nearest_exp), 0.18, option_type=opt)
+        except Exception:
+            delta = None
+        logger.info(
+            "[%s] Groww option pick %s %s%d ≈ATM %d (spot=%.2f delta≈%s)",
+            self.username,
+            direction,
+            opt,
+            strike_i,
+            atm,
+            spot,
+            f"{abs(delta):.2f}" if delta is not None else "?",
+        )
+        return {
+            "trading_symbol": best["trading_symbol"],
+            "groww_symbol": best["groww_symbol"],
+            "expiry": nearest_exp,
+            "contract_label": f"{code} {strike_i}{opt}",
+            "lot_size": int(best.get("lot_size") or 65),
+            "instrument_key": f"groww:{best['groww_symbol']}",
+            "strike": strike_i,
+            "option_type": opt,
+            "delta": delta,
+            "selection": "atm_itm_spot_aligned",
         }
 
     def get_fno_ltp(self, trading_symbol: str, *, exchange: str = "NSE") -> float | None:

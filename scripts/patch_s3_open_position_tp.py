@@ -51,6 +51,21 @@ def _patch_position(pos: dict[str, Any], *, index_code: str, session_date) -> di
     updated["sl_price"] = sl
     updated["tp1_price"] = tp1
     updated["tp2_price"] = tp2
+    if not updated.get("lot_size"):
+        from app.services.breakout_engine import INDEX_CONFIGS  # noqa: PLC0415
+
+        updated["lot_size"] = INDEX_CONFIGS[index_code].lot_size
+    if not updated.get("contract_label") and updated.get("order_legs"):
+        legs = updated["order_legs"]
+        if isinstance(legs, list) and legs and isinstance(legs[0], dict):
+            updated["contract_label"] = str(
+                legs[0].get("contract_label") or legs[0].get("trading_symbol") or f"{index_code} FUT"
+            )
+    if not updated.get("instrument_key") and updated.get("order_legs"):
+        legs = updated["order_legs"]
+        if isinstance(legs, list) and legs and isinstance(legs[0], dict):
+            updated["instrument_key"] = str(legs[0].get("instrument_key") or "")
+    updated["exit_pending"] = False
     return updated
 
 

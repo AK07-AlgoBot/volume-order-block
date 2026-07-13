@@ -86,6 +86,7 @@ def main() -> int:
         upstox_market_client=upstox,
         global_paper=False,
         only_usernames=frozenset({username}),
+        spot=float(pos.get("entry_price") or 0) or None,
     )
     placed = new_legs
     if not placed:

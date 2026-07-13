@@ -40,6 +40,7 @@ from app.services.breakout_order_fanout import (
     place_s3_entries,
     place_s3_exits,
     position_legs,
+    s3_uses_options,
 )
 from app.services.upstox_engine import (
     INDEX_CONFIGS,
@@ -58,6 +59,10 @@ CANDLE_5M: Final[int] = 5
 POLL_SECONDS: Final[float] = float(os.environ.get("BREAKOUT_POLL_SECONDS", "15"))
 MAX_TRADES_PER_DAY: Final[int] = int(os.environ.get("BREAKOUT_MAX_TRADES_PER_DAY", "3"))
 LOTS_PER_TRADE: Final[int] = 1
+# Execution: options = BUY ITM CE/PE (premium TP); futures = index FUT. BLR signals unchanged either way.
+OPTION_PREMIUM_TP_PTS: Final[float] = float(os.environ.get("BREAKOUT_OPTION_PREMIUM_TP_PTS", "15"))
+# While holding options, poll premium every N seconds (catch TP without waiting for 15s candle loop).
+OPTION_POLL_SECONDS: Final[float] = float(os.environ.get("BREAKOUT_OPTION_POLL_SECONDS", "2"))
 SL_BUFFER: Final[float] = float(os.environ.get("BREAKOUT_SL_BUFFER_PTS", "2.0"))
 # Minimum directional body ratio (body / candle_range). Filters wick-driven false breakouts.
 BREAKOUT_MIN_BODY_RATIO: Final[float] = float(os.environ.get("BREAKOUT_MIN_BODY_RATIO", "0"))
@@ -222,6 +227,9 @@ class BreakoutPosition:
     option_strike: int = 0
     option_type: str = ""
     exit_pending: bool = False
+    instrument_kind: str = "futures"  # futures | options
+    premium_entry: float | None = None  # option LTP at entry (options mode)
+    premium_last: float | None = None  # last observed option LTP (tick-to-tick)
 
     @property
     def quantity(self) -> int:
@@ -234,6 +242,10 @@ class BreakoutPosition:
         if self.option_strike and self.option_type:
             return f"{self.option_strike}{self.option_type}"
         return ""
+
+    @property
+    def uses_options(self) -> bool:
+        return self.instrument_kind == "options" or bool(self.option_type)
 
 
 @dataclass
@@ -262,6 +274,8 @@ class IndexBreakoutState:
     setup_label: str = "Waiting for session"
     signal_log: list[str] = field(default_factory=list)
     last_fanout_catchup_mono: float = 0.0
+    last_candle_fetch_mono: float = 0.0
+    cached_candles: list[dict[str, float]] = field(default_factory=list)
 
 
 def _position_to_dict(pos: BreakoutPosition) -> dict[str, Any]:
@@ -279,11 +293,27 @@ def _position_to_dict(pos: BreakoutPosition) -> dict[str, Any]:
         "option_type": pos.option_type,
         "opened_at": pos.opened_at,
         "entry_reason": pos.entry_reason,
+        "instrument_kind": pos.instrument_kind,
+        "premium_entry": pos.premium_entry,
+        "premium_last": pos.premium_last,
+        "exit_pending": pos.exit_pending,
     }
 
 
 def _position_from_dict(raw: dict[str, Any]) -> BreakoutPosition | None:
     try:
+        direction = str(raw.get("direction") or "")
+        if direction not in ("LONG", "SHORT"):
+            return None
+        entry = float(raw["entry_price"])
+        sl = float(raw["sl_price"])
+        tp1 = float(raw["tp1_price"])
+        tp2_raw = raw.get("tp2_price")
+        if tp2_raw is None:
+            tp2 = entry + FIXED_TP_PTS if direction == "LONG" else entry - FIXED_TP_PTS
+        else:
+            tp2 = float(tp2_raw)
+        lot_size = int(raw.get("lot_size") or 65)
         contract_label = str(raw.get("contract_label") or "")
         option_strike = int(raw.get("option_strike") or 0)
         option_type = str(raw.get("option_type") or "")
@@ -291,20 +321,36 @@ def _position_from_dict(raw: dict[str, Any]) -> BreakoutPosition | None:
             contract_label = f"{option_strike}{option_type}"
         legs_raw = raw.get("order_legs")
         order_legs = legs_raw if isinstance(legs_raw, list) else []
+        instrument_key = str(raw.get("instrument_key") or "")
+        if not instrument_key and order_legs:
+            instrument_key = str(order_legs[0].get("instrument_key") or "")
+        if not contract_label and order_legs:
+            contract_label = str(
+                order_legs[0].get("contract_label") or order_legs[0].get("trading_symbol") or ""
+            )
+        premium_raw = raw.get("premium_entry")
+        premium_entry = float(premium_raw) if premium_raw is not None else None
+        last_raw = raw.get("premium_last")
+        premium_last = float(last_raw) if last_raw is not None else None
+        kind = str(raw.get("instrument_kind") or ("options" if option_type else "futures"))
         return BreakoutPosition(
-            direction=str(raw["direction"]),
-            entry_price=float(raw["entry_price"]),
-            sl_price=float(raw["sl_price"]),
-            tp1_price=float(raw["tp1_price"]),
-            tp2_price=float(raw["tp2_price"]),
-            lot_size=int(raw["lot_size"]),
-            instrument_key=str(raw.get("instrument_key") or ""),
+            direction=direction,
+            entry_price=entry,
+            sl_price=sl,
+            tp1_price=tp1,
+            tp2_price=tp2,
+            lot_size=lot_size,
+            instrument_key=instrument_key,
             contract_label=contract_label,
             opened_at=str(raw.get("opened_at") or ""),
             entry_reason=str(raw.get("entry_reason") or ""),
             order_legs=[leg for leg in order_legs if isinstance(leg, dict)],
             option_strike=option_strike,
             option_type=option_type,
+            exit_pending=bool(raw.get("exit_pending")),
+            instrument_kind=kind,
+            premium_entry=premium_entry,
+            premium_last=premium_last,
         )
     except (KeyError, TypeError, ValueError):
         return None
@@ -702,7 +748,7 @@ class BreakoutEngine:
             self._reconcile_session_position_if_flat(state, now.date().isoformat())
         traders = list_live_s3_traders()
         logger.info(
-            "Breakout engine started (paper=%s mock=%s entries=%s indices=%s sizing=%s sl=%.0f tp=%.0f friday_1to1=%s max_trades=%d no_entry_after=%s lot=%d live_traders=%s)",
+            "Breakout engine started (paper=%s mock=%s entries=%s indices=%s sizing=%s sl=%.0f tp=%.0f friday_1to1=%s exec=%s opt_tp=%.0f opt_poll=%.0fs max_trades=%d no_entry_after=%s lot=%d live_traders=%s)",
             PAPER_TRADING,
             MOCK_MODE,
             ENTRIES_ENABLED,
@@ -711,6 +757,9 @@ class BreakoutEngine:
             FIXED_SL_PTS,
             FIXED_TP_PTS,
             FRIDAY_1TO1_TP,
+            "options" if s3_uses_options() else "futures",
+            OPTION_PREMIUM_TP_PTS,
+            OPTION_POLL_SECONDS,
             MAX_TRADES_PER_DAY,
             NO_ENTRY_AFTER.strftime("%H:%M"),
             LOTS_PER_TRADE,
@@ -722,9 +771,15 @@ class BreakoutEngine:
                 "Set BREAKOUT_ENTRIES_ENABLED=1 to trade."
             )
 
+    def _has_open_options_position(self) -> bool:
+        return any(s.position is not None and s.position.uses_options for s in self.states.values())
+
     def _poll_interval_seconds(self, now: datetime) -> float:
         if self._in_session_open_fast_poll(now):
             return SESSION_OPEN_POLL_SECONDS
+        # Holding options → 2s premium ticks so TP fires without waiting for the 15s loop.
+        if self._has_open_options_position():
+            return max(1.0, OPTION_POLL_SECONDS)
         return POLL_SECONDS
 
     def _session_open_deadline(self, day: date) -> datetime:
@@ -928,8 +983,19 @@ class BreakoutEngine:
         self._maybe_capture_session_open_tick(state, now, spot)
         self._invalidate_auction_frozen(state, now)
 
-        candles = self.client.get_5m_candles(cfg) or []
-        self._refresh_levels(state, candles, now, spot)
+        # Holding options: refresh option premium every ~2s; reuse candles most ticks
+        # so we don't hammer Upstox historical on every premium check.
+        holding_options = state.position is not None and state.position.uses_options
+        need_candles = (
+            not holding_options
+            or not state.cached_candles
+            or (time.monotonic() - state.last_candle_fetch_mono) >= POLL_SECONDS
+        )
+        if need_candles:
+            state.cached_candles = self.client.get_5m_candles(cfg) or []
+            state.last_candle_fetch_mono = time.monotonic()
+            self._refresh_levels(state, state.cached_candles, now, spot)
+        candles = state.cached_candles
 
         if state.position:
             self._catchup_missing_fanout_legs(state)
@@ -1421,8 +1487,9 @@ class BreakoutEngine:
             state.gap_regime,
             session_date=now.date(),
         )
+        uses_options = s3_uses_options()
         contract = self.client.resolve_future(state.config)
-        if contract is None:
+        if contract is None and not uses_options:
             logger.error("[%s] breakout entry aborted — no futures contract", state.config.code)
             return
 
@@ -1433,15 +1500,42 @@ class BreakoutEngine:
             lots=LOTS_PER_TRADE,
             upstox_market_client=self.client._upstox,
             global_paper=PAPER_TRADING or MOCK_MODE,
+            spot=close,
         )
         if not legs:
             logger.error("[%s] breakout entry aborted — no broker orders placed", state.config.code)
             return
 
+        primary = legs[0]
         contract_label = str(
-            legs[0].get("contract_label") or contract.get("contract_label") or f"{state.config.code} FUT"
+            primary.get("contract_label")
+            or (contract or {}).get("contract_label")
+            or f"{state.config.code} FUT"
         )
-        primary_key = str(legs[0].get("instrument_key") or contract.get("instrument_key") or "")
+        primary_key = str(primary.get("instrument_key") or (contract or {}).get("instrument_key") or "")
+        option_strike = int(primary.get("option_strike") or 0)
+        option_type = str(primary.get("option_type") or "")
+        premium_entry: float | None = None
+        if uses_options:
+            premiums = [
+                float(leg["premium_entry"])
+                for leg in legs
+                if leg.get("premium_entry") is not None
+            ]
+            if premiums:
+                premium_entry = sum(premiums) / len(premiums)
+            elif primary_key and self.client._upstox and not primary_key.startswith("groww:"):
+                premium_entry = self.client._upstox.get_ltp(primary_key)
+            if premium_entry is not None and premium_entry > 0:
+                # Track BLR levels still logged as spot SL; TP books on option premium +15.
+                tp1 = round(premium_entry + OPTION_PREMIUM_TP_PTS, 2)
+                tp2 = round(premium_entry + OPTION_PREMIUM_TP_PTS * 2, 2)
+            else:
+                logger.warning(
+                    "[%s] option premium unavailable after entry — using spot TP until LTP arrives",
+                    state.config.code,
+                )
+
         fanout_note = legs_summary(legs)
         state.position = BreakoutPosition(
             direction=direction,
@@ -1455,14 +1549,27 @@ class BreakoutEngine:
             opened_at=now.isoformat(),
             entry_reason=reason,
             order_legs=legs,
+            option_strike=option_strike,
+            option_type=option_type,
+            instrument_kind="options" if uses_options else "futures",
+            premium_entry=premium_entry,
         )
         state.trades_today += 1
-        msg = (
-            f"{state.config.display} BREAKOUT {direction} @ {close:.2f} "
-            f"via {contract_label} x{LOTS_PER_TRADE} lot — {reason} "
-            f"[{fanout_note}] "
-            f"SL {sl:.2f} TP1 {tp1:.2f} TP2 {tp2:.2f} (book @ TP1)"
-        )
+        if uses_options and premium_entry is not None:
+            msg = (
+                f"{state.config.display} BREAKOUT {direction} @ spot {close:.2f} "
+                f"via {contract_label} x{LOTS_PER_TRADE} lot — {reason} "
+                f"[{fanout_note}] "
+                f"premium {premium_entry:.2f} TP {tp1:.2f} (+{OPTION_PREMIUM_TP_PTS:.0f}) "
+                f"spot SL {sl:.2f}"
+            )
+        else:
+            msg = (
+                f"{state.config.display} BREAKOUT {direction} @ {close:.2f} "
+                f"via {contract_label} x{LOTS_PER_TRADE} lot — {reason} "
+                f"[{fanout_note}] "
+                f"SL {sl:.2f} TP1 {tp1:.2f} TP2 {tp2:.2f} (book @ TP1)"
+            )
         state.setup_label = f"{direction} entry — {reason}"
         state.signal_log.append(msg)
         logger.info(msg)
@@ -1470,7 +1577,7 @@ class BreakoutEngine:
         telegram_notifier.notify_trade_execution(
             index_name=f"{state.config.display} Breakout ({contract_label} x{LOTS_PER_TRADE})",
             trade_type=direction,
-            entry_price=close,
+            entry_price=premium_entry if (uses_options and premium_entry) else close,
             target_price=tp1,
             sl_price=sl,
             tp2_price=tp2,
@@ -1522,6 +1629,7 @@ class BreakoutEngine:
             existing_legs=existing,
             upstox_market_client=self.client._upstox,
             global_paper=False,
+            spot=state.spot or pos.entry_price,
         )
         if not new_legs:
             return
@@ -1531,6 +1639,30 @@ class BreakoutEngine:
         state.signal_log.append(msg)
         logger.info(msg)
         self._save_session_state(state)
+
+    def _option_premium_ltp(self, pos: BreakoutPosition) -> float | None:
+        """Live option LTP from Upstox (primary) or Groww leg symbol."""
+        key = pos.instrument_key
+        if key and not key.startswith("groww:") and self.client._upstox:
+            ltp = self.client._upstox.get_ltp(key)
+            if ltp is not None:
+                return float(ltp)
+        for leg in pos.order_legs or []:
+            if not isinstance(leg, dict):
+                continue
+            if leg.get("broker") == "groww" and leg.get("trading_symbol"):
+                from app.services.groww_engine import GrowwClient
+
+                groww = GrowwClient(str(leg.get("username") or "Nani"))
+                ltp = groww.get_fno_ltp(str(leg["trading_symbol"]))
+                if ltp is not None:
+                    return float(ltp)
+            ik = str(leg.get("instrument_key") or "")
+            if ik and not ik.startswith("groww:") and self.client._upstox:
+                ltp = self.client._upstox.get_ltp(ik)
+                if ltp is not None:
+                    return float(ltp)
+        return None
 
     def _manage_position(
         self,
@@ -1544,8 +1676,7 @@ class BreakoutEngine:
 
         spot = state.spot
         bar_high, bar_low = self._position_price_extremes(pos, spot, candles or [])
-        # Sensex: after +50 pts move SL to entry (cost)
-        if state.config.code == "SENSEX":
+        if state.config.code == "SENSEX" and not pos.uses_options:
             fav = (spot - pos.entry_price) if pos.direction == "LONG" else (pos.entry_price - spot)
             if fav >= SENSEX_COST_SL_PTS:
                 if pos.direction == "LONG" and pos.sl_price < pos.entry_price:
@@ -1555,7 +1686,55 @@ class BreakoutEngine:
 
         exit_reason = ""
         exit_price = spot
-        if pos.direction == "LONG":
+
+        if pos.uses_options:
+            premium = self._option_premium_ltp(pos)
+            prev_premium = pos.premium_last
+            if pos.premium_entry is None and premium is not None and premium > 0:
+                pos.premium_entry = premium
+                pos.tp1_price = round(premium + OPTION_PREMIUM_TP_PTS, 2)
+                pos.tp2_price = round(premium + OPTION_PREMIUM_TP_PTS * 2, 2)
+                logger.info(
+                    "[%s] option premium captured %.2f → TP %.2f",
+                    state.config.code,
+                    premium,
+                    pos.tp1_price,
+                )
+                self._save_session_state(state)
+
+            # Tick-to-tick: always keep last print; TP if price >= target or crossed over it.
+            tp_hit = False
+            if premium is not None:
+                if premium >= pos.tp1_price:
+                    tp_hit = True
+                elif prev_premium is not None and prev_premium < pos.tp1_price <= premium:
+                    tp_hit = True
+                if prev_premium is None or abs(premium - prev_premium) >= 0.05:
+                    logger.debug(
+                        "[%s] option premium tick %.2f → %.2f (TP %.2f)",
+                        state.config.code,
+                        prev_premium if prev_premium is not None else premium,
+                        premium,
+                        pos.tp1_price,
+                    )
+                pos.premium_last = premium
+
+            # Spot SL on live LTP (fast) + bar extreme (candle cache).
+            if pos.direction == "LONG":
+                if spot <= pos.sl_price or bar_low <= pos.sl_price:
+                    exit_reason = "SL"
+                    exit_price = min(spot, pos.sl_price)
+                elif tp_hit:
+                    exit_reason = f"TP1 booked (+{OPTION_PREMIUM_TP_PTS:.0f} prem)"
+                    exit_price = float(premium) if premium is not None else pos.tp1_price
+            else:
+                if spot >= pos.sl_price or bar_high >= pos.sl_price:
+                    exit_reason = "SL"
+                    exit_price = max(spot, pos.sl_price)
+                elif tp_hit:
+                    exit_reason = f"TP1 booked (+{OPTION_PREMIUM_TP_PTS:.0f} prem)"
+                    exit_price = float(premium) if premium is not None else pos.tp1_price
+        elif pos.direction == "LONG":
             if bar_low <= pos.sl_price:
                 exit_reason = "SL"
                 exit_price = pos.sl_price
@@ -1582,11 +1761,14 @@ class BreakoutEngine:
             logger.error("[%s] breakout exit order failed (%s)", state.config.code, exit_reason)
             return
 
-        pnl = (
-            (exit_price - pos.entry_price)
-            if pos.direction == "LONG"
-            else (pos.entry_price - exit_price)
-        )
+        if pos.uses_options and pos.premium_entry is not None and "TP1" in exit_reason:
+            pnl = exit_price - pos.premium_entry
+        else:
+            pnl = (
+                (exit_price - pos.entry_price)
+                if pos.direction == "LONG"
+                else (pos.entry_price - exit_price)
+            )
         msg = (
             f"{state.config.display} BREAKOUT exit {exit_reason} @ {exit_price:.2f} "
             f"(spot {spot:.2f} bar {bar_low:.2f}-{bar_high:.2f}) ({pnl:+.2f} pts)"
@@ -1598,7 +1780,7 @@ class BreakoutEngine:
             strategy_id="breakout",
             symbol=state.config.code,
             direction=pos.direction,
-            entry_price=pos.entry_price,
+            entry_price=pos.premium_entry if (pos.uses_options and pos.premium_entry) else pos.entry_price,
             exit_price=exit_price,
             pnl_points=pnl,
             exit_reason=exit_reason,
@@ -1684,6 +1866,8 @@ class BreakoutEngine:
             "sizing_mode": SIZING_MODE,
             "fixed_sl_pts": FIXED_SL_PTS,
             "fixed_tp_pts": FIXED_TP_PTS,
+            "exec_instrument": "options" if s3_uses_options() else "futures",
+            "option_premium_tp_pts": OPTION_PREMIUM_TP_PTS,
             "session_open": state.session_open,
             "broker_session_open": state.broker_session_open,
             "session_open_tv_offset": state.session_open_tv_offset,
@@ -1720,6 +1904,10 @@ class BreakoutEngine:
                 "entry_reason": pos.entry_reason,
                 "opened_at": pos.opened_at,
                 "order_legs": pos.order_legs,
+                "instrument_kind": pos.instrument_kind,
+                "premium_entry": pos.premium_entry,
+                "premium_last": pos.premium_last,
+                "instrument_key": pos.instrument_key,
             }
         key = cache_manager.BREAKOUT_STATE_KEY_TEMPLATE.format(index=state.config.code)
         cache_manager.set_json(key, payload, ttl_seconds=86_400)
@@ -1737,6 +1925,8 @@ class BreakoutEngine:
                 "indices": list(INDEX_CONFIGS.keys()),
                 "entries_indices": sorted(ENTRIES_INDICES),
                 "entries_enabled": ENTRIES_ENABLED,
+                "exec_instrument": "options" if s3_uses_options() else "futures",
+                "option_premium_tp_pts": OPTION_PREMIUM_TP_PTS,
             },
             ttl_seconds=60,
         )

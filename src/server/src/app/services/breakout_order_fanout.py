@@ -3,14 +3,18 @@
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Final
 
 from app.constants import STRATEGY_S3_BREAKOUT
 from app.services.groww_engine import GrowwClient
 from app.services.upstox_engine import UpstoxClient, build_upstox_client
 
 logger = logging.getLogger("ak07.breakout_fanout")
+
+# futures = index FUT (legacy). options = BUY ITM CE/PE, exit with SELL (lower brokerage).
+S3_EXEC_INSTRUMENT: Final[str] = (os.environ.get("BREAKOUT_EXEC_INSTRUMENT") or "options").strip().lower()
 
 
 @dataclass(frozen=True)
@@ -39,11 +43,19 @@ def list_live_s3_traders() -> list[S3Trader]:
     return traders
 
 
-def _entry_side(direction: str) -> str:
+def s3_uses_options() -> bool:
+    return S3_EXEC_INSTRUMENT in ("option", "options", "opt")
+
+
+def _entry_side(direction: str, *, options: bool) -> str:
+    if options:
+        return "BUY"  # long CE on LONG signal, long PE on SHORT signal
     return "BUY" if direction == "LONG" else "SELL"
 
 
-def _exit_side(direction: str) -> str:
+def _exit_side(direction: str, *, options: bool) -> str:
+    if options:
+        return "SELL"
     return "SELL" if direction == "LONG" else "BUY"
 
 
@@ -56,26 +68,34 @@ def place_s3_entries(
     upstox_market_client: UpstoxClient | None,
     global_paper: bool,
     only_usernames: frozenset[str] | None = None,
+    spot: float | None = None,
 ) -> list[dict[str, Any]]:
     """Place entry on every live S3 trader's broker. Returns successful legs."""
+    options = s3_uses_options()
+    if options and (spot is None or spot <= 0):
+        logger.error("S3 options entry aborted — spot required to pick ITM strike")
+        return []
+
     if global_paper:
         traders = list_live_s3_traders()
         if only_usernames:
             traders = [t for t in traders if t.username in only_usernames]
+        label = f"{index_code} OPT" if options else f"{index_code} FUT"
         return [
             {
                 "username": t.username,
                 "broker": t.broker,
-                "trading_symbol": f"{index_code} FUT",
+                "trading_symbol": label,
                 "instrument_key": "",
                 "quantity": lot_size * lots,
                 "paper": True,
+                "instrument_kind": "options" if options else "futures",
             }
             for t in traders
         ]
 
     quantity = lot_size * lots
-    side = _entry_side(direction)
+    side = _entry_side(direction, options=options)
     legs: list[dict[str, Any]] = []
 
     for trader in list_live_s3_traders():
@@ -86,20 +106,25 @@ def place_s3_entries(
             if not groww.has_token():
                 logger.error("[%s] S3 entry skipped — no Groww token", trader.username)
                 continue
-            contract = groww.get_index_future_contract(index_code)
+            if options:
+                contract = groww.get_itm_option_contract(index_code, float(spot), direction)
+            else:
+                contract = groww.get_index_future_contract(index_code)
             if not contract:
-                logger.error("[%s] S3 entry skipped — no Groww %s future", trader.username, index_code)
+                kind = "option" if options else "future"
+                logger.error("[%s] S3 entry skipped — no Groww %s %s", trader.username, index_code, kind)
                 continue
             qty = int(contract.get("lot_size") or lot_size) * lots
             sym = str(contract["trading_symbol"])
-            if groww.has_directional_exposure(sym, direction, qty):
+            # Options are always long premium → treat as LONG exposure check
+            expose_dir = "LONG" if options else direction
+            if groww.has_directional_exposure(sym, expose_dir, qty):
                 logger.warning(
-                    "[%s] Groww already has %s exposure on %s — skipping duplicate entry",
+                    "[%s] Groww already has exposure on %s — skipping duplicate entry",
                     trader.username,
-                    direction,
                     sym,
                 )
-                legs.append(_groww_entry_leg_from_position(trader, contract, direction, lots))
+                legs.append(_groww_entry_leg_from_position(trader, contract, direction, lots, options=options))
                 continue
             order_id = groww.place_market_order(
                 sym,
@@ -110,6 +135,7 @@ def place_s3_entries(
             if not order_id:
                 logger.error("[%s] Groww S3 entry order failed", trader.username)
                 continue
+            premium = groww.get_fno_ltp(sym)
             legs.append(
                 {
                     "username": trader.username,
@@ -120,20 +146,70 @@ def place_s3_entries(
                     "contract_label": contract.get("contract_label") or "",
                     "quantity": qty,
                     "groww_order_id": order_id,
+                    "instrument_kind": "options" if options else "futures",
+                    "option_strike": int(contract.get("strike") or 0),
+                    "option_type": str(contract.get("option_type") or ""),
+                    "premium_entry": float(premium) if premium is not None else None,
                 }
             )
             logger.info(
-                "[%s] S3 Groww entry %s %d x %s (%s)",
+                "[%s] S3 Groww entry %s %d x %s (%s)%s",
                 trader.username,
                 side,
                 qty,
                 contract["trading_symbol"],
                 order_id,
+                f" premium≈{premium}" if premium is not None else "",
             )
             continue
 
         if trader.broker == "upstox":
             upstox = build_upstox_client(trader.username)
+            if options:
+                from app.services.upstox_engine import INDEX_CONFIGS
+
+                cfg = INDEX_CONFIGS.get(index_code.upper())
+                if not cfg:
+                    logger.error("[%s] S3 entry skipped — unknown index %s", trader.username, index_code)
+                    continue
+                client = upstox_market_client or upstox
+                contract = client.get_itm_option_contract(cfg.spot_instrument_key, float(spot), direction)
+                if not contract or not contract.get("instrument_key"):
+                    logger.error("[%s] S3 entry skipped — no Upstox %s ITM option", trader.username, index_code)
+                    continue
+                ok = upstox.place_market_order(str(contract["instrument_key"]), quantity, "BUY")
+                if not ok:
+                    logger.error("[%s] Upstox S3 option entry failed", trader.username)
+                    continue
+                premium = upstox.get_ltp(str(contract["instrument_key"]))
+                label = f"{contract['strike']}{contract['option_type']}"
+                legs.append(
+                    {
+                        "username": trader.username,
+                        "broker": "upstox",
+                        "trading_symbol": label,
+                        "instrument_key": contract["instrument_key"],
+                        "contract_label": label,
+                        "quantity": quantity,
+                        "instrument_kind": "options",
+                        "option_strike": int(contract["strike"]),
+                        "option_type": str(contract["option_type"]),
+                        "premium_entry": float(premium) if premium is not None else None,
+                        "delta": contract.get("delta"),
+                        "abs_delta": contract.get("abs_delta"),
+                        "selection": contract.get("selection"),
+                    }
+                )
+                logger.info(
+                    "[%s] S3 Upstox entry BUY %d x %s δ=%s%s",
+                    trader.username,
+                    quantity,
+                    label,
+                    contract.get("abs_delta") or contract.get("delta"),
+                    f" premium≈{premium}" if premium is not None else "",
+                )
+                continue
+
             contract = upstox.get_index_future_contract(index_code)
             if not contract or not contract.get("instrument_key"):
                 logger.error("[%s] S3 entry skipped — no Upstox %s future", trader.username, index_code)
@@ -150,6 +226,7 @@ def place_s3_entries(
                     "instrument_key": contract["instrument_key"],
                     "contract_label": contract.get("contract_label") or "",
                     "quantity": quantity,
+                    "instrument_kind": "futures",
                 }
             )
             logger.info(
@@ -173,6 +250,8 @@ def _groww_entry_leg_from_position(
     contract: dict[str, Any],
     direction: str,
     lots: int,
+    *,
+    options: bool = False,
 ) -> dict[str, Any]:
     """Synthetic leg when Groww already holds the S3 entry (prevents duplicate orders)."""
     qty = int(contract.get("lot_size") or 65) * lots
@@ -186,6 +265,9 @@ def _groww_entry_leg_from_position(
         "quantity": qty,
         "groww_order_id": "existing_position",
         "recovered": True,
+        "instrument_kind": "options" if options else "futures",
+        "option_strike": int(contract.get("strike") or 0),
+        "option_type": str(contract.get("option_type") or ""),
     }
 
 
@@ -204,7 +286,7 @@ def missing_s3_traders(
         for trader in list_live_s3_traders():
             if trader.broker == "upstox":
                 covered.add(trader.username)
-    if index_code and direction:
+    if index_code and direction and not s3_uses_options():
         qty = lot_size * lots
         for trader in list_live_s3_traders():
             if trader.username in covered or trader.broker != "groww":
@@ -236,6 +318,7 @@ def catchup_s3_legs(
     existing_legs: list[dict[str, Any]],
     upstox_market_client: UpstoxClient | None,
     global_paper: bool,
+    spot: float | None = None,
 ) -> list[dict[str, Any]]:
     """Place entries for live traders missing from an open position's legs."""
     missing = missing_s3_traders(
@@ -258,6 +341,7 @@ def catchup_s3_legs(
         upstox_market_client=upstox_market_client,
         global_paper=global_paper,
         only_usernames=names,
+        spot=spot,
     )
 
 
@@ -271,7 +355,8 @@ def place_s3_exits(
     if global_paper or not legs:
         return True
 
-    side = _exit_side(direction)
+    options = any(str(leg.get("instrument_kind") or "") == "options" for leg in legs) or s3_uses_options()
+    side = _exit_side(direction, options=options)
     all_ok = True
 
     for leg in legs:
@@ -282,6 +367,7 @@ def place_s3_exits(
         qty = int(leg.get("quantity") or 0)
         if qty <= 0:
             continue
+        leg_options = str(leg.get("instrument_kind") or "") == "options" or options
 
         if broker == "groww":
             groww = GrowwClient(username)
@@ -291,22 +377,33 @@ def place_s3_exits(
                 all_ok = False
                 continue
             net = groww.net_fno_quantity(trading_symbol)
-            if direction == "LONG" and net <= 0:
-                logger.warning(
-                    "[%s] Groww exit skipped — already flat/short on %s (net=%d)",
-                    username,
-                    trading_symbol,
-                    net,
-                )
-                continue
-            if direction == "SHORT" and net >= 0:
-                logger.warning(
-                    "[%s] Groww exit skipped — already flat/long on %s (net=%d)",
-                    username,
-                    trading_symbol,
-                    net,
-                )
-                continue
+            # Options: we are always long premium → flat when net <= 0
+            if leg_options:
+                if net <= 0:
+                    logger.warning(
+                        "[%s] Groww option exit skipped — already flat on %s (net=%d)",
+                        username,
+                        trading_symbol,
+                        net,
+                    )
+                    continue
+            else:
+                if direction == "LONG" and net <= 0:
+                    logger.warning(
+                        "[%s] Groww exit skipped — already flat/short on %s (net=%d)",
+                        username,
+                        trading_symbol,
+                        net,
+                    )
+                    continue
+                if direction == "SHORT" and net >= 0:
+                    logger.warning(
+                        "[%s] Groww exit skipped — already flat/long on %s (net=%d)",
+                        username,
+                        trading_symbol,
+                        net,
+                    )
+                    continue
             exit_qty = min(qty, abs(net)) if net != 0 else qty
             order_id = groww.place_market_order(trading_symbol, exit_qty, side)
             if not order_id:
@@ -346,28 +443,16 @@ def place_s3_exits(
 
 def legs_summary(legs: list[dict[str, Any]]) -> str:
     if not legs:
-        return ""
-    parts = []
+        return "none"
+    bits: list[str] = []
     for leg in legs:
-        label = leg.get("contract_label") or leg.get("trading_symbol") or "FUT"
-        parts.append(f"{leg.get('username')}@{leg.get('broker')} ({label})")
-    return ", ".join(parts)
+        user = leg.get("username", "?")
+        broker = leg.get("broker", "?")
+        label = leg.get("contract_label") or leg.get("trading_symbol") or ""
+        bits.append(f"{user}@{broker} ({label})")
+    return ", ".join(bits)
 
 
-def position_legs(position: Any) -> list[dict[str, Any]]:
-    """Return order legs from position, with legacy Upstox-only fallback."""
-    legs = getattr(position, "order_legs", None) or []
-    if legs:
-        return list(legs)
-    instrument_key = str(getattr(position, "instrument_key", "") or "")
-    if not instrument_key:
-        return []
-    return [
-        {
-            "username": "AK07",
-            "broker": "upstox",
-            "instrument_key": instrument_key,
-            "trading_symbol": getattr(position, "contract_label", "") or "",
-            "quantity": getattr(position, "quantity", 0),
-        }
-    ]
+def position_legs(pos: Any) -> list[dict[str, Any]]:
+    legs = getattr(pos, "order_legs", None)
+    return legs if isinstance(legs, list) else []

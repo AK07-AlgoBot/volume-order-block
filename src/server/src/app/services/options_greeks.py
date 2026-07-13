@@ -256,3 +256,129 @@ def analyze_option_chain(
         regime=regime,
         bias=bias,
     )
+
+
+def pick_spot_aligned_option(
+    *,
+    spot: float,
+    chain_rows: list[dict[str, Any]],
+    expiry: str,
+    direction: str,
+    strike_step: int = 50,
+    target_delta: float = 0.55,
+    delta_min: float = 0.40,
+    delta_max: float = 0.75,
+    band_points: float = 250.0,
+    now: datetime | None = None,
+) -> dict[str, Any] | None:
+    """Pick ATM/mild-ITM CE (LONG) or PE (SHORT) whose |delta| best tracks spot.
+
+    Prefers strikes that:
+      • sit ATM → 1–2 steps ITM (premium moves with Nifty)
+      • have |delta| near target (default 0.55, clamped to [delta_min, delta_max])
+      • have usable LTP and preferably OI liquidity
+    """
+    if spot <= 0 or not chain_rows:
+        return None
+
+    opt = "CE" if direction == "LONG" else "PE"
+    leg_key = "call_options" if direction == "LONG" else "put_options"
+    t = years_to_expiry(expiry, now)
+    atm = int(round(spot / strike_step) * strike_step)
+    candidates: list[dict[str, Any]] = []
+
+    for row in chain_rows:
+        try:
+            strike = int(float(row.get("strike_price", 0)))
+        except (TypeError, ValueError):
+            continue
+        if abs(strike - spot) > band_points:
+            continue
+        # Prefer ATM / ITM — skip deep OTM that barely tracks spot.
+        if direction == "LONG" and strike > atm + strike_step:
+            continue
+        if direction == "SHORT" and strike < atm - strike_step:
+            continue
+        if direction == "LONG" and strike < atm - 2 * strike_step:
+            continue  # deep ITM — expensive, lower gamma for +15 premium target
+        if direction == "SHORT" and strike > atm + 2 * strike_step:
+            continue
+
+        leg = row.get(leg_key) or {}
+        instrument_key = str(leg.get("instrument_key") or "")
+        if not instrument_key:
+            continue
+        ltp = _ltp_from_leg(leg)
+        oi = _oi_from_leg(leg)
+
+        broker_delta = None
+        greeks = leg.get("greeks") or {}
+        if isinstance(greeks, dict) and greeks.get("delta") is not None:
+            try:
+                broker_delta = float(greeks["delta"])
+            except (TypeError, ValueError):
+                broker_delta = None
+
+        if broker_delta is not None:
+            delta = broker_delta
+        elif ltp > 0:
+            iv = implied_volatility(ltp, spot, strike, t, option_type=opt) or 0.18
+            delta = bs_delta(spot, strike, t, iv, option_type=opt)
+        else:
+            iv = 0.18
+            delta = bs_delta(spot, strike, t, iv, option_type=opt)
+
+        abs_delta = abs(delta)
+        if abs_delta < delta_min or abs_delta > delta_max:
+            if abs(strike - atm) > strike_step:
+                continue
+
+        itm_bonus = 0.0
+        if direction == "LONG" and strike <= spot:
+            itm_bonus = 0.08 if strike in (atm, atm - strike_step) else 0.04
+        if direction == "SHORT" and strike >= spot:
+            itm_bonus = 0.08 if strike in (atm, atm + strike_step) else 0.04
+
+        atm_dist = abs(strike - atm) / max(strike_step, 1)
+        delta_err = abs(abs_delta - target_delta)
+        liq_bonus = min(oi / 50_000.0, 0.05) if oi > 0 else 0.0
+        score = delta_err + 0.15 * atm_dist - itm_bonus - liq_bonus
+        candidates.append(
+            {
+                "instrument_key": instrument_key,
+                "strike": strike,
+                "option_type": opt,
+                "delta": round(delta, 4),
+                "abs_delta": round(abs_delta, 4),
+                "ltp": ltp,
+                "oi": oi,
+                "score": score,
+                "expiry": expiry,
+            }
+        )
+
+    if not candidates:
+        for row in chain_rows:
+            try:
+                strike = int(float(row.get("strike_price", 0)))
+            except (TypeError, ValueError):
+                continue
+            if strike != atm:
+                continue
+            leg = row.get(leg_key) or {}
+            instrument_key = str(leg.get("instrument_key") or "")
+            if instrument_key:
+                return {
+                    "instrument_key": instrument_key,
+                    "strike": strike,
+                    "option_type": opt,
+                    "delta": None,
+                    "abs_delta": None,
+                    "selection": "atm_fallback",
+                    "expiry": expiry,
+                }
+        return None
+
+    best = min(candidates, key=lambda c: float(c["score"]))
+    best["selection"] = "delta_aligned"
+    return best
