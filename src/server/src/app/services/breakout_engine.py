@@ -61,6 +61,10 @@ MAX_TRADES_PER_DAY: Final[int] = int(os.environ.get("BREAKOUT_MAX_TRADES_PER_DAY
 LOTS_PER_TRADE: Final[int] = 1
 # Execution: options = BUY ITM CE/PE (premium TP); futures = index FUT. BLR signals unchanged either way.
 OPTION_PREMIUM_TP_PTS: Final[float] = float(os.environ.get("BREAKOUT_OPTION_PREMIUM_TP_PTS", "15"))
+# Premium stop (pts below entry). Spot SL was too hair-trigger on 2s LTP for option legs.
+OPTION_PREMIUM_SL_PTS: Final[float] = float(os.environ.get("BREAKOUT_OPTION_PREMIUM_SL_PTS", "8"))
+# Ignore exits for N seconds after entry (avoids open-print noise).
+OPTION_ENTRY_GRACE_SEC: Final[float] = float(os.environ.get("BREAKOUT_OPTION_ENTRY_GRACE_SEC", "20"))
 # While holding options, poll premium every N seconds (catch TP without waiting for 15s candle loop).
 OPTION_POLL_SECONDS: Final[float] = float(os.environ.get("BREAKOUT_OPTION_POLL_SECONDS", "2"))
 SL_BUFFER: Final[float] = float(os.environ.get("BREAKOUT_SL_BUFFER_PTS", "2.0"))
@@ -1527,9 +1531,10 @@ class BreakoutEngine:
             elif primary_key and self.client._upstox and not primary_key.startswith("groww:"):
                 premium_entry = self.client._upstox.get_ltp(primary_key)
             if premium_entry is not None and premium_entry > 0:
-                # Track BLR levels still logged as spot SL; TP books on option premium +15.
+                # Options: TP/SL on premium; spot SL from trade_levels is replaced.
                 tp1 = round(premium_entry + OPTION_PREMIUM_TP_PTS, 2)
                 tp2 = round(premium_entry + OPTION_PREMIUM_TP_PTS * 2, 2)
+                sl = round(max(premium_entry - OPTION_PREMIUM_SL_PTS, 0.05), 2)
             else:
                 logger.warning(
                     "[%s] option premium unavailable after entry — using spot TP until LTP arrives",
@@ -1553,6 +1558,7 @@ class BreakoutEngine:
             option_type=option_type,
             instrument_kind="options" if uses_options else "futures",
             premium_entry=premium_entry,
+            premium_last=premium_entry,
         )
         state.trades_today += 1
         if uses_options and premium_entry is not None:
@@ -1561,7 +1567,7 @@ class BreakoutEngine:
                 f"via {contract_label} x{LOTS_PER_TRADE} lot — {reason} "
                 f"[{fanout_note}] "
                 f"premium {premium_entry:.2f} TP {tp1:.2f} (+{OPTION_PREMIUM_TP_PTS:.0f}) "
-                f"spot SL {sl:.2f}"
+                f"SL {sl:.2f} (−{OPTION_PREMIUM_SL_PTS:.0f})"
             )
         else:
             msg = (
@@ -1694,46 +1700,62 @@ class BreakoutEngine:
                 pos.premium_entry = premium
                 pos.tp1_price = round(premium + OPTION_PREMIUM_TP_PTS, 2)
                 pos.tp2_price = round(premium + OPTION_PREMIUM_TP_PTS * 2, 2)
+                # Re-purpose sl_price as premium floor when in options mode.
+                pos.sl_price = round(max(premium - OPTION_PREMIUM_SL_PTS, 0.05), 2)
                 logger.info(
-                    "[%s] option premium captured %.2f → TP %.2f",
+                    "[%s] option premium captured %.2f → TP %.2f / SL %.2f (−%.0f / +%.0f)",
                     state.config.code,
                     premium,
                     pos.tp1_price,
+                    pos.sl_price,
+                    OPTION_PREMIUM_SL_PTS,
+                    OPTION_PREMIUM_TP_PTS,
                 )
                 self._save_session_state(state)
 
-            # Tick-to-tick: always keep last print; TP if price >= target or crossed over it.
+            # Grace: open prints can whip; don't exit on first N seconds.
+            in_grace = False
+            if pos.opened_at and OPTION_ENTRY_GRACE_SEC > 0:
+                try:
+                    opened = datetime.fromisoformat(pos.opened_at)
+                    if opened.tzinfo is None:
+                        opened = opened.replace(tzinfo=IST)
+                    in_grace = (now - opened).total_seconds() < OPTION_ENTRY_GRACE_SEC
+                except ValueError:
+                    in_grace = False
+
             tp_hit = False
+            sl_hit = False
             if premium is not None:
                 if premium >= pos.tp1_price:
                     tp_hit = True
                 elif prev_premium is not None and prev_premium < pos.tp1_price <= premium:
                     tp_hit = True
+                if pos.premium_entry is not None:
+                    if premium <= pos.sl_price:
+                        sl_hit = True
+                    elif prev_premium is not None and prev_premium > pos.sl_price >= premium:
+                        sl_hit = True
                 if prev_premium is None or abs(premium - prev_premium) >= 0.05:
                     logger.debug(
-                        "[%s] option premium tick %.2f → %.2f (TP %.2f)",
+                        "[%s] option premium tick %.2f → %.2f (TP %.2f SL %.2f)",
                         state.config.code,
                         prev_premium if prev_premium is not None else premium,
                         premium,
                         pos.tp1_price,
+                        pos.sl_price,
                     )
                 pos.premium_last = premium
 
-            # Spot SL on live LTP (fast) + bar extreme (candle cache).
-            if pos.direction == "LONG":
-                if spot <= pos.sl_price or bar_low <= pos.sl_price:
-                    exit_reason = "SL"
-                    exit_price = min(spot, pos.sl_price)
-                elif tp_hit:
-                    exit_reason = f"TP1 booked (+{OPTION_PREMIUM_TP_PTS:.0f} prem)"
-                    exit_price = float(premium) if premium is not None else pos.tp1_price
-            else:
-                if spot >= pos.sl_price or bar_high >= pos.sl_price:
-                    exit_reason = "SL"
-                    exit_price = max(spot, pos.sl_price)
-                elif tp_hit:
-                    exit_reason = f"TP1 booked (+{OPTION_PREMIUM_TP_PTS:.0f} prem)"
-                    exit_price = float(premium) if premium is not None else pos.tp1_price
+            if in_grace and not tp_hit:
+                return
+
+            if tp_hit:
+                exit_reason = f"TP1 booked (+{OPTION_PREMIUM_TP_PTS:.0f} prem)"
+                exit_price = float(premium) if premium is not None else pos.tp1_price
+            elif sl_hit:
+                exit_reason = f"SL (−{OPTION_PREMIUM_SL_PTS:.0f} prem)"
+                exit_price = float(premium) if premium is not None else pos.sl_price
         elif pos.direction == "LONG":
             if bar_low <= pos.sl_price:
                 exit_reason = "SL"
@@ -1761,7 +1783,7 @@ class BreakoutEngine:
             logger.error("[%s] breakout exit order failed (%s)", state.config.code, exit_reason)
             return
 
-        if pos.uses_options and pos.premium_entry is not None and "TP1" in exit_reason:
+        if pos.uses_options and pos.premium_entry is not None:
             pnl = exit_price - pos.premium_entry
         else:
             pnl = (
