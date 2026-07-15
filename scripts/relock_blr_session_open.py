@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
-"""Re-lock S3 BLR with a TV-confirmed 9:15 session open (first regular-session tick).
+"""Re-lock S3 BLR with a TV-confirmed Mid (rare fallback).
 
-Upstox candle/day OHLC open uses the NSE auction price; TradingView uses the first
-trade at 9:15. Use this when the engine locked on the wrong open or first-tick capture
-was missed.
+Primary Mid comes automatically from Upstox market-quote day OHLC open (usually =
+TradingView). Use this only when auto Mid is still wrong after day open is available.
 
   docker compose -p ak07 -f configs/docker-compose.yml exec -T api \\
     python scripts/relock_blr_session_open.py 24243.50
@@ -107,7 +106,7 @@ def main() -> None:
         "session_open": levels.mid,
         "broker_session_open": session_open,
         "session_open_tv_offset": 0.0,
-        "session_open_source": "first_ltp",
+        "session_open_source": "manual_tv",
         "prev_close": prev["close"],
         "day_review": day_review,
         "first_candle_close": first_close,
@@ -144,7 +143,7 @@ def main() -> None:
             "session_open": levels.mid,
             "broker_session_open": session_open,
             "session_open_tv_offset": 0.0,
-            "session_open_source": "first_ltp",
+            "session_open_source": "manual_tv",
             "prev_close": prev["close"],
             "levels_ready": True,
             "day_review": day_review,

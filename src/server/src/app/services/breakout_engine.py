@@ -109,25 +109,30 @@ ALLOW_PROVISIONAL_LTP: Final[bool] = os.environ.get("BREAKOUT_ALLOW_PROVISIONAL_
     "true",
     "yes",
 )
-# Upstox candle/day OHLC open = NSE official auction price; TV uses first regular-session tick.
-# Capture live LTP in the first ~2 minutes after 9:15 for Pine parity (sessionOpen := open).
+# Mid auto-lock (TV parity — avoid daily manual paste):
+# 1) Prefer Upstox market-quote day OHLC open — usually matches TradingView index Mid.
+# 2) 5m candle open often = NSE auction (≠ TV); ignore when it equals day open.
+# 3) first_ltp is fallback only when day OHLC is late/missing; never sticky over day OHLC.
+# 4) manual_tv (relock script) stays highest rank for rare edge cases.
 SESSION_OPEN_TICK_WINDOW_SEC: Final[int] = int(
     os.environ.get("BREAKOUT_SESSION_OPEN_TICK_WINDOW_SEC", "120")
 )
+# Wait for live LTP only when Mid would otherwise come from auction 5m candle.
+# Default off — day OHLC locks Mid automatically without waiting for a tick.
 SESSION_OPEN_TICK_WAIT: Final[bool] = os.environ.get(
-    "BREAKOUT_SESSION_OPEN_WAIT_FOR_TICK", "1"
-).strip().lower() in ("1", "true", "yes")
+    "BREAKOUT_SESSION_OPEN_WAIT_FOR_TICK", "0"
+).strip().lower() in ("1", "true", "yes", "on")
 SESSION_OPEN_POLL_SECONDS: Final[float] = float(
     os.environ.get("BREAKOUT_SESSION_OPEN_POLL_SECONDS", "1")
 )
 SESSION_OPEN_PRESTART_SEC: Final[int] = int(
     os.environ.get("BREAKOUT_SESSION_OPEN_PRESTART_SEC", "10")
 )
-# Only accept LTP captured within this many seconds after 9:15 (TV 1m bar open).
+# Only accept LTP captured within this many seconds after 9:15 (fallback Mid).
 SESSION_OPEN_TICK_MAX_DELAY_SEC: Final[int] = int(
     os.environ.get("BREAKOUT_SESSION_OPEN_TICK_MAX_DELAY_SEC", "45")
 )
-# Upstox LTP can sit at NSE auction price for seconds; wait until it diverges (TV first trade).
+# Upstox LTP can sit at NSE auction price for seconds; wait until it diverges when using LTP fallback.
 AUCTION_LTP_TOLERANCE_PTS: Final[float] = float(
     os.environ.get("BREAKOUT_AUCTION_LTP_TOLERANCE_PTS", "1.5")
 )
@@ -826,14 +831,40 @@ class BreakoutEngine:
         return abs(ltp - day_open) < AUCTION_LTP_TOLERANCE_PTS
 
     def _invalidate_auction_frozen(self, state: IndexBreakoutState, now: datetime) -> None:
-        """Drop frozen BLR locked on Upstox auction open when a TV tick exists."""
-        if not state.levels_ready or state.session_open_tick is None:
+        """Drop BLR locked on auction 5m candle when market-quote day open (or TV tick) exists."""
+        if not state.levels_ready:
             return
         source = str(state.session_open_source or "")
         mid = state.mid
         if mid is None:
             return
-        if source not in ("candle", "day_ohlc", "frozen") or abs(mid - state.session_open_tick) < 0.01:
+        # Never override a manual TV Mid.
+        if source == "manual_tv":
+            return
+
+        day_open = self.client.get_session_day_open(state.config)
+        if day_open is not None and source in ("candle", "first_ltp", "ltp_provisional", "frozen"):
+            if abs(mid - day_open) >= 0.01:
+                logger.warning(
+                    "[%s] Clearing frozen BLR mid %.2f (%s) — day OHLC open %.2f available (TV Mid)",
+                    state.config.code,
+                    mid,
+                    source,
+                    day_open,
+                )
+                day = state.trade_day or now.date().isoformat()
+                cache_manager.delete_key(self._frozen_key(day, state.config.code))
+                state.levels_ready = False
+                state.mid = state.green = state.red = None
+                state.session_open = None
+                state.broker_session_open = None
+                state.session_open_source = ""
+                return
+
+        # Legacy: tick beat auction candle when day OHLC still missing.
+        if state.session_open_tick is None:
+            return
+        if source not in ("candle", "frozen") or abs(mid - state.session_open_tick) < 0.01:
             return
         logger.warning(
             "[%s] Clearing frozen BLR mid %.2f (%s) — TV tick %.2f available",
@@ -1016,11 +1047,13 @@ class BreakoutEngine:
 
         self._publish_state(state, now, entries_blocked, block_reason)
 
+    # Higher rank wins. day_ohlc ≈ TV index Mid; first_ltp is fallback only.
     _SESSION_OPEN_RANK: Final[dict[str, int]] = {
         "ltp_provisional": 0,
-        "day_ohlc": 1,
-        "candle": 2,
-        "first_ltp": 3,
+        "candle": 1,
+        "first_ltp": 2,
+        "day_ohlc": 3,
+        "manual_tv": 4,
     }
 
     def _open_tick_key(self, day: str, index_code: str) -> str:
@@ -1077,9 +1110,16 @@ class BreakoutEngine:
         now: datetime,
         spot: float | None,
     ) -> tuple[float | None, str]:
-        """Pine parity: first regular-session tick at 9:15 (TV open), not Upstox auction day open."""
+        """Prefer market-quote day open (TV Mid). Auction 5m candle last; LTP only as fallback."""
         if now.time() < SESSION_START:
             return None, ""
+
+        if state.session_open_source == "manual_tv" and state.broker_session_open is not None:
+            return state.broker_session_open, "manual_tv"
+
+        day_open = self.client.get_session_day_open(state.config)
+        if day_open is not None:
+            return float(day_open), "day_ohlc"
 
         if state.session_open_tick is not None:
             return state.session_open_tick, "first_ltp"
@@ -1087,13 +1127,9 @@ class BreakoutEngine:
         first = self._first_session_candle(candles, now.date())
         if first is not None:
             candle_open = float(first["open"])
-            day_open = self.client.get_session_day_open(state.config)
-            if not self._is_auction_open(candle_open, day_open):
-                return candle_open, "candle"
+            # Without day OHLC we cannot tell auction vs regular; still better than nothing.
+            return candle_open, "candle"
 
-        day_open = self.client.get_session_day_open(state.config)
-        if day_open is not None and first is None:
-            return day_open, "day_ohlc"
         if ALLOW_PROVISIONAL_LTP and spot is not None:
             return spot, "ltp_provisional"
         return None, ""
@@ -1108,6 +1144,8 @@ class BreakoutEngine:
         new_open: float,
         new_source: str,
     ) -> bool:
+        if cur_source == "manual_tv":
+            return False
         if self._session_open_source_rank(new_source) <= self._session_open_source_rank(cur_source):
             return False
         return abs(new_open - cur_open) >= 0.01
@@ -1168,7 +1206,8 @@ class BreakoutEngine:
         src_notes = {
             "candle": "9:15 candle open",
             "first_ltp": "9:15 first tick",
-            "day_ohlc": "NSE day open",
+            "day_ohlc": "NSE day open (TV Mid)",
+            "manual_tv": "manual TV Mid",
             "ltp_provisional": "provisional LTP",
         }
         src_note = src_notes.get(open_source, open_source or "session open")
@@ -1248,25 +1287,21 @@ class BreakoutEngine:
 
         opening_915, open_source = self._resolve_session_open(state, candles, now, spot)
         if opening_915 is None:
-            if (
-                state.session_open_tick is None
-                and now.time() >= SESSION_START
-                and now >= self._session_open_tick_deadline(now.date())
-            ):
+            if now.time() >= SESSION_START and now >= self._session_open_tick_deadline(now.date()):
                 state.setup_label = (
-                    "BLR blocked — no 9:15 first tick captured; "
-                    "run relock_blr_session_open.py with TV mid"
+                    "BLR blocked — no day OHLC / 9:15 tick yet; "
+                    "relock_blr_session_open.py with TV mid only if auto Mid never arrives"
                 )
             else:
-                state.setup_label = "Waiting for 9:15 open (first tick — not auction candle)"
+                state.setup_label = "Waiting for 9:15 session open (day OHLC)"
             return
         if (
             SESSION_OPEN_TICK_WAIT
-            and open_source in ("candle", "day_ohlc")
+            and open_source == "candle"
             and state.session_open_tick is None
             and self._in_session_open_capture_window(now)
         ):
-            state.setup_label = "Waiting for 9:15 first tick (Upstox candle uses NSE auction open)"
+            state.setup_label = "Waiting for 9:15 first tick (5m candle may be auction open)"
             return
 
         prev = self.client.get_previous_day_ohlc(state.config)
