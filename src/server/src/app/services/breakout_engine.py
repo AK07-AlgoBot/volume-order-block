@@ -859,6 +859,8 @@ class BreakoutEngine:
                 state.session_open = None
                 state.broker_session_open = None
                 state.session_open_source = ""
+                if state.position is None:
+                    state.last_candle_ts = ""
                 return
 
         # Legacy: tick beat auction candle when day OHLC still missing.
@@ -880,6 +882,8 @@ class BreakoutEngine:
         state.session_open = None
         state.broker_session_open = None
         state.session_open_source = ""
+        if state.position is None:
+            state.last_candle_ts = ""
 
     def run(self) -> None:
         while True:
@@ -1266,6 +1270,9 @@ class BreakoutEngine:
                 state.session_open_tv_offset = 0.0
                 state.session_open_source = ""
                 state.mid = state.green = state.red = None
+                # Re-scan session bars (esp. first 9:15 close) against new Green/Red.
+                if state.position is None:
+                    state.last_candle_ts = ""
             else:
                 first = self._first_session_candle(candles, now.date())
                 if first and state.day_review == "PENDING":
@@ -1478,42 +1485,73 @@ class BreakoutEngine:
             state.setup_label = "Awaiting 9:20 5m close for day review"
             return
 
-        if len(candles) < 2:
+        if not candles:
             return
 
-        candle = candles[-1]
-        if candle["timestamp"] == state.last_candle_ts:
+        # Session bars only (9:15+). Catch up from last scanned bar so the first
+        # 9:15–9:20 close is evaluated even when it is the only closed candle
+        # (previously required len>=2 and skipped the first-bar breakout).
+        session_candles: list[dict[str, float]] = []
+        for candle in candles:
+            ts = parse_candle_ts(candle["timestamp"])
+            if ts.date() == now.date() and ts.time() >= SESSION_START:
+                session_candles.append(candle)
+        if not session_candles:
             return
 
-        candle_ts = parse_candle_ts(candle["timestamp"])
-        if candle_ts.time() > NO_ENTRY_AFTER:
-            state.setup_label = f"Past {NO_ENTRY_AFTER.strftime('%H:%M')} — no new entries (flat {SQUARE_OFF_TIME.strftime('%H:%M')})"
-            return
+        start_idx = 0
+        if state.last_candle_ts:
+            for i, candle in enumerate(session_candles):
+                if candle["timestamp"] == state.last_candle_ts:
+                    start_idx = i + 1
+                    break
 
-        prev_candle = candles[-2]
-        prev_close = float(prev_candle["close"])
-        close = float(candle["close"])
-        state.last_candle_ts = candle["timestamp"]
+        direction: str | None = None
+        reason = ""
+        close = 0.0
+        for i in range(start_idx, len(session_candles)):
+            candle = session_candles[i]
+            candle_ts = parse_candle_ts(candle["timestamp"])
+            if candle_ts.time() > NO_ENTRY_AFTER:
+                state.setup_label = (
+                    f"Past {NO_ENTRY_AFTER.strftime('%H:%M')} — no new entries "
+                    f"(flat {SQUARE_OFF_TIME.strftime('%H:%M')})"
+                )
+                return
 
-        prev_ts = parse_candle_ts(prev_candle["timestamp"])
-        first_bar = is_first_session_bar(candle_ts, prev_ts)
+            close = float(candle["close"])
+            state.last_candle_ts = candle["timestamp"]
 
-        direction, reason = detect_breakout_signal(
-            prev_close,
-            close,
-            state.green,
-            state.red,
-            state.mid,
-            state.day_review,
-            first_session_bar=first_bar,
-            candle_open=float(candle["open"]),
-            candle_high=float(candle["high"]),
-            candle_low=float(candle["low"]),
-            min_body_ratio=BREAKOUT_MIN_BODY_RATIO,
-        )
-        if direction is None:
+            if i == 0:
+                first_bar = True
+                prev_close = float(candle["open"])
+            else:
+                prev_candle = session_candles[i - 1]
+                prev_close = float(prev_candle["close"])
+                prev_ts = parse_candle_ts(prev_candle["timestamp"])
+                first_bar = is_first_session_bar(candle_ts, prev_ts)
+
+            direction, reason = detect_breakout_signal(
+                prev_close,
+                close,
+                state.green,
+                state.red,
+                state.mid,
+                state.day_review,
+                first_session_bar=first_bar,
+                candle_open=float(candle["open"]),
+                candle_high=float(candle["high"]),
+                candle_low=float(candle["low"]),
+                min_body_ratio=BREAKOUT_MIN_BODY_RATIO,
+            )
+            if direction is not None:
+                break
+        else:
             blocked = reason or f"Watching breakouts (Review {state.day_review} day filter)"
             state.setup_label = blocked
+            return
+
+        if direction is None:
             return
 
         sl, tp1, tp2 = trade_levels(
