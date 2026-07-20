@@ -25,10 +25,19 @@ router = APIRouter(prefix="/api/brokers/kite", tags=["kite"])
 
 
 def _api_public_base(request: Request) -> str:
+    """Browser-facing API origin — never return Docker-internal hosts like http://api:8000."""
     explicit = (os.environ.get("AK07_API_PUBLIC_URL") or "").strip()
     if explicit:
         return explicit.rstrip("/")
-    return str(request.base_url).rstrip("/")
+    domain = (os.environ.get("PRODUCTION_DOMAIN") or "").strip()
+    if domain:
+        return f"https://{domain.rstrip('/')}"
+    base = str(request.base_url).rstrip("/")
+    # Cockpit→api on the compose network yields http://api:8000 — unusable in a browser.
+    host = (request.url.hostname or "").lower()
+    if host in ("api", "localhost", "127.0.0.1") or host.endswith(".internal"):
+        return "https://ak07.in"
+    return base
 
 
 @router.post("/connect/start")

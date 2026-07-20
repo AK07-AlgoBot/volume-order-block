@@ -1,0 +1,15 @@
+[Unit]
+Description=AK07 SEBI egress CONNECT proxy (Kesavulu secondary IP)
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/root/volume-order-block
+ExecStart=/usr/bin/python3 /root/volume-order-block/scripts/egress_bind_proxy.py --bind 65.109.255.239 --listen 0.0.0.0:18901
+Restart=always
+RestartSec=3
+User=root
+
+[Install]
+WantedBy=multi-user.target
