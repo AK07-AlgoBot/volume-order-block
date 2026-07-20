@@ -9,6 +9,7 @@ from typing import Any, Final
 
 from app.constants import STRATEGY_S3_BREAKOUT
 from app.services.groww_engine import GrowwClient
+from app.services.kite_engine import KiteClient
 from app.services.upstox_engine import UpstoxClient, build_upstox_client
 
 logger = logging.getLogger("ak07.breakout_fanout")
@@ -163,6 +164,65 @@ def place_s3_entries(
             )
             continue
 
+        if trader.broker == "kite":
+            kite = KiteClient(trader.username)
+            if not kite.has_token():
+                logger.error("[%s] S3 entry skipped — no Kite token", trader.username)
+                continue
+            if options:
+                contract = kite.get_itm_option_contract(index_code, float(spot), direction)
+            else:
+                contract = kite.get_index_future_contract(index_code)
+            if not contract:
+                kind = "option" if options else "future"
+                logger.error("[%s] S3 entry skipped — no Kite %s %s", trader.username, index_code, kind)
+                continue
+            qty = int(contract.get("lot_size") or lot_size) * lots
+            sym = str(contract["tradingsymbol"])
+            exchange = str(contract.get("exchange") or "NFO")
+            expose_dir = "LONG" if options else direction
+            if kite.has_directional_exposure(exchange, sym, expose_dir, qty):
+                logger.warning(
+                    "[%s] Kite already has exposure on %s:%s — skipping duplicate entry",
+                    trader.username,
+                    exchange,
+                    sym,
+                )
+                legs.append(_kite_entry_leg_from_position(trader, contract, direction, lots, options=options))
+                continue
+            order_id = kite.place_market_order(exchange, sym, qty, side)
+            if not order_id:
+                logger.error("[%s] Kite S3 entry order failed", trader.username)
+                continue
+            premium = kite.get_fno_ltp(exchange, sym)
+            legs.append(
+                {
+                    "username": trader.username,
+                    "broker": "kite",
+                    "trading_symbol": sym,
+                    "exchange": exchange,
+                    "instrument_key": contract.get("instrument_key") or "",
+                    "contract_label": contract.get("contract_label") or "",
+                    "quantity": qty,
+                    "kite_order_id": order_id,
+                    "instrument_kind": "options" if options else "futures",
+                    "option_strike": int(contract.get("strike") or 0),
+                    "option_type": str(contract.get("option_type") or ""),
+                    "premium_entry": float(premium) if premium is not None else None,
+                }
+            )
+            logger.info(
+                "[%s] S3 Kite entry %s %d x %s:%s (%s)%s",
+                trader.username,
+                side,
+                qty,
+                exchange,
+                sym,
+                order_id,
+                f" premium≈{premium}" if premium is not None else "",
+            )
+            continue
+
         if trader.broker == "upstox":
             upstox = build_upstox_client(trader.username)
             if options:
@@ -245,6 +305,32 @@ def place_s3_entries(
     return legs
 
 
+def _kite_entry_leg_from_position(
+    trader: S3Trader,
+    contract: dict[str, Any],
+    direction: str,
+    lots: int,
+    *,
+    options: bool = False,
+) -> dict[str, Any]:
+    """Synthetic leg when Kite already holds the S3 entry (prevents duplicate orders)."""
+    qty = int(contract.get("lot_size") or 65) * lots
+    return {
+        "username": trader.username,
+        "broker": "kite",
+        "trading_symbol": contract["tradingsymbol"],
+        "exchange": contract.get("exchange") or "NFO",
+        "instrument_key": contract.get("instrument_key") or "",
+        "contract_label": contract.get("contract_label") or "",
+        "quantity": qty,
+        "kite_order_id": "existing_position",
+        "recovered": True,
+        "instrument_kind": "options" if options else "futures",
+        "option_strike": int(contract.get("strike") or 0),
+        "option_type": str(contract.get("option_type") or ""),
+    }
+
+
 def _groww_entry_leg_from_position(
     trader: S3Trader,
     contract: dict[str, Any],
@@ -289,21 +375,39 @@ def missing_s3_traders(
     if index_code and direction and not s3_uses_options():
         qty = lot_size * lots
         for trader in list_live_s3_traders():
-            if trader.username in covered or trader.broker != "groww":
+            if trader.username in covered or trader.broker not in ("groww", "kite"):
                 continue
-            groww = GrowwClient(trader.username)
-            contract = groww.get_index_future_contract(index_code)
+            if trader.broker == "groww":
+                groww = GrowwClient(trader.username)
+                contract = groww.get_index_future_contract(index_code)
+                if not contract:
+                    continue
+                sym = str(contract.get("trading_symbol") or "")
+                need = int(contract.get("lot_size") or lot_size) * lots
+                if groww.has_directional_exposure(sym, direction, need):
+                    logger.info(
+                        "[%s] Groww already has %s %s on %s — treating as covered",
+                        trader.username,
+                        direction,
+                        sym,
+                        need,
+                    )
+                    covered.add(trader.username)
+                continue
+            kite = KiteClient(trader.username)
+            contract = kite.get_index_future_contract(index_code)
             if not contract:
                 continue
-            sym = str(contract.get("trading_symbol") or "")
+            sym = str(contract.get("tradingsymbol") or "")
+            exchange = str(contract.get("exchange") or "NFO")
             need = int(contract.get("lot_size") or lot_size) * lots
-            if groww.has_directional_exposure(sym, direction, need):
+            if kite.has_directional_exposure(exchange, sym, direction, need):
                 logger.info(
-                    "[%s] Groww already has %s %s on %s — treating as covered",
+                    "[%s] Kite already has %s %s:%s — treating as covered",
                     trader.username,
                     direction,
+                    exchange,
                     sym,
-                    need,
                 )
                 covered.add(trader.username)
     return [t for t in list_live_s3_traders() if t.username not in covered]
@@ -415,6 +519,67 @@ def place_s3_exits(
                     username,
                     side,
                     exit_qty,
+                    trading_symbol,
+                    order_id,
+                )
+            continue
+
+        if broker == "kite":
+            kite = KiteClient(username)
+            trading_symbol = str(leg.get("trading_symbol") or "")
+            exchange = str(leg.get("exchange") or "NFO")
+            if not trading_symbol:
+                logger.error("[%s] Kite exit skipped — missing tradingsymbol", username)
+                all_ok = False
+                continue
+            net = kite.net_fno_quantity(exchange, trading_symbol)
+            if leg_options:
+                if net <= 0:
+                    logger.warning(
+                        "[%s] Kite option exit skipped — already flat on %s:%s (net=%d)",
+                        username,
+                        exchange,
+                        trading_symbol,
+                        net,
+                    )
+                    continue
+            else:
+                if direction == "LONG" and net <= 0:
+                    logger.warning(
+                        "[%s] Kite exit skipped — already flat/short on %s:%s (net=%d)",
+                        username,
+                        exchange,
+                        trading_symbol,
+                        net,
+                    )
+                    continue
+                if direction == "SHORT" and net >= 0:
+                    logger.warning(
+                        "[%s] Kite exit skipped — already flat/long on %s:%s (net=%d)",
+                        username,
+                        exchange,
+                        trading_symbol,
+                        net,
+                    )
+                    continue
+            exit_qty = min(qty, abs(net)) if net != 0 else qty
+            order_id = kite.place_market_order(
+                exchange,
+                trading_symbol,
+                exit_qty,
+                side,
+                bypass_profit_guard=True,
+            )
+            if not order_id:
+                logger.error("[%s] Kite S3 exit order failed", username)
+                all_ok = False
+            else:
+                logger.info(
+                    "[%s] S3 Kite exit %s %d x %s:%s (%s)",
+                    username,
+                    side,
+                    exit_qty,
+                    exchange,
                     trading_symbol,
                     order_id,
                 )
