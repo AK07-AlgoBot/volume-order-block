@@ -104,17 +104,28 @@ def consume_resume_token(token: str) -> str | None:
     return username or None
 
 
-def exchange_request_token(api_key: str, api_secret: str, request_token: str) -> dict[str, Any]:
+def exchange_request_token(
+    api_key: str,
+    api_secret: str,
+    request_token: str,
+    *,
+    username: str = "",
+) -> dict[str, Any]:
     checksum = hashlib.sha256(f"{api_key}{request_token}{api_secret}".encode()).hexdigest()
-    resp = requests.post(
-        KITE_TOKEN_URL,
-        data={
-            "api_key": api_key,
-            "request_token": request_token,
-            "checksum": checksum,
-        },
-        timeout=30,
-    )
+    from app.config.paths import ensure_repo_and_lib_on_path
+
+    ensure_repo_and_lib_on_path()
+    from broker_http import post_for_user, session_for_user
+
+    form = {
+        "api_key": api_key,
+        "request_token": request_token,
+        "checksum": checksum,
+    }
+    if username:
+        resp = post_for_user(username, KITE_TOKEN_URL, data=form, timeout=30)
+    else:
+        resp = session_for_user("").post(KITE_TOKEN_URL, data=form, timeout=30)
     payload: dict[str, Any] = {}
     try:
         payload = resp.json() if resp.text else {}
@@ -125,10 +136,10 @@ def exchange_request_token(api_key: str, api_secret: str, request_token: str) ->
         if isinstance(payload, dict):
             message = str(payload.get("message") or payload.get("error_type") or payload)
         raise RuntimeError(message or f"Kite token exchange failed HTTP {resp.status_code}")
-    data = payload.get("data") if isinstance(payload, dict) else None
-    if not isinstance(data, dict) or not data.get("access_token"):
+    session_data = payload.get("data") if isinstance(payload, dict) else None
+    if not isinstance(session_data, dict) or not session_data.get("access_token"):
         raise RuntimeError("Kite token exchange returned no access_token.")
-    return data
+    return session_data
 
 
 def save_session_for_user(username: str, api_key: str, session: dict[str, Any]) -> dict[str, str]:
@@ -150,7 +161,7 @@ def complete_oauth(username: str, request_token: str) -> dict[str, Any]:
     api_secret = (creds.get("api_secret") or "").strip()
     if not api_key or not api_secret:
         raise RuntimeError("Save Kite api_key and api_secret before connecting.")
-    session = exchange_request_token(api_key, api_secret, request_token)
+    session = exchange_request_token(api_key, api_secret, request_token, username=username)
     saved = save_session_for_user(username, api_key, session)
     log_action(
         username,

@@ -40,6 +40,7 @@ def _default_profile(username: str, role: str = USER_ROLE) -> dict[str, Any]:
         "broker": "upstox",
         "paper_trading": True,
         "telegram_notifications": role == ADMIN_ROLE,
+        "egress_ip": "",
     }
 
 
@@ -63,6 +64,8 @@ def read_profile(username: str, *, role: str = USER_ROLE) -> dict[str, Any]:
     base["paper_trading"] = bool(raw.get("paper_trading", base["paper_trading"]))
     if "telegram_notifications" in raw:
         base["telegram_notifications"] = bool(raw.get("telegram_notifications"))
+    egress_ip = str(raw.get("egress_ip") or "").strip()
+    base["egress_ip"] = egress_ip
     return base
 
 
@@ -78,6 +81,8 @@ def write_profile(username: str, data: dict[str, Any]) -> dict[str, Any]:
         current["paper_trading"] = bool(data["paper_trading"])
     if "telegram_notifications" in data:
         current["telegram_notifications"] = bool(data["telegram_notifications"])
+    if "egress_ip" in data:
+        current["egress_ip"] = str(data.get("egress_ip") or "").strip()
     path = profile_path(safe)
     path.parent.mkdir(parents=True, exist_ok=True)
     current["username"] = safe

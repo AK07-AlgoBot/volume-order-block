@@ -147,6 +147,12 @@ class GrowwClient:
         self.username = username
         self._creds = read_credentials_file_for_user(username)
         self.base_url = (self._creds.get("base_url") or DEFAULT_GROWW_BASE_URL).rstrip("/")
+        from app.config.paths import ensure_repo_and_lib_on_path
+
+        ensure_repo_and_lib_on_path()
+        from broker_http import session_for_user
+
+        self.session = session_for_user(username)
 
     def has_token(self) -> bool:
         return bool((self._creds.get("access_token") or "").strip())
@@ -161,7 +167,7 @@ class GrowwClient:
         if not self.has_token():
             return None
         try:
-            response = requests.get(
+            response = self.session.get(
                 f"{self.base_url}{path}",
                 params=params,
                 headers=self._headers(),
@@ -186,7 +192,7 @@ class GrowwClient:
             logger.warning("[%s] Groww POST skipped — no access token", self.username)
             return None
         try:
-            response = requests.post(
+            response = self.session.post(
                 f"{self.base_url}{path}",
                 json=body,
                 headers=self._headers(),

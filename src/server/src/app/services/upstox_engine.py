@@ -365,7 +365,9 @@ class UpstoxClient:
         ensure_repo_and_lib_on_path()
         self.username = username
         self.base_url: str = "https://api.upstox.com/v2"
-        self.session = requests.Session()
+        from broker_http import session_for_user
+
+        self.session = session_for_user(username)
         self.session.headers.update({"Accept": "application/json"})
         self.refresh_access_token_from_disk()
 
@@ -397,7 +399,7 @@ class UpstoxClient:
                 return self.refresh_access_token_from_disk()
 
             v3_base = self.base_url.replace("/v2", "/v3")
-            response = requests.post(
+            response = self.session.post(
                 f"{v3_base}/login/auth/token/request/{client_id}",
                 json={"client_secret": client_secret},
                 headers={"Accept": "application/json", "Content-Type": "application/json"},
