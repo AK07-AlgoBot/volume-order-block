@@ -2,16 +2,83 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
+
 from fastapi import APIRouter, Depends, HTTPException
 
 from app.constants import ALL_STRATEGIES, STRATEGY_LABELS
 from app.dependencies import UserClaims, require_admin_user
-from app.models.schemas import CreateUserBody, UpdateUserProfileBody, UserProfilePublic, UserPublic
+from app.models.schemas import (
+    AdminBlrUpdateBody,
+    CreateUserBody,
+    UpdateUserProfileBody,
+    UserProfilePublic,
+    UserPublic,
+)
+from app.services.admin_blr import get_blr_state, update_blr_levels
 from app.services.audit_log import log_action
+from app.services.broker_connection_status import broker_connection_status
 from app.services.user_profiles_store import read_profile, write_profile
 from app.services.users_store import create_user, get_user_record, list_users
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
+
+
+@router.get("/blr")
+async def admin_get_blr(
+    index_code: str = "NIFTY",
+    admin: UserClaims = Depends(require_admin_user),
+):
+    del admin
+    code = index_code.strip().upper()
+    if code not in ("NIFTY", "BANKNIFTY", "SENSEX"):
+        raise HTTPException(status_code=400, detail="Unknown index.")
+    return {"state": get_blr_state(code)}
+
+
+@router.post("/blr")
+async def admin_update_blr(
+    body: AdminBlrUpdateBody,
+    admin: UserClaims = Depends(require_admin_user),
+):
+    try:
+        state = update_blr_levels(
+            index_code=body.index_code,
+            green=body.green,
+            mid=body.mid,
+            red=body.red,
+            updated_by=admin.username,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    log_action(
+        admin.username,
+        "blr_levels_updated",
+        {
+            "index": body.index_code,
+            "green": body.green,
+            "mid": body.mid,
+            "red": body.red,
+        },
+    )
+    return {"ok": True, "state": state}
+
+
+@router.get("/broker-status")
+def admin_broker_status(admin: UserClaims = Depends(require_admin_user)):
+    del admin
+    users = list_users()
+    with ThreadPoolExecutor(max_workers=min(8, max(1, len(users)))) as pool:
+        statuses = list(
+            pool.map(
+                lambda row: broker_connection_status(
+                    str(row.get("username") or ""),
+                    str(row.get("role") or "user"),
+                ),
+                users,
+            )
+        )
+    return {"statuses": statuses}
 
 
 @router.get("/users")

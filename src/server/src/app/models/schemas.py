@@ -71,6 +71,13 @@ class UpdateUserProfileBody(BaseModel):
     paper_trading: bool | None = None
 
 
+class AdminBlrUpdateBody(BaseModel):
+    index_code: Literal["NIFTY", "BANKNIFTY", "SENSEX"] = "NIFTY"
+    green: float = Field(..., gt=0)
+    mid: float = Field(..., gt=0)
+    red: float = Field(..., gt=0)
+
+
 class ResetPasswordBody(BaseModel):
     new_password: str = Field(..., min_length=8, max_length=256)
 

@@ -20,11 +20,120 @@ if not is_admin():
     st.error("Admin access required.")
     st.stop()
 
-st.markdown("# Admin — Users")
+st.markdown("# Admin")
 st.caption(
-    "Create dashboard users and choose which strategies each user can see. "
-    "Telegram trade alerts are **admin-only** (AK07 channel) for now."
+    "Manage global BLR values, broker connections, dashboard users, and strategy access."
 )
+
+st.markdown("## BLR values")
+st.caption(
+    "These levels are global. Saving updates every user's dashboard and the breakout engine "
+    "without a server restart."
+)
+blr_index = st.selectbox("Index", ["NIFTY", "BANKNIFTY", "SENSEX"], key="admin_blr_index")
+blr_state: dict = {}
+try:
+    blr_response = api_request("GET", f"/api/admin/blr?index_code={blr_index}")
+    if blr_response.status_code == 200:
+        blr_state = blr_response.json().get("state") or {}
+    else:
+        st.error(blr_response.text or f"BLR API error {blr_response.status_code}")
+except Exception as exc:
+    st.error(f"Could not load BLR values: {exc}")
+
+if blr_state.get("mid") is None:
+    st.info("BLR is not available yet for this index. Wait for the engine to publish today's levels.")
+else:
+    with st.form(f"admin_blr_form_{blr_index}"):
+        c1, c2, c3 = st.columns(3)
+        green = c1.number_input(
+            "Green",
+            min_value=0.01,
+            value=float(blr_state.get("green") or 0),
+            step=0.05,
+            format="%.2f",
+        )
+        mid = c2.number_input(
+            "Mid",
+            min_value=0.01,
+            value=float(blr_state.get("mid") or 0),
+            step=0.05,
+            format="%.2f",
+        )
+        red = c3.number_input(
+            "Red",
+            min_value=0.01,
+            value=float(blr_state.get("red") or 0),
+            step=0.05,
+            format="%.2f",
+        )
+        save_blr = st.form_submit_button("Update BLR for everyone", type="primary")
+    source = str(blr_state.get("session_open_source") or "unknown")
+    updated = str(blr_state.get("admin_updated_at") or blr_state.get("updated_at") or "")
+    st.caption(f"Source: `{source}`" + (f" · Updated: {updated}" if updated else ""))
+    if save_blr:
+        response = api_request(
+            "POST",
+            "/api/admin/blr",
+            json={
+                "index_code": blr_index,
+                "green": green,
+                "mid": mid,
+                "red": red,
+            },
+        )
+        if response.status_code == 200:
+            st.success("BLR updated globally. The engine will hot-load it on its next cycle.")
+            st.rerun()
+        else:
+            try:
+                detail = response.json().get("detail", response.text)
+            except Exception:
+                detail = response.text
+            st.error(str(detail))
+
+st.markdown("---")
+status_title, status_action = st.columns([4, 1])
+with status_title:
+    st.markdown("## Broker connections")
+    st.caption("Live token validation for each user's selected broker.")
+with status_action:
+    refresh_status = st.button("Refresh status", use_container_width=True)
+
+if refresh_status or "admin_broker_statuses" not in st.session_state:
+    try:
+        with st.spinner("Checking broker tokens…"):
+            status_response = api_request("GET", "/api/admin/broker-status")
+        if status_response.status_code == 200:
+            st.session_state["admin_broker_statuses"] = status_response.json().get("statuses") or []
+        else:
+            st.error(status_response.text or f"Broker status API error {status_response.status_code}")
+    except Exception as exc:
+        st.error(f"Could not check broker connections: {exc}")
+
+statuses = st.session_state.get("admin_broker_statuses") or []
+if statuses:
+    status_rows = []
+    for row in statuses:
+        if row.get("connected"):
+            status = "🟢 Connected"
+            if row.get("updated_today"):
+                status += " · updated today"
+        else:
+            status = f"🔴 Not connected · {row.get('detail') or 'token invalid'}"
+        status_rows.append(
+            {
+                "User name": row.get("username") or "",
+                "Broker": str(row.get("broker") or "").title(),
+                "Status": status,
+            }
+        )
+    st.dataframe(status_rows, use_container_width=True, hide_index=True)
+else:
+    st.info("No broker connection results.")
+
+st.markdown("---")
+st.markdown("## User management")
 
 try:
     resp = api_request("GET", "/api/admin/users")
@@ -39,7 +148,7 @@ except Exception as exc:
 users = payload.get("users") or []
 strategy_options = {s["id"]: s["label"] for s in (payload.get("strategies") or [])}
 
-st.markdown("## Existing users")
+st.markdown("### Existing users")
 if not users:
     st.info("No users yet.")
 else:
@@ -58,7 +167,7 @@ else:
             )
 
 st.markdown("---")
-st.markdown("## Create user")
+st.markdown("### Create user")
 
 with st.form("create_user_form"):
     c1, c2 = st.columns(2)

@@ -113,7 +113,7 @@ ALLOW_PROVISIONAL_LTP: Final[bool] = os.environ.get("BREAKOUT_ALLOW_PROVISIONAL_
 # 1) Prefer Upstox market-quote day OHLC open — usually matches TradingView index Mid.
 # 2) 5m candle open often = NSE auction (≠ TV); ignore when it equals day open.
 # 3) first_ltp is fallback only when day OHLC is late/missing; never sticky over day OHLC.
-# 4) manual_tv (relock script) stays highest rank for rare edge cases.
+# 4) manual_tv/manual_admin overrides stay highest rank for rare edge cases.
 SESSION_OPEN_TICK_WINDOW_SEC: Final[int] = int(
     os.environ.get("BREAKOUT_SESSION_OPEN_TICK_WINDOW_SEC", "120")
 )
@@ -271,6 +271,7 @@ class IndexBreakoutState:
     broker_session_open: float | None = None
     session_open_tv_offset: float = 0.0
     session_open_source: str = ""
+    admin_updated_at: str = ""
     session_open_tick: float | None = None
     prev_close: float | None = None
     levels_ready: bool = False
@@ -839,7 +840,7 @@ class BreakoutEngine:
         if mid is None:
             return
         # Never override a manual TV Mid.
-        if source == "manual_tv":
+        if source in ("manual_tv", "manual_admin"):
             return
 
         day_open = self.client.get_session_day_open(state.config)
@@ -900,6 +901,8 @@ class BreakoutEngine:
         now = datetime.now(IST)
         self.client.refresh_token()
         self._roll_trade_day(now)
+        for state in self.states.values():
+            self._sync_admin_levels(state, now.date().isoformat())
 
         if now.time() >= SESSION_END:
             self._square_off_all("SESSION_END", now)
@@ -1058,6 +1061,7 @@ class BreakoutEngine:
         "first_ltp": 2,
         "day_ohlc": 3,
         "manual_tv": 4,
+        "manual_admin": 5,
     }
 
     def _open_tick_key(self, day: str, index_code: str) -> str:
@@ -1118,8 +1122,8 @@ class BreakoutEngine:
         if now.time() < SESSION_START:
             return None, ""
 
-        if state.session_open_source == "manual_tv" and state.broker_session_open is not None:
-            return state.broker_session_open, "manual_tv"
+        if state.session_open_source in ("manual_tv", "manual_admin") and state.broker_session_open is not None:
+            return state.broker_session_open, state.session_open_source
 
         day_open = self.client.get_session_day_open(state.config)
         if day_open is not None:
@@ -1148,7 +1152,7 @@ class BreakoutEngine:
         new_open: float,
         new_source: str,
     ) -> bool:
-        if cur_source == "manual_tv":
+        if cur_source in ("manual_tv", "manual_admin"):
             return False
         if self._session_open_source_rank(new_source) <= self._session_open_source_rank(cur_source):
             return False
@@ -1212,6 +1216,7 @@ class BreakoutEngine:
             "first_ltp": "9:15 first tick",
             "day_ohlc": "NSE day open (TV Mid)",
             "manual_tv": "manual TV Mid",
+            "manual_admin": "admin BLR",
             "ltp_provisional": "provisional LTP",
         }
         src_note = src_notes.get(open_source, open_source or "session open")
@@ -1436,9 +1441,52 @@ class BreakoutEngine:
                 "prev_close": state.prev_close,
                 "day_review": state.day_review,
                 "first_candle_close": state.first_candle_close,
+                "admin_updated_at": state.admin_updated_at,
             },
             ttl_seconds=86_400 * 2,
         )
+
+    def _sync_admin_levels(self, state: IndexBreakoutState, day: str) -> bool:
+        """Hot-load an admin BLR override without restarting the engine."""
+        frozen = cache_manager.get_json(self._frozen_key(day, state.config.code))
+        if not isinstance(frozen, dict):
+            return False
+        if str(frozen.get("session_open_source") or "") != "manual_admin":
+            return False
+        updated_at = str(frozen.get("admin_updated_at") or "")
+        if not updated_at or updated_at == state.admin_updated_at:
+            return False
+        if frozen.get("mid") is None or frozen.get("green") is None or frozen.get("red") is None:
+            return False
+
+        state.mid = float(frozen["mid"])
+        state.green = float(frozen["green"])
+        state.red = float(frozen["red"])
+        state.gap_regime = str(frozen.get("gap_regime") or "MANUAL")
+        state.band_half = float(frozen.get("band_half") or 0)
+        state.band_half_pct = float(frozen.get("band_half_pct") or 0)
+        state.session_open = float(frozen.get("session_open") or state.mid)
+        state.broker_session_open = float(frozen.get("broker_session_open") or state.mid)
+        state.session_open_tv_offset = float(frozen.get("session_open_tv_offset") or 0)
+        state.session_open_source = "manual_admin"
+        state.prev_close = frozen.get("prev_close")
+        state.day_review = str(frozen.get("day_review") or state.day_review)
+        if frozen.get("first_candle_close") is not None:
+            state.first_candle_close = float(frozen["first_candle_close"])
+        state.admin_updated_at = updated_at
+        state.levels_ready = True
+        state.setup_label = (
+            f"BLR updated by admin — G {state.green:.2f} / M {state.mid:.2f} / "
+            f"R {state.red:.2f} (review {state.day_review})"
+        )
+        logger.warning(
+            "[%s] hot-loaded admin BLR override G %.2f / M %.2f / R %.2f",
+            state.config.code,
+            state.green,
+            state.mid,
+            state.red,
+        )
+        return True
 
     def _restore_frozen_levels(self, state: IndexBreakoutState, day: str) -> bool:
         if state.levels_ready and state.mid is not None:
@@ -1461,6 +1509,7 @@ class BreakoutEngine:
             )
         state.session_open_tv_offset = float(frozen.get("session_open_tv_offset") or 0)
         state.session_open_source = str(frozen.get("session_open_source") or "frozen")
+        state.admin_updated_at = str(frozen.get("admin_updated_at") or "")
         state.prev_close = frozen.get("prev_close")
         state.day_review = str(frozen.get("day_review") or state.day_review)
         if frozen.get("first_candle_close") is not None:
@@ -1967,6 +2016,7 @@ class BreakoutEngine:
             "broker_session_open": state.broker_session_open,
             "session_open_tv_offset": state.session_open_tv_offset,
             "session_open_source": state.session_open_source,
+            "admin_updated_at": state.admin_updated_at,
             "session_open_tick": state.session_open_tick,
             "prev_close": state.prev_close,
             "levels_ready": state.levels_ready,
