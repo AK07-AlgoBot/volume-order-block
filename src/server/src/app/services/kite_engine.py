@@ -425,6 +425,9 @@ class KiteClient:
             "order_type": "MARKET",
             "validity": "DAY",
             "tag": "ak07s3",
+            # Kite rejects bare API MARKET orders. -1 asks Zerodha to apply
+            # automatic market protection under its current algo guidelines.
+            "market_protection": -1,
         }
         data = self._post_form("/orders/regular", body)
         if not data:
