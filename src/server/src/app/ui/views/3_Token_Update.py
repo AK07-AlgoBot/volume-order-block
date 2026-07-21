@@ -331,38 +331,16 @@ elif broker == "kite":
     st.markdown("### Step 2 — Login to Zerodha (daily)")
     if not has_app:
         st.warning("Complete Step 1 first — save api_key and api_secret.")
-    elif has_token:
-        st.session_state.pop(KITE_CONNECT_KEY, None)
-        st.session_state.pop(KITE_OPENED_KEY, None)
-        st.success("Kite session is active. Re-login only if **Test Kite connection** fails tomorrow.")
-        if st.button("🔄 Re-login to Zerodha", use_container_width=True):
-            try:
-                r = api_request(
-                    "POST",
-                    "/api/brokers/kite/connect/start",
-                    json={"cockpit_url": cockpit_origin()},
-                )
-            except Exception as exc:
-                st.error(f"API error: {exc}")
-            else:
-                if r.status_code != 200:
-                    try:
-                        st.error(r.json().get("detail", r.text))
-                    except Exception:
-                        st.error(r.text)
-                elif not r.json().get("connect_url"):
-                    st.error("API did not return a connect URL.")
-                else:
-                    st.session_state[KITE_CONNECT_KEY] = r.json()["connect_url"]
-                    st.session_state.pop(KITE_OPENED_KEY, None)
-                    st.rerun()
     else:
-        st.caption(
-            "One click opens Zerodha in a new tab (User ID + password + TOTP). "
-            "When done, you return here automatically."
-        )
+        # Pending OAuth must win over the "session active" banner — otherwise Re-login
+        # stores a connect_url, reruns, then immediately clears it because a stale token
+        # still exists on disk (never opens Zerodha; api logs only show /connect/start).
         pending_url = st.session_state.get(KITE_CONNECT_KEY)
         if pending_url:
+            st.caption(
+                "One click opens Zerodha in a new tab (User ID + password + TOTP). "
+                "When done, you return here automatically."
+            )
             if not st.session_state.get(KITE_OPENED_KEY):
                 st.session_state[KITE_OPENED_KEY] = True
                 components.html(
@@ -385,27 +363,45 @@ elif broker == "kite":
                 st.session_state.pop(KITE_CONNECT_KEY, None)
                 st.session_state.pop(KITE_OPENED_KEY, None)
                 st.rerun()
-        elif st.button("🔗 Login to Zerodha", type="primary", use_container_width=True):
-            try:
-                r = api_request(
-                    "POST",
-                    "/api/brokers/kite/connect/start",
-                    json={"cockpit_url": cockpit_origin()},
+        else:
+            if has_token:
+                st.success(
+                    "A Kite token is saved on disk. Use **Test Kite connection** — "
+                    "if it fails (daily expiry ~6 AM IST), re-login below."
                 )
-            except Exception as exc:
-                st.error(f"API error: {exc}")
+                start_label = "🔄 Re-login to Zerodha"
             else:
+                st.caption(
+                    "One click opens Zerodha in a new tab (User ID + password + TOTP). "
+                    "When done, you return here automatically."
+                )
+                start_label = "🔗 Login to Zerodha"
+
+            def _start_kite_oauth() -> None:
+                try:
+                    r = api_request(
+                        "POST",
+                        "/api/brokers/kite/connect/start",
+                        json={"cockpit_url": cockpit_origin()},
+                    )
+                except Exception as exc:
+                    st.error(f"API error: {exc}")
+                    return
                 if r.status_code != 200:
                     try:
                         st.error(r.json().get("detail", r.text))
                     except Exception:
                         st.error(r.text)
-                elif not r.json().get("connect_url"):
+                    return
+                if not r.json().get("connect_url"):
                     st.error("API did not return a connect URL.")
-                else:
-                    st.session_state[KITE_CONNECT_KEY] = r.json()["connect_url"]
-                    st.session_state.pop(KITE_OPENED_KEY, None)
-                    st.rerun()
+                    return
+                st.session_state[KITE_CONNECT_KEY] = r.json()["connect_url"]
+                st.session_state.pop(KITE_OPENED_KEY, None)
+                st.rerun()
+
+            if st.button(start_label, type="primary", use_container_width=True):
+                _start_kite_oauth()
 
     st.markdown("### Status")
     c1, c2 = st.columns(2)

@@ -125,6 +125,7 @@ if statuses:
             {
                 "User name": row.get("username") or "",
                 "Broker": str(row.get("broker") or "").title(),
+                "Egress IP": row.get("egress_ip") or "primary",
                 "Status": status,
             }
         )

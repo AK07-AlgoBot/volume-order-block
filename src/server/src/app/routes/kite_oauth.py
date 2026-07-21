@@ -66,7 +66,7 @@ async def kite_connect_start(
 
 
 @router.get("/connect")
-async def kite_connect(ott: str = Query(..., min_length=8)):
+async def kite_connect(request: Request, ott: str = Query(..., min_length=8)):
     from kite_credentials_store import read_credentials_file_for_user
 
     ctx = consume_connect_ott(ott)
@@ -79,7 +79,17 @@ async def kite_connect(ott: str = Query(..., min_length=8)):
         raise HTTPException(status_code=400, detail="Kite api_key missing for this user.")
     login_url = KITE_LOGIN_URL.format(api_key=api_key)
     response = RedirectResponse(url=login_url, status_code=302)
-    cookie_opts = {"max_age": 600, "httponly": True, "samesite": "lax"}
+    # Secure cookies required on HTTPS so browsers keep them across the Zerodha redirect.
+    secure = str(request.url.scheme).lower() == "https" or bool(
+        (os.environ.get("PRODUCTION_DOMAIN") or "").strip()
+    )
+    cookie_opts = {
+        "max_age": 600,
+        "httponly": True,
+        "samesite": "lax",
+        "secure": secure,
+        "path": "/",
+    }
     response.set_cookie(key=COOKIE_NAME, value=username, **cookie_opts)
     response.set_cookie(key=COOKIE_COCKPIT, value=ctx["cockpit_url"], **cookie_opts)
     if ctx.get("resume_token"):

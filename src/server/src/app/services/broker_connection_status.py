@@ -14,7 +14,7 @@ from app.services.user_profiles_store import read_profile
 
 ensure_repo_and_lib_on_path()
 
-from broker_http import session_for_user  # noqa: E402
+from broker_http import resolve_egress_ip, session_for_user  # noqa: E402
 from groww_credentials_store import (  # noqa: E402
     credentials_file_for_user as groww_credentials_path,
     groww_auth_header,
@@ -55,6 +55,7 @@ def _result(
         "updated_today": updated_today,
         "status": "Connected" if connected else "Not connected",
         "detail": detail,
+        "egress_ip": resolve_egress_ip(username) or "primary",
     }
 
 
