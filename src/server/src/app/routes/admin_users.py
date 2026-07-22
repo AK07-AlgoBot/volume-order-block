@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, HTTPException
 
@@ -18,6 +20,7 @@ from app.models.schemas import (
 from app.services.admin_blr import get_blr_state, update_blr_levels
 from app.services.audit_log import log_action
 from app.services.broker_connection_status import broker_connection_status
+from app.services.performance_store import load_s3_trades, s3_trade_log_rows
 from app.services.user_profiles_store import read_profile, write_profile
 from app.services.users_store import create_user, get_user_record, list_users
 
@@ -79,6 +82,24 @@ def admin_broker_status(admin: UserClaims = Depends(require_admin_user)):
             )
         )
     return {"statuses": statuses}
+
+
+@router.get("/s3-trades")
+async def admin_s3_trades(
+    days: int = 14,
+    admin: UserClaims = Depends(require_admin_user),
+):
+    del admin
+    lookback = max(1, min(int(days), 90))
+    end = datetime.now(ZoneInfo("Asia/Kolkata")).date()
+    start = end - timedelta(days=lookback - 1)
+    trades = load_s3_trades(start_date=start, end_date=end)
+    return {
+        "start_date": start.isoformat(),
+        "end_date": end.isoformat(),
+        "trades": trades,
+        "rows": s3_trade_log_rows(trades),
+    }
 
 
 @router.get("/users")

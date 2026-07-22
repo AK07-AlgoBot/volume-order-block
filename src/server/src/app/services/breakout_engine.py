@@ -66,7 +66,7 @@ OPTION_PREMIUM_SL_PTS: Final[float] = float(os.environ.get("BREAKOUT_OPTION_PREM
 # Book TP when premium is within this many pts of the target (avoids missing by 1–2 pts then SL).
 OPTION_TP_NEAR_PTS: Final[float] = float(os.environ.get("BREAKOUT_OPTION_TP_NEAR_PTS", "2"))
 # After this much premium profit, raise SL to entry (breakeven) so near-TP reversals don't full-SL.
-OPTION_BREAKEVEN_PTS: Final[float] = float(os.environ.get("BREAKOUT_OPTION_BREAKEVEN_PTS", "6"))
+OPTION_BREAKEVEN_PTS: Final[float] = float(os.environ.get("BREAKOUT_OPTION_BREAKEVEN_PTS", "10"))
 # Ignore exits for N seconds after entry (avoids open-print noise).
 OPTION_ENTRY_GRACE_SEC: Final[float] = float(os.environ.get("BREAKOUT_OPTION_ENTRY_GRACE_SEC", "20"))
 # While holding options, poll premium every N seconds (catch TP without waiting for 15s candle loop).
@@ -373,6 +373,43 @@ def _position_from_dict(raw: dict[str, Any]) -> BreakoutPosition | None:
         )
     except (KeyError, TypeError, ValueError):
         return None
+
+
+def _s3_trade_extra(
+    pos: BreakoutPosition,
+    *,
+    spot_exit: float,
+    exit_price: float,
+) -> dict[str, Any]:
+    """Rich fields for the admin S3 trade log."""
+    spot_entry = float(pos.entry_price)
+    if pos.direction == "LONG":
+        spot_moved = float(spot_exit) - spot_entry
+    else:
+        spot_moved = spot_entry - float(spot_exit)
+    premium_entry = pos.premium_entry
+    premium_high = pos.premium_high
+    points_moved: float | None = None
+    if pos.uses_options and premium_entry is not None:
+        peak = float(premium_high) if premium_high is not None else float(exit_price)
+        points_moved = peak - float(premium_entry)
+    else:
+        points_moved = spot_moved
+    return {
+        "instrument_kind": pos.instrument_kind,
+        "contract_label": pos.display_contract,
+        "option_strike": pos.option_strike or None,
+        "option_type": pos.option_type or None,
+        "spot_entry": spot_entry,
+        "spot_exit": float(spot_exit),
+        "spot_points_moved": spot_moved,
+        "premium_entry": premium_entry,
+        "premium_exit": float(exit_price) if pos.uses_options else None,
+        "premium_high": premium_high,
+        "sl_price": pos.sl_price,
+        "tp_price": pos.tp1_price,
+        "points_moved": points_moved,
+    }
 
 
 def compute_blr_levels(
@@ -1690,6 +1727,7 @@ class BreakoutEngine:
             instrument_kind="options" if uses_options else "futures",
             premium_entry=premium_entry,
             premium_last=premium_entry,
+            premium_high=premium_entry,
         )
         state.trades_today += 1
         if uses_options and premium_entry is not None:
@@ -1833,6 +1871,7 @@ class BreakoutEngine:
                 pos.tp2_price = round(premium + OPTION_PREMIUM_TP_PTS * 2, 2)
                 # Re-purpose sl_price as premium floor when in options mode.
                 pos.sl_price = round(max(premium - OPTION_PREMIUM_SL_PTS, 0.05), 2)
+                pos.premium_high = premium
                 logger.info(
                     "[%s] option premium captured %.2f → TP %.2f / SL %.2f (−%.0f / +%.0f)",
                     state.config.code,
@@ -1858,9 +1897,30 @@ class BreakoutEngine:
             tp_hit = False
             sl_hit = False
             if premium is not None:
-                if premium >= pos.tp1_price:
+                if pos.premium_high is None or premium > pos.premium_high:
+                    pos.premium_high = premium
+                # Lock SL to entry once premium has moved enough — avoids full SL after near-TP.
+                if (
+                    pos.premium_entry is not None
+                    and OPTION_BREAKEVEN_PTS > 0
+                    and premium >= pos.premium_entry + OPTION_BREAKEVEN_PTS
+                    and pos.sl_price < pos.premium_entry - 0.01
+                ):
+                    pos.sl_price = round(pos.premium_entry, 2)
+                    logger.info(
+                        "[%s] option SL trailed to breakeven %.2f (premium %.2f ≥ entry+%.0f)",
+                        state.config.code,
+                        pos.sl_price,
+                        premium,
+                        OPTION_BREAKEVEN_PTS,
+                    )
+                    self._save_session_state(state)
+
+                # Book slightly early so a 1–2 pt miss of exact TP doesn't reverse into SL.
+                tp_trigger = pos.tp1_price - max(0.0, OPTION_TP_NEAR_PTS)
+                if premium >= tp_trigger:
                     tp_hit = True
-                elif prev_premium is not None and prev_premium < pos.tp1_price <= premium:
+                elif prev_premium is not None and prev_premium < tp_trigger <= premium:
                     tp_hit = True
                 if pos.premium_entry is not None:
                     if premium <= pos.sl_price:
@@ -1882,7 +1942,12 @@ class BreakoutEngine:
                 return
 
             if tp_hit:
-                exit_reason = f"TP1 booked (+{OPTION_PREMIUM_TP_PTS:.0f} prem)"
+                near_note = (
+                    f" near −{OPTION_TP_NEAR_PTS:.0f}"
+                    if OPTION_TP_NEAR_PTS > 0
+                    else ""
+                )
+                exit_reason = f"TP1 booked (+{OPTION_PREMIUM_TP_PTS:.0f} prem{near_note})"
                 exit_price = float(premium) if premium is not None else pos.tp1_price
             elif sl_hit:
                 exit_reason = f"SL (−{OPTION_PREMIUM_SL_PTS:.0f} prem)"
@@ -1939,6 +2004,7 @@ class BreakoutEngine:
             exit_reason=exit_reason,
             entry_at=pos.opened_at,
             paper_trading=PAPER_TRADING,
+            extra=_s3_trade_extra(pos, spot_exit=spot, exit_price=exit_price),
         )
         state.setup_label = f"Flat after {exit_reason}"
         state.position = None
@@ -1958,18 +2024,27 @@ class BreakoutEngine:
                 spot = state.spot if state.spot is not None else state.position.entry_price
                 pos = state.position
                 place_s3_exits(position_legs(pos), pos.direction, global_paper=PAPER_TRADING or MOCK_MODE)
-                pnl = (spot - pos.entry_price) if pos.direction == "LONG" else (pos.entry_price - spot)
+                if pos.uses_options and pos.premium_entry is not None:
+                    premium = self._option_premium_ltp(pos)
+                    exit_px = float(premium) if premium is not None else float(pos.premium_last or pos.premium_entry)
+                    pnl = exit_px - pos.premium_entry
+                    entry_px = pos.premium_entry
+                else:
+                    exit_px = spot
+                    entry_px = pos.entry_price
+                    pnl = (spot - pos.entry_price) if pos.direction == "LONG" else (pos.entry_price - spot)
                 performance_store.record_completed_trade(
                     strategy=performance_store.STRATEGY_BREAKOUT,
                     strategy_id="breakout",
                     symbol=state.config.code,
                     direction=pos.direction,
-                    entry_price=pos.entry_price,
-                    exit_price=spot,
+                    entry_price=entry_px,
+                    exit_price=exit_px,
                     pnl_points=pnl,
                     exit_reason=reason,
                     entry_at=pos.opened_at,
                     paper_trading=PAPER_TRADING,
+                    extra=_s3_trade_extra(pos, spot_exit=spot, exit_price=exit_px),
                 )
                 state.signal_log.append(f"Square-off {reason} @ {spot:.2f}")
                 state.position = None

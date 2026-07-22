@@ -102,6 +102,7 @@ def record_completed_trade(
     entry_at: str = "",
     exit_at: str | None = None,
     paper_trading: bool = True,
+    extra: dict[str, Any] | None = None,
 ) -> None:
     """Append one closed trade to the day bucket in Redis (fail-safe)."""
     now = datetime.now(IST)
@@ -120,6 +121,14 @@ def record_completed_trade(
         "exit_at": exit_at or now.isoformat(),
         "paper_trading": paper_trading,
     }
+    if extra:
+        for key, value in extra.items():
+            if value is None:
+                continue
+            if isinstance(value, float):
+                record[key] = round(value, 2)
+            else:
+                record[key] = value
     key = COMPLETED_TRADES_KEY_TEMPLATE.format(day=day)
     existing = cache_manager.get_json(key)
     trades: list[dict[str, Any]] = existing if isinstance(existing, list) else []
@@ -133,6 +142,59 @@ def record_completed_trade(
             pnl_points,
             exit_reason,
         )
+
+
+def load_s3_trades(
+    start_date: date | None = None,
+    end_date: date | None = None,
+) -> list[dict[str, Any]]:
+    """S3 breakout trades only, newest exit first."""
+    rows = [
+        row
+        for row in load_trades(start_date=start_date, end_date=end_date)
+        if str(row.get("strategy_id") or "") == "breakout"
+        or str(row.get("strategy") or "") == STRATEGY_BREAKOUT
+    ]
+    rows.sort(key=lambda row: str(row.get("exit_at") or ""), reverse=True)
+    return rows
+
+
+def s3_trade_log_rows(trades: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Admin table rows for Strategy 3."""
+    out: list[dict[str, Any]] = []
+    for row in trades:
+        strike = row.get("option_strike")
+        option_type = str(row.get("option_type") or "")
+        strike_label = f"{int(strike)}{option_type}" if strike else str(row.get("contract_label") or "—")
+        nifty = row.get("spot_entry")
+        if nifty is None:
+            nifty = row.get("entry_price") if not row.get("option_strike") else None
+        entry = row.get("premium_entry")
+        if entry is None and row.get("option_strike"):
+            entry = row.get("entry_price")
+        elif entry is None:
+            entry = row.get("entry_price")
+        moved = row.get("points_moved")
+        if moved is None:
+            moved = row.get("premium_points_moved")
+        if moved is None and row.get("premium_high") is not None and entry is not None:
+            moved = float(row["premium_high"]) - float(entry)
+        out.append(
+            {
+                "Exit at": str(row.get("exit_at") or "")[:19],
+                "Nifty": nifty,
+                "Strike": strike_label,
+                "Direction": row.get("direction") or "",
+                "Entry": entry,
+                "SL": row.get("sl_price"),
+                "Target": row.get("tp_price") or row.get("tp1_price"),
+                "Points moved": moved,
+                "Actual pts": row.get("pnl_points"),
+                "Result": row.get("result") or classify_result(float(row.get("pnl_points") or 0)),
+                "Exit reason": row.get("exit_reason") or "",
+            }
+        )
+    return out
 
 
 def amend_completed_trade(

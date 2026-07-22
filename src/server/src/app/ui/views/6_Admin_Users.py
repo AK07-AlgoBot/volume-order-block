@@ -134,6 +134,30 @@ else:
     st.info("No broker connection results.")
 
 st.markdown("---")
+st.markdown("## S3 trade log")
+st.caption(
+    "Strategy 3 closed trades — Nifty spot, strike, entry/SL/target premium, "
+    "points moved after entry, actual points captured, and WIN/LOSS."
+)
+s3_days = st.selectbox("Lookback", [7, 14, 30, 60], index=1, key="admin_s3_days")
+try:
+    s3_response = api_request("GET", f"/api/admin/s3-trades?days={s3_days}")
+    if s3_response.status_code == 200:
+        s3_payload = s3_response.json()
+        s3_rows = s3_payload.get("rows") or []
+        if s3_rows:
+            st.dataframe(s3_rows, use_container_width=True, hide_index=True)
+            st.caption(
+                f"{len(s3_rows)} trade(s) · {s3_payload.get('start_date')} → {s3_payload.get('end_date')}"
+            )
+        else:
+            st.info("No S3 trades in this lookback yet. New exits will appear here after the next rebuild.")
+    else:
+        st.error(s3_response.text or f"S3 trade log API error {s3_response.status_code}")
+except Exception as exc:
+    st.error(f"Could not load S3 trade log: {exc}")
+
+st.markdown("---")
 st.markdown("## User management")
 
 try:
