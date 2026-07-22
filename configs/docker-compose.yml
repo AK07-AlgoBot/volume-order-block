@@ -139,6 +139,8 @@ services:
       - ak07
 
   choch_engine:
+    # Retired — Strategy 8 not live. Start only with: --profile choch
+    profiles: ["choch"]
     build:
       context: ..
       dockerfile: configs/docker/Dockerfile.api
@@ -267,8 +269,6 @@ services:
       breakout_engine:
         condition: service_started
       s7_engine:
-        condition: service_started
-      choch_engine:
         condition: service_started
       profit_target_engine:
         condition: service_started

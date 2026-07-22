@@ -171,6 +171,8 @@ def profile_created_date(username: str, *, role: str = USER_ROLE):
 
 
 def strategy_enabled(profile: dict[str, Any], strategy_id: str, *, role: str | None = None) -> bool:
+    if strategy_id not in ALL_STRATEGIES:
+        return False
     if role == ADMIN_ROLE or profile.get("role") == ADMIN_ROLE:
         return True
     return strategy_id in (profile.get("enabled_strategies") or [])

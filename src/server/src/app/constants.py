@@ -12,6 +12,9 @@ STRATEGY_S7_ORB = "s7_orb"
 STRATEGY_S8_CHOCH = "s8_choch"
 STRATEGY_GAMMA = "gamma"
 
+# Retired — code retained, not offered live / not shown on dashboard.
+RETIRED_STRATEGIES: tuple[str, ...] = (STRATEGY_S8_CHOCH,)
+
 # S3 live trading + dashboard panel — Nifty only (BN/Sensex excluded).
 S3_BREAKOUT_INDICES: tuple[str, ...] = ("NIFTY",)
 
@@ -20,7 +23,6 @@ ALL_STRATEGIES: tuple[str, ...] = (
     STRATEGY_S2_SMC,
     STRATEGY_S3_BREAKOUT,
     STRATEGY_S7_ORB,
-    STRATEGY_S8_CHOCH,
     STRATEGY_GAMMA,
 )
 

@@ -45,9 +45,10 @@ STRATEGY_ORDER: Final[tuple[str, ...]] = (
     STRATEGY_GREEKS,
     STRATEGY_SR_REVERSAL,
     STRATEGY_S7_ORB,
-    STRATEGY_CHOCH,
     STRATEGY_GAMMA,
 )
+# Kept for historical trade rows only — not shown in empty strategy summaries.
+RETIRED_STRATEGY_LABELS: Final[frozenset[str]] = frozenset({STRATEGY_CHOCH})
 
 
 def classify_result(pnl_points: float) -> str:

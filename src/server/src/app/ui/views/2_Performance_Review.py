@@ -31,7 +31,6 @@ _PERF_STRATEGY_BY_ENTITLEMENT = {
     "s2_smc": performance_store.STRATEGY_SMC_CRT,
     "s3_breakout": performance_store.STRATEGY_BREAKOUT,
     "s7_orb": performance_store.STRATEGY_S7_ORB,
-    "s8_choch": performance_store.STRATEGY_CHOCH,
     "gamma": performance_store.STRATEGY_GAMMA,
 }
 
@@ -92,6 +91,13 @@ if floor is not None and start_date < floor:
 
 trades = performance_store.load_trades(start_date=start_date, end_date=today)
 trades = [t for t in trades if user_can_view_trade(t)]
+# Strategy 8 retired — exclude from summaries / charts (historical rows remain in Redis).
+trades = [
+    t
+    for t in trades
+    if str(t.get("strategy") or "") not in performance_store.RETIRED_STRATEGY_LABELS
+    and str(t.get("strategy_id") or "") != "s8_choch"
+]
 load_status = performance_store.load_status(start_date, today)
 
 if paper_filter == "Paper only":
