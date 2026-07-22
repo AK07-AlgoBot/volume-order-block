@@ -310,20 +310,15 @@ class KiteClient:
         *,
         itm_offset: float = 50.0,
     ) -> dict[str, Any] | None:
-        """ATM / mild-ITM CE (LONG) or PE (SHORT), aligned with Groww S3 logic."""
+        """Mild-ITM CE (LONG) or PE (SHORT) — 1-step ITM preferred so premium tracks spot."""
+        from app.services.options_greeks import preferred_itm_strikes
+
         code = index_code.upper()
         opt = "CE" if direction == "LONG" else "PE"
         cfg = INDEX_CONFIGS.get(code)
         step = cfg.strike_step if cfg else 50
         atm = int(round(spot / step) * step)
-        if direction == "LONG":
-            preferred = [atm, atm - step, atm + step] if spot >= atm else [atm, atm - step]
-            if spot >= atm + step * 0.35:
-                preferred = [atm, atm - step, atm - 2 * step]
-        else:
-            preferred = [atm, atm + step, atm - step] if spot <= atm else [atm, atm + step]
-            if spot <= atm - step * 0.35:
-                preferred = [atm, atm + step, atm + 2 * step]
+        preferred = preferred_itm_strikes(spot, step, direction)
 
         rows = _load_index_fno_rows(code, option_types=frozenset({opt}))
         by_expiry: dict[str, list[dict[str, str]]] = {}
@@ -366,7 +361,7 @@ class KiteClient:
         except Exception:
             pass
         logger.info(
-            "[%s] Kite option pick %s %s%d ≈ATM %d (spot=%.2f delta≈%s)",
+            "[%s] Kite option pick %s %s%d ITM-first ≈ATM %d (spot=%.2f delta≈%s)",
             self.username,
             direction,
             opt,
@@ -385,7 +380,7 @@ class KiteClient:
             "strike": strike_i,
             "option_type": opt,
             "delta": delta,
-            "selection": "atm_itm_spot_aligned",
+            "selection": "itm_first_spot_aligned",
         }
 
     def place_market_order(

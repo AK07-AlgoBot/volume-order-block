@@ -401,25 +401,15 @@ class GrowwClient:
         *,
         itm_offset: float = 50.0,
     ) -> dict[str, Any] | None:
-        """ATM / mild-ITM CE (LONG) or PE (SHORT) — aligned with spot movement.
+        """Mild-ITM CE (LONG) or PE (SHORT) — 1-step ITM preferred so premium tracks spot."""
+        from app.services.options_greeks import preferred_itm_strikes
 
-        Groww CSV has no live greeks; pick nearest weekly ATM, or 1-step ITM
-        when spot is past the half-step (tracks Nifty better than deep OTM).
-        """
         code = index_code.upper()
         today = date.today().isoformat()
         opt = "CE" if direction == "LONG" else "PE"
         step = 50 if code == "NIFTY" else 100 if code == "BANKNIFTY" else 100
         atm = int(round(spot / step) * step)
-        # Mild ITM preference when spot has clearly crossed the ATM mid.
-        if direction == "LONG":
-            preferred = [atm, atm - step, atm + step] if spot >= atm else [atm, atm - step]
-            if spot >= atm + step * 0.35:
-                preferred = [atm, atm - step, atm - 2 * step]
-        else:
-            preferred = [atm, atm + step, atm - step] if spot <= atm else [atm, atm + step]
-            if spot <= atm - step * 0.35:
-                preferred = [atm, atm + step, atm + 2 * step]
+        preferred = preferred_itm_strikes(spot, step, direction)
 
         rows = _load_index_fno_rows_from_csv(code, option_types=frozenset({opt}))
         by_expiry: dict[str, list[dict[str, str]]] = {}
@@ -462,7 +452,7 @@ class GrowwClient:
         except Exception:
             delta = None
         logger.info(
-            "[%s] Groww option pick %s %s%d ≈ATM %d (spot=%.2f delta≈%s)",
+            "[%s] Groww option pick %s %s%d ITM-first ≈ATM %d (spot=%.2f delta≈%s)",
             self.username,
             direction,
             opt,
@@ -481,7 +471,7 @@ class GrowwClient:
             "strike": strike_i,
             "option_type": opt,
             "delta": delta,
-            "selection": "atm_itm_spot_aligned",
+            "selection": "itm_first_spot_aligned",
         }
 
     def get_fno_ltp(self, trading_symbol: str, *, exchange: str = "NSE") -> float | None:

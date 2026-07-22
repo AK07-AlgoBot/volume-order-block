@@ -78,7 +78,7 @@ DEFAULT_OI_RISK: Final[tuple[float, float, float]] = (60.0, 60.0, 120.0)
 INITIAL_LOTS: Final[int] = 2
 ITM_OFFSET_POINTS: Final[float] = 50.0  # legacy fallback when chain/greeks unavailable
 # Spot-aligned option pick: target |delta| so premium tracks Nifty (ATM ~0.5, mild ITM ~0.55–0.65).
-OPTION_TARGET_DELTA: Final[float] = float(os.environ.get("AK07_OPTION_TARGET_DELTA", "0.55"))
+OPTION_TARGET_DELTA: Final[float] = float(os.environ.get("AK07_OPTION_TARGET_DELTA", "0.60"))
 OPTION_DELTA_MIN: Final[float] = float(os.environ.get("AK07_OPTION_DELTA_MIN", "0.40"))
 OPTION_DELTA_MAX: Final[float] = float(os.environ.get("AK07_OPTION_DELTA_MAX", "0.75"))
 MAX_TRADES_PER_INDEX_PER_DAY: Final[int] = 2

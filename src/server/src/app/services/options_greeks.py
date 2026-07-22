@@ -258,6 +258,17 @@ def analyze_option_chain(
     )
 
 
+def preferred_itm_strikes(spot: float, strike_step: int, direction: str) -> list[int]:
+    """Strike preference for S3: 1-step ITM first so premium tracks spot better than ATM."""
+    step = max(int(strike_step), 1)
+    atm = int(round(spot / step) * step)
+    if direction == "LONG":
+        # CE: lower strike = ITM
+        return [atm - step, atm, atm - 2 * step, atm + step]
+    # PE: higher strike = ITM
+    return [atm + step, atm, atm + 2 * step, atm - step]
+
+
 def pick_spot_aligned_option(
     *,
     spot: float,
@@ -265,17 +276,17 @@ def pick_spot_aligned_option(
     expiry: str,
     direction: str,
     strike_step: int = 50,
-    target_delta: float = 0.55,
+    target_delta: float = 0.60,
     delta_min: float = 0.40,
     delta_max: float = 0.75,
     band_points: float = 250.0,
     now: datetime | None = None,
 ) -> dict[str, Any] | None:
-    """Pick ATM/mild-ITM CE (LONG) or PE (SHORT) whose |delta| best tracks spot.
+    """Pick mild-ITM CE (LONG) or PE (SHORT) whose |delta| best tracks spot.
 
     Prefers strikes that:
-      • sit ATM → 1–2 steps ITM (premium moves with Nifty)
-      • have |delta| near target (default 0.55, clamped to [delta_min, delta_max])
+      • sit 1-step ITM → ATM (premium moves with Nifty)
+      • have |delta| near target (default 0.60, clamped to [delta_min, delta_max])
       • have usable LTP and preferably OI liquidity
     """
     if spot <= 0 or not chain_rows:
@@ -335,9 +346,10 @@ def pick_spot_aligned_option(
 
         itm_bonus = 0.0
         if direction == "LONG" and strike <= spot:
-            itm_bonus = 0.08 if strike in (atm, atm - strike_step) else 0.04
+            # Prefer 1-step ITM over pure ATM so premium tracks Nifty.
+            itm_bonus = 0.12 if strike == atm - strike_step else 0.05 if strike == atm else 0.04
         if direction == "SHORT" and strike >= spot:
-            itm_bonus = 0.08 if strike in (atm, atm + strike_step) else 0.04
+            itm_bonus = 0.12 if strike == atm + strike_step else 0.05 if strike == atm else 0.04
 
         atm_dist = abs(strike - atm) / max(strike_step, 1)
         delta_err = abs(abs_delta - target_delta)

@@ -63,6 +63,10 @@ LOTS_PER_TRADE: Final[int] = 1
 OPTION_PREMIUM_TP_PTS: Final[float] = float(os.environ.get("BREAKOUT_OPTION_PREMIUM_TP_PTS", "15"))
 # Premium stop (pts below entry). Spot SL was too hair-trigger on 2s LTP for option legs.
 OPTION_PREMIUM_SL_PTS: Final[float] = float(os.environ.get("BREAKOUT_OPTION_PREMIUM_SL_PTS", "8"))
+# Book TP when premium is within this many pts of the target (avoids missing by 1–2 pts then SL).
+OPTION_TP_NEAR_PTS: Final[float] = float(os.environ.get("BREAKOUT_OPTION_TP_NEAR_PTS", "2"))
+# After this much premium profit, raise SL to entry (breakeven) so near-TP reversals don't full-SL.
+OPTION_BREAKEVEN_PTS: Final[float] = float(os.environ.get("BREAKOUT_OPTION_BREAKEVEN_PTS", "6"))
 # Ignore exits for N seconds after entry (avoids open-print noise).
 OPTION_ENTRY_GRACE_SEC: Final[float] = float(os.environ.get("BREAKOUT_OPTION_ENTRY_GRACE_SEC", "20"))
 # While holding options, poll premium every N seconds (catch TP without waiting for 15s candle loop).
@@ -239,6 +243,7 @@ class BreakoutPosition:
     instrument_kind: str = "futures"  # futures | options
     premium_entry: float | None = None  # option LTP at entry (options mode)
     premium_last: float | None = None  # last observed option LTP (tick-to-tick)
+    premium_high: float | None = None  # peak premium since entry (favorable excursion)
 
     @property
     def quantity(self) -> int:
@@ -306,6 +311,7 @@ def _position_to_dict(pos: BreakoutPosition) -> dict[str, Any]:
         "instrument_kind": pos.instrument_kind,
         "premium_entry": pos.premium_entry,
         "premium_last": pos.premium_last,
+        "premium_high": pos.premium_high,
         "exit_pending": pos.exit_pending,
     }
 
@@ -342,6 +348,8 @@ def _position_from_dict(raw: dict[str, Any]) -> BreakoutPosition | None:
         premium_entry = float(premium_raw) if premium_raw is not None else None
         last_raw = raw.get("premium_last")
         premium_last = float(last_raw) if last_raw is not None else None
+        high_raw = raw.get("premium_high")
+        premium_high = float(high_raw) if high_raw is not None else None
         kind = str(raw.get("instrument_kind") or ("options" if option_type else "futures"))
         return BreakoutPosition(
             direction=direction,
@@ -361,6 +369,7 @@ def _position_from_dict(raw: dict[str, Any]) -> BreakoutPosition | None:
             instrument_kind=kind,
             premium_entry=premium_entry,
             premium_last=premium_last,
+            premium_high=premium_high,
         )
     except (KeyError, TypeError, ValueError):
         return None
