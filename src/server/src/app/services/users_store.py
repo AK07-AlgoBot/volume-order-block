@@ -130,6 +130,8 @@ def create_user(
     enabled_strategies: list[str] | None = None,
     broker: str = "upstox",
     paper_trading: bool = True,
+    lots: int = 1,
+    egress_ip: str = "",
 ) -> dict[str, Any]:
     un = _sanitize_username(username)
     if not un:
@@ -159,6 +161,8 @@ def create_user(
         "broker": broker,
         "paper_trading": paper_trading,
         "telegram_notifications": role_norm == ADMIN_ROLE,
+        "lots": lots,
+        "egress_ip": egress_ip,
     }
     if enabled_strategies is not None:
         profile_data["enabled_strategies"] = enabled_strategies

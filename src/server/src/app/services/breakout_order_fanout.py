@@ -22,10 +22,11 @@ S3_EXEC_INSTRUMENT: Final[str] = (os.environ.get("BREAKOUT_EXEC_INSTRUMENT") or 
 class S3Trader:
     username: str
     broker: str
+    lots: int = 1
 
 
 def list_live_s3_traders() -> list[S3Trader]:
-    from app.services.user_profiles_store import read_profile
+    from app.services.user_profiles_store import normalize_lots, read_profile
     from app.services.users_store import list_users
 
     traders: list[S3Trader] = []
@@ -40,7 +41,13 @@ def list_live_s3_traders() -> list[S3Trader]:
         if profile.get("paper_trading"):
             continue
         broker = str(profile.get("broker") or "upstox").strip().lower()
-        traders.append(S3Trader(username=username, broker=broker))
+        traders.append(
+            S3Trader(
+                username=username,
+                broker=broker,
+                lots=normalize_lots(profile.get("lots"), default=1),
+            )
+        )
     return traders
 
 
@@ -88,20 +95,22 @@ def place_s3_entries(
                 "broker": t.broker,
                 "trading_symbol": label,
                 "instrument_key": "",
-                "quantity": lot_size * lots,
+                "quantity": lot_size * t.lots,
+                "lots": t.lots,
                 "paper": True,
                 "instrument_kind": "options" if options else "futures",
             }
             for t in traders
         ]
 
-    quantity = lot_size * lots
     side = _entry_side(direction, options=options)
     legs: list[dict[str, Any]] = []
 
     for trader in list_live_s3_traders():
         if only_usernames and trader.username not in only_usernames:
             continue
+        trader_lots = max(1, int(trader.lots or lots or 1))
+        quantity = lot_size * trader_lots
         if trader.broker == "groww":
             groww = GrowwClient(trader.username)
             if not groww.has_token():
@@ -115,7 +124,7 @@ def place_s3_entries(
                 kind = "option" if options else "future"
                 logger.error("[%s] S3 entry skipped — no Groww %s %s", trader.username, index_code, kind)
                 continue
-            qty = int(contract.get("lot_size") or lot_size) * lots
+            qty = int(contract.get("lot_size") or lot_size) * trader_lots
             sym = str(contract["trading_symbol"])
             # Options are always long premium → treat as LONG exposure check
             expose_dir = "LONG" if options else direction
@@ -125,7 +134,11 @@ def place_s3_entries(
                     trader.username,
                     sym,
                 )
-                legs.append(_groww_entry_leg_from_position(trader, contract, direction, lots, options=options))
+                legs.append(
+                    _groww_entry_leg_from_position(
+                        trader, contract, direction, trader_lots, options=options
+                    )
+                )
                 continue
             order_id = groww.place_market_order(
                 sym,
@@ -146,6 +159,7 @@ def place_s3_entries(
                     "instrument_key": contract.get("instrument_key") or "",
                     "contract_label": contract.get("contract_label") or "",
                     "quantity": qty,
+                    "lots": trader_lots,
                     "groww_order_id": order_id,
                     "instrument_kind": "options" if options else "futures",
                     "option_strike": int(contract.get("strike") or 0),
@@ -177,7 +191,7 @@ def place_s3_entries(
                 kind = "option" if options else "future"
                 logger.error("[%s] S3 entry skipped — no Kite %s %s", trader.username, index_code, kind)
                 continue
-            qty = int(contract.get("lot_size") or lot_size) * lots
+            qty = int(contract.get("lot_size") or lot_size) * trader_lots
             sym = str(contract["tradingsymbol"])
             exchange = str(contract.get("exchange") or "NFO")
             expose_dir = "LONG" if options else direction
@@ -188,7 +202,11 @@ def place_s3_entries(
                     exchange,
                     sym,
                 )
-                legs.append(_kite_entry_leg_from_position(trader, contract, direction, lots, options=options))
+                legs.append(
+                    _kite_entry_leg_from_position(
+                        trader, contract, direction, trader_lots, options=options
+                    )
+                )
                 continue
             order_id = kite.place_market_order(exchange, sym, qty, side)
             if not order_id:
@@ -204,6 +222,7 @@ def place_s3_entries(
                     "instrument_key": contract.get("instrument_key") or "",
                     "contract_label": contract.get("contract_label") or "",
                     "quantity": qty,
+                    "lots": trader_lots,
                     "kite_order_id": order_id,
                     "instrument_kind": "options" if options else "futures",
                     "option_strike": int(contract.get("strike") or 0),
@@ -251,6 +270,7 @@ def place_s3_entries(
                         "instrument_key": contract["instrument_key"],
                         "contract_label": label,
                         "quantity": quantity,
+                        "lots": trader_lots,
                         "instrument_kind": "options",
                         "option_strike": int(contract["strike"]),
                         "option_type": str(contract["option_type"]),
@@ -282,10 +302,11 @@ def place_s3_entries(
                 {
                     "username": trader.username,
                     "broker": "upstox",
-                    "trading_symbol": contract.get("trading_symbol") or index_code,
+                    "trading_symbol": contract.get("trading_symbol") or contract["instrument_key"],
                     "instrument_key": contract["instrument_key"],
                     "contract_label": contract.get("contract_label") or "",
                     "quantity": quantity,
+                    "lots": trader_lots,
                     "instrument_kind": "futures",
                 }
             )
@@ -294,14 +315,12 @@ def place_s3_entries(
                 trader.username,
                 side,
                 quantity,
-                contract["instrument_key"],
+                contract.get("trading_symbol") or contract["instrument_key"],
             )
             continue
 
-        logger.warning("[%s] S3 entry skipped — broker %s not wired for orders", trader.username, trader.broker)
+        logger.error("[%s] S3 entry skipped — unsupported broker %s", trader.username, trader.broker)
 
-    if upstox_market_client and not legs:
-        logger.warning("No per-user S3 legs placed (check profiles/tokens)")
     return legs
 
 
@@ -323,6 +342,7 @@ def _kite_entry_leg_from_position(
         "instrument_key": contract.get("instrument_key") or "",
         "contract_label": contract.get("contract_label") or "",
         "quantity": qty,
+        "lots": lots,
         "kite_order_id": "existing_position",
         "recovered": True,
         "instrument_kind": "options" if options else "futures",
@@ -349,6 +369,7 @@ def _groww_entry_leg_from_position(
         "instrument_key": contract.get("instrument_key") or "",
         "contract_label": contract.get("contract_label") or "",
         "quantity": qty,
+        "lots": lots,
         "groww_order_id": "existing_position",
         "recovered": True,
         "instrument_kind": "options" if options else "futures",
@@ -373,17 +394,17 @@ def missing_s3_traders(
             if trader.broker == "upstox":
                 covered.add(trader.username)
     if index_code and direction and not s3_uses_options():
-        qty = lot_size * lots
         for trader in list_live_s3_traders():
             if trader.username in covered or trader.broker not in ("groww", "kite"):
                 continue
+            trader_lots = max(1, int(trader.lots or lots or 1))
             if trader.broker == "groww":
                 groww = GrowwClient(trader.username)
                 contract = groww.get_index_future_contract(index_code)
                 if not contract:
                     continue
                 sym = str(contract.get("trading_symbol") or "")
-                need = int(contract.get("lot_size") or lot_size) * lots
+                need = int(contract.get("lot_size") or lot_size) * trader_lots
                 if groww.has_directional_exposure(sym, direction, need):
                     logger.info(
                         "[%s] Groww already has %s %s on %s — treating as covered",
@@ -400,7 +421,7 @@ def missing_s3_traders(
                 continue
             sym = str(contract.get("tradingsymbol") or "")
             exchange = str(contract.get("exchange") or "NFO")
-            need = int(contract.get("lot_size") or lot_size) * lots
+            need = int(contract.get("lot_size") or lot_size) * trader_lots
             if kite.has_directional_exposure(exchange, sym, direction, need):
                 logger.info(
                     "[%s] Kite already has %s %s:%s — treating as covered",

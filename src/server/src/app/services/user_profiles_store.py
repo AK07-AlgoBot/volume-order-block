@@ -33,6 +33,15 @@ def _now_iso() -> str:
     return datetime.now(_IST).isoformat()
 
 
+def normalize_lots(value: Any, *, default: int = 1) -> int:
+    """S3 quantity allocation in lots (1–20)."""
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        return default
+    return max(1, min(n, 20))
+
+
 def profile_path(username: str) -> Path:
     safe = _sanitize_username(username)
     return get_settings().user_data_dir(safe) / "profile.json"
@@ -48,6 +57,7 @@ def _default_profile(username: str, role: str = USER_ROLE) -> dict[str, Any]:
         "paper_trading": True,
         "telegram_notifications": role == ADMIN_ROLE,
         "egress_ip": "",
+        "lots": 1,
         "created_at": _now_iso(),
     }
 
@@ -74,6 +84,8 @@ def read_profile(username: str, *, role: str = USER_ROLE) -> dict[str, Any]:
         base["telegram_notifications"] = bool(raw.get("telegram_notifications"))
     egress_ip = str(raw.get("egress_ip") or "").strip()
     base["egress_ip"] = egress_ip
+    if "lots" in raw:
+        base["lots"] = normalize_lots(raw.get("lots"))
     created_at = str(raw.get("created_at") or "").strip()
     if created_at:
         base["created_at"] = created_at
@@ -100,6 +112,8 @@ def write_profile(username: str, data: dict[str, Any]) -> dict[str, Any]:
         current["telegram_notifications"] = bool(data["telegram_notifications"])
     if "egress_ip" in data:
         current["egress_ip"] = str(data.get("egress_ip") or "").strip()
+    if "lots" in data:
+        current["lots"] = normalize_lots(data.get("lots"), default=int(current.get("lots") or 1))
     if "created_at" in data and str(data.get("created_at") or "").strip():
         current["created_at"] = str(data["created_at"]).strip()
     elif not str(current.get("created_at") or "").strip():

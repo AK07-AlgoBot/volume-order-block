@@ -27,6 +27,20 @@ from app.services.users_store import create_user, get_user_record, list_users
 router = APIRouter(prefix="/api/admin", tags=["admin"])
 
 
+def _profile_public(username: str, role: str, prof: dict) -> UserProfilePublic:
+    from app.services.user_profiles_store import normalize_lots
+
+    return UserProfilePublic(
+        username=username,
+        role=role,
+        enabled_strategies=prof.get("enabled_strategies") or [],
+        broker=str(prof.get("broker") or "upstox"),
+        paper_trading=bool(prof.get("paper_trading")),
+        lots=normalize_lots(prof.get("lots"), default=1),
+        egress_ip=str(prof.get("egress_ip") or "").strip(),
+    )
+
+
 @router.get("/blr")
 async def admin_get_blr(
     index_code: str = "NIFTY",
@@ -110,13 +124,7 @@ async def admin_list_users(admin: UserClaims = Depends(require_admin_user)):
         rows.append(
             {
                 **u,
-                "profile": UserProfilePublic(
-                    username=prof["username"],
-                    role=u["role"],
-                    enabled_strategies=prof.get("enabled_strategies") or [],
-                    broker=str(prof.get("broker") or "upstox"),
-                    paper_trading=bool(prof.get("paper_trading")),
-                ),
+                "profile": _profile_public(u["username"], u["role"], prof),
             }
         )
     return {"users": rows, "strategies": [{"id": s, "label": STRATEGY_LABELS[s]} for s in ALL_STRATEGIES]}
@@ -132,6 +140,8 @@ async def admin_create_user(body: CreateUserBody, admin: UserClaims = Depends(re
             enabled_strategies=body.enabled_strategies or None,
             broker=body.broker,
             paper_trading=body.paper_trading,
+            lots=body.lots,
+            egress_ip=body.egress_ip,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -145,13 +155,7 @@ async def admin_create_user(body: CreateUserBody, admin: UserClaims = Depends(re
     return {
         "ok": True,
         "user": UserPublic(username=rec["username"], role=rec["role"]),
-        "profile": UserProfilePublic(
-            username=rec["username"],
-            role=rec["role"],
-            enabled_strategies=prof.get("enabled_strategies") or [],
-            broker=str(prof.get("broker") or "upstox"),
-            paper_trading=bool(prof.get("paper_trading")),
-        ),
+        "profile": _profile_public(rec["username"], rec["role"], prof),
     }
 
 
@@ -172,10 +176,4 @@ async def admin_update_profile(
         target_user=username,
     )
     rec = get_user_record(username) or {"username": username, "role": "user"}
-    return UserProfilePublic(
-        username=username,
-        role=str(rec.get("role") or "user"),
-        enabled_strategies=prof.get("enabled_strategies") or [],
-        broker=str(prof.get("broker") or "upstox"),
-        paper_trading=bool(prof.get("paper_trading")),
-    )
+    return _profile_public(username, str(rec.get("role") or "user"), prof)

@@ -181,15 +181,89 @@ else:
         u = row.get("username", "?")
         role = row.get("role", "user")
         prof = row.get("profile") or {}
+        if hasattr(prof, "model_dump"):
+            prof = prof.model_dump()
         strategies = prof.get("enabled_strategies") or []
-        st.markdown(f"**{u}** · `{role}` · broker `{prof.get('broker', 'upstox')}` · paper `{prof.get('paper_trading')}`")
-        if role == "admin":
-            st.caption("All strategies (admin) · Telegram alerts enabled")
-        else:
-            labels = [STRATEGY_LABELS.get(s, s) for s in strategies]
-            st.caption(
-                "Strategies: " + (", ".join(labels) if labels else "none") + " · Telegram: off"
-            )
+        lots = int(prof.get("lots") or 1)
+        egress = str(prof.get("egress_ip") or "").strip() or "primary"
+        header = (
+            f"{u} · {role} · broker {prof.get('broker', 'upstox')} · "
+            f"paper {prof.get('paper_trading')} · lots {lots} · egress {egress}"
+        )
+        with st.expander(header, expanded=False):
+            if role == "admin":
+                st.caption("All strategies (admin) · Telegram alerts enabled")
+            else:
+                labels = [STRATEGY_LABELS.get(s, s) for s in strategies]
+                st.caption(
+                    "Strategies: " + (", ".join(labels) if labels else "none") + " · Telegram: off"
+                )
+            with st.form(f"edit_user_{u}"):
+                ec1, ec2 = st.columns(2)
+                with ec1:
+                    edit_broker = st.selectbox(
+                        "Broker",
+                        ["upstox", "kite", "groww"],
+                        index=["upstox", "kite", "groww"].index(
+                            str(prof.get("broker") or "upstox")
+                            if str(prof.get("broker") or "upstox") in ("upstox", "kite", "groww")
+                            else "upstox"
+                        ),
+                        key=f"edit_broker_{u}",
+                    )
+                    edit_lots = st.number_input(
+                        "Lots (quantity allocation)",
+                        min_value=1,
+                        max_value=20,
+                        value=lots,
+                        step=1,
+                        key=f"edit_lots_{u}",
+                        help="Number of F&O lots per S3 entry for this user.",
+                    )
+                with ec2:
+                    edit_paper = st.checkbox(
+                        "Paper trading",
+                        value=bool(prof.get("paper_trading")),
+                        key=f"edit_paper_{u}",
+                    )
+                    edit_egress = st.text_input(
+                        "Egress IP (blank = primary)",
+                        value=str(prof.get("egress_ip") or ""),
+                        key=f"edit_egress_{u}",
+                        placeholder="e.g. 65.109.255.239",
+                    )
+                default_strats = [s for s in strategies if s in strategy_options]
+                if role == "admin":
+                    st.caption("Admin always has all strategies — selection below is informational.")
+                    edit_strats = list(ALL_STRATEGIES)
+                else:
+                    edit_strats = st.multiselect(
+                        "Enabled strategies",
+                        options=list(strategy_options.keys()),
+                        default=default_strats or [ALL_STRATEGIES[2]],
+                        format_func=lambda x: strategy_options.get(x, x),
+                        key=f"edit_strats_{u}",
+                    )
+                save_edit = st.form_submit_button("Save configuration", type="primary")
+            if save_edit:
+                body = {
+                    "broker": edit_broker,
+                    "paper_trading": edit_paper,
+                    "lots": int(edit_lots),
+                    "egress_ip": edit_egress.strip(),
+                }
+                if role != "admin":
+                    body["enabled_strategies"] = edit_strats
+                r = api_request("PATCH", f"/api/admin/users/{u}/profile", json=body)
+                if r.status_code == 200:
+                    st.success(f"Updated {u}.")
+                    st.rerun()
+                else:
+                    try:
+                        detail = r.json().get("detail", r.text)
+                    except Exception:
+                        detail = r.text
+                    st.error(str(detail))
 
 st.markdown("---")
 st.markdown("### Create user")
@@ -199,9 +273,22 @@ with st.form("create_user_form"):
     with c1:
         new_username = st.text_input("Username", max_chars=32)
         new_password = st.text_input("Temporary password", type="password")
+        new_lots = st.number_input(
+            "Lots (quantity allocation)",
+            min_value=1,
+            max_value=20,
+            value=1,
+            step=1,
+            help="Number of F&O lots per S3 entry for this user.",
+        )
     with c2:
         new_role = st.selectbox("Role", ["user", "admin"], index=0)
         new_broker = st.selectbox("Default broker", ["upstox", "kite", "groww"], index=0)
+        new_egress = st.text_input(
+            "Egress IP (blank = primary)",
+            value="",
+            placeholder="e.g. 65.109.255.239",
+        )
     new_paper = st.checkbox("Paper trading default", value=True)
     picked = st.multiselect(
         "Enabled strategies",
@@ -222,6 +309,8 @@ if submit:
             "enabled_strategies": picked,
             "broker": new_broker,
             "paper_trading": new_paper,
+            "lots": int(new_lots),
+            "egress_ip": new_egress.strip(),
         }
         r = api_request("POST", "/api/admin/users", json=body)
         if r.status_code == 200:

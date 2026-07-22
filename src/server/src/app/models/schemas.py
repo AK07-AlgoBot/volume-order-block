@@ -54,6 +54,8 @@ class UserProfilePublic(BaseModel):
     enabled_strategies: list[str]
     broker: str
     paper_trading: bool
+    lots: int = 1
+    egress_ip: str = ""
 
 
 class CreateUserBody(BaseModel):
@@ -63,12 +65,16 @@ class CreateUserBody(BaseModel):
     enabled_strategies: list[str] = Field(default_factory=list)
     broker: Literal["upstox", "kite", "groww"] = "upstox"
     paper_trading: bool = True
+    lots: int = Field(default=1, ge=1, le=20)
+    egress_ip: str = ""
 
 
 class UpdateUserProfileBody(BaseModel):
     enabled_strategies: list[str] | None = None
     broker: Literal["upstox", "kite", "groww"] | None = None
     paper_trading: bool | None = None
+    lots: int | None = Field(default=None, ge=1, le=20)
+    egress_ip: str | None = None
 
 
 class AdminBlrUpdateBody(BaseModel):
