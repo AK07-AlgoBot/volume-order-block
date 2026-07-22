@@ -187,6 +187,15 @@ def s3_trade_log_rows(trades: list[dict[str, Any]]) -> list[dict[str, Any]]:
             moved = row.get("premium_points_moved")
         if moved is None and row.get("premium_high") is not None and entry is not None:
             moved = float(row["premium_high"]) - float(entry)
+        beyond = row.get("beyond_target")
+        if beyond is None and moved is not None and entry is not None:
+            try:
+                if row.get("tp_price") is not None:
+                    beyond = max(0.0, float(moved) - (float(row["tp_price"]) - float(entry)))
+                else:
+                    beyond = max(0.0, float(moved) - 25.0)
+            except (TypeError, ValueError):
+                beyond = None
         out.append(
             {
                 "Exit at": str(row.get("exit_at") or "")[:19],
@@ -198,9 +207,9 @@ def s3_trade_log_rows(trades: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "SL": row.get("sl_price"),
                 "Target": row.get("tp_price") or row.get("tp1_price"),
                 "Points moved": moved,
+                "Beyond target": beyond,
                 "Actual pts": row.get("pnl_points"),
                 "Result": row.get("result") or classify_result(float(row.get("pnl_points") or 0)),
-                "Exit reason": row.get("exit_reason") or "",
             }
         )
     return out
@@ -614,14 +623,29 @@ def load_trades(
     return trades
 
 
-def summarize_by_strategy(trades: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Aggregate stats per strategy plus a TOTAL row."""
+def summarize_by_strategy(
+    trades: list[dict[str, Any]],
+    *,
+    allowed_strategies: list[str] | None = None,
+) -> list[dict[str, Any]]:
+    """Aggregate stats per strategy plus a TOTAL row.
+
+    When ``allowed_strategies`` is set (non-admin Performance Review), only those
+    strategy labels are shown — never the full STRATEGY_ORDER catalog.
+    """
     rows: list[dict[str, Any]] = []
     grand_trades = grand_wins = grand_losses = 0
     grand_profit = 0.0
 
     present = {str(t.get("strategy")) for t in trades}
-    for strategy in _ordered_strategies(present):
+    if allowed_strategies is not None:
+        allowed = [s for s in allowed_strategies if s]
+        ordered = [s for s in allowed if s in present]
+        ordered.extend([s for s in allowed if s not in present])
+    else:
+        ordered = _ordered_strategies(present)
+
+    for strategy in ordered:
         subset = [t for t in trades if str(t.get("strategy")) == strategy]
         stats = _trade_stats(subset)
         rows.append({"Strategy": strategy, **stats})
@@ -631,7 +655,8 @@ def summarize_by_strategy(trades: list[dict[str, Any]]) -> list[dict[str, Any]]:
         grand_profit += float(stats["Profit (pts)"])
 
     if not rows:
-        for strategy in STRATEGY_ORDER:
+        fill = list(allowed_strategies) if allowed_strategies is not None else list(STRATEGY_ORDER)
+        for strategy in fill:
             rows.append({"Strategy": strategy, **_trade_stats([])})
 
     rows.append(

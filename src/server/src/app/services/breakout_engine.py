@@ -60,13 +60,16 @@ POLL_SECONDS: Final[float] = float(os.environ.get("BREAKOUT_POLL_SECONDS", "15")
 MAX_TRADES_PER_DAY: Final[int] = int(os.environ.get("BREAKOUT_MAX_TRADES_PER_DAY", "3"))
 LOTS_PER_TRADE: Final[int] = 1
 # Execution: options = BUY ITM CE/PE (premium TP); futures = index FUT. BLR signals unchanged either way.
-OPTION_PREMIUM_TP_PTS: Final[float] = float(os.environ.get("BREAKOUT_OPTION_PREMIUM_TP_PTS", "15"))
-# Premium stop (pts below entry). Spot SL was too hair-trigger on 2s LTP for option legs.
-OPTION_PREMIUM_SL_PTS: Final[float] = float(os.environ.get("BREAKOUT_OPTION_PREMIUM_SL_PTS", "8"))
+# Safer ~1:2: −15 SL / +25 TP (true 1:2 would be +30 — tracked as beyond-target when peak exceeds 25).
+OPTION_PREMIUM_TP_PTS: Final[float] = float(os.environ.get("BREAKOUT_OPTION_PREMIUM_TP_PTS", "25"))
+OPTION_PREMIUM_SL_PTS: Final[float] = float(os.environ.get("BREAKOUT_OPTION_PREMIUM_SL_PTS", "15"))
+# Ideal 1:2 premium target (pts) — used only for "beyond ideal RR" analytics.
+OPTION_IDEAL_TP_PTS: Final[float] = float(os.environ.get("BREAKOUT_OPTION_IDEAL_TP_PTS", "30"))
 # Book TP when premium is within this many pts of the target (avoids missing by 1–2 pts then SL).
-OPTION_TP_NEAR_PTS: Final[float] = float(os.environ.get("BREAKOUT_OPTION_TP_NEAR_PTS", "2"))
-# After this much premium profit, raise SL to entry (breakeven) so near-TP reversals don't full-SL.
+OPTION_TP_NEAR_PTS: Final[float] = float(os.environ.get("BREAKOUT_OPTION_TP_NEAR_PTS", "1"))
+# After this much premium profit, start trailing: SL → entry+lock, then +1 SL per +1 further peak.
 OPTION_BREAKEVEN_PTS: Final[float] = float(os.environ.get("BREAKOUT_OPTION_BREAKEVEN_PTS", "10"))
+OPTION_TRAIL_LOCK_PTS: Final[float] = float(os.environ.get("BREAKOUT_OPTION_TRAIL_LOCK_PTS", "1"))
 # Ignore exits for N seconds after entry (avoids open-print noise).
 OPTION_ENTRY_GRACE_SEC: Final[float] = float(os.environ.get("BREAKOUT_OPTION_ENTRY_GRACE_SEC", "20"))
 # While holding options, poll premium every N seconds (catch TP without waiting for 15s candle loop).
@@ -393,8 +396,12 @@ def _s3_trade_extra(
     if pos.uses_options and premium_entry is not None:
         peak = float(premium_high) if premium_high is not None else float(exit_price)
         points_moved = peak - float(premium_entry)
+        beyond_target = max(0.0, points_moved - OPTION_PREMIUM_TP_PTS)
+        beyond_ideal = max(0.0, points_moved - OPTION_IDEAL_TP_PTS)
     else:
         points_moved = spot_moved
+        beyond_target = None
+        beyond_ideal = None
     return {
         "instrument_kind": pos.instrument_kind,
         "contract_label": pos.display_contract,
@@ -409,6 +416,9 @@ def _s3_trade_extra(
         "sl_price": pos.sl_price,
         "tp_price": pos.tp1_price,
         "points_moved": points_moved,
+        "beyond_target": beyond_target,
+        "beyond_ideal_rr": beyond_ideal,
+        "ideal_tp_pts": OPTION_IDEAL_TP_PTS if pos.uses_options else None,
     }
 
 
@@ -1773,7 +1783,7 @@ class BreakoutEngine:
             if premium_entry is not None and premium_entry > 0:
                 # Options: TP/SL on premium; spot SL from trade_levels is replaced.
                 tp1 = round(premium_entry + OPTION_PREMIUM_TP_PTS, 2)
-                tp2 = round(premium_entry + OPTION_PREMIUM_TP_PTS * 2, 2)
+                tp2 = round(premium_entry + OPTION_IDEAL_TP_PTS, 2)
                 sl = round(max(premium_entry - OPTION_PREMIUM_SL_PTS, 0.05), 2)
             else:
                 logger.warning(
@@ -1940,18 +1950,19 @@ class BreakoutEngine:
             if pos.premium_entry is None and premium is not None and premium > 0:
                 pos.premium_entry = premium
                 pos.tp1_price = round(premium + OPTION_PREMIUM_TP_PTS, 2)
-                pos.tp2_price = round(premium + OPTION_PREMIUM_TP_PTS * 2, 2)
+                pos.tp2_price = round(premium + OPTION_IDEAL_TP_PTS, 2)
                 # Re-purpose sl_price as premium floor when in options mode.
                 pos.sl_price = round(max(premium - OPTION_PREMIUM_SL_PTS, 0.05), 2)
                 pos.premium_high = premium
                 logger.info(
-                    "[%s] option premium captured %.2f → TP %.2f / SL %.2f (−%.0f / +%.0f)",
+                    "[%s] option premium captured %.2f → TP %.2f / SL %.2f (−%.0f / +%.0f; ideal +%.0f)",
                     state.config.code,
                     premium,
                     pos.tp1_price,
                     pos.sl_price,
                     OPTION_PREMIUM_SL_PTS,
                     OPTION_PREMIUM_TP_PTS,
+                    OPTION_IDEAL_TP_PTS,
                 )
                 self._save_session_state(state)
 
@@ -1971,22 +1982,34 @@ class BreakoutEngine:
             if premium is not None:
                 if pos.premium_high is None or premium > pos.premium_high:
                     pos.premium_high = premium
-                # Lock SL to entry once premium has moved enough — avoids full SL after near-TP.
+                # Stepped trail: after +10 → SL at entry+1; each further +1 peak → SL +1.
                 if (
                     pos.premium_entry is not None
                     and OPTION_BREAKEVEN_PTS > 0
-                    and premium >= pos.premium_entry + OPTION_BREAKEVEN_PTS
-                    and pos.sl_price < pos.premium_entry - 0.01
+                    and pos.premium_high is not None
                 ):
-                    pos.sl_price = round(pos.premium_entry, 2)
-                    logger.info(
-                        "[%s] option SL trailed to breakeven %.2f (premium %.2f ≥ entry+%.0f)",
-                        state.config.code,
-                        pos.sl_price,
-                        premium,
-                        OPTION_BREAKEVEN_PTS,
-                    )
-                    self._save_session_state(state)
+                    peak_profit = float(pos.premium_high) - float(pos.premium_entry)
+                    if peak_profit + 1e-9 >= OPTION_BREAKEVEN_PTS:
+                        steps_beyond = int(peak_profit - OPTION_BREAKEVEN_PTS)
+                        new_sl = round(
+                            float(pos.premium_entry)
+                            + OPTION_TRAIL_LOCK_PTS
+                            + max(0, steps_beyond),
+                            2,
+                        )
+                        # Never trail above TP − 0.05 (leave room to book target).
+                        new_sl = min(new_sl, round(pos.tp1_price - 0.05, 2))
+                        if new_sl > pos.sl_price + 0.009:
+                            pos.sl_price = new_sl
+                            logger.info(
+                                "[%s] option SL trailed to %.2f (peak +%.1f ≥ +%.0f → lock +%.0f then +1/pt)",
+                                state.config.code,
+                                pos.sl_price,
+                                peak_profit,
+                                OPTION_BREAKEVEN_PTS,
+                                OPTION_TRAIL_LOCK_PTS,
+                            )
+                            self._save_session_state(state)
 
                 # Book slightly early so a 1–2 pt miss of exact TP doesn't reverse into SL.
                 tp_trigger = pos.tp1_price - max(0.0, OPTION_TP_NEAR_PTS)
@@ -2022,7 +2045,7 @@ class BreakoutEngine:
                 exit_reason = f"TP1 booked (+{OPTION_PREMIUM_TP_PTS:.0f} prem{near_note})"
                 exit_price = float(premium) if premium is not None else pos.tp1_price
             elif sl_hit:
-                exit_reason = f"SL (−{OPTION_PREMIUM_SL_PTS:.0f} prem)"
+                exit_reason = f"SL (−{OPTION_PREMIUM_SL_PTS:.0f} prem / trail)"
                 exit_price = float(premium) if premium is not None else pos.sl_price
         elif pos.direction == "LONG":
             if bar_low <= pos.sl_price:

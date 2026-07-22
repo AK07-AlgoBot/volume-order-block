@@ -18,11 +18,22 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 from app.services import performance_store
 from app.ui.auth_session import is_admin, require_login
 from app.ui.strategy_access import (
+    enabled_strategy_ids,
     enabled_strategy_labels_text,
     performance_start_floor,
     user_can_view_trade,
 )
 from app.ui.styles import inject_dark_theme
+
+# Entitlement id → performance_store strategy label used in completed trades.
+_PERF_STRATEGY_BY_ENTITLEMENT = {
+    "s1_oi": performance_store.STRATEGY_AK07_OI,
+    "s2_smc": performance_store.STRATEGY_SMC_CRT,
+    "s3_breakout": performance_store.STRATEGY_BREAKOUT,
+    "s7_orb": performance_store.STRATEGY_S7_ORB,
+    "s8_choch": performance_store.STRATEGY_CHOCH,
+    "gamma": performance_store.STRATEGY_GAMMA,
+}
 
 MOCK_MODE = os.environ.get("AK07_MOCK") == "1"
 
@@ -88,7 +99,18 @@ if paper_filter == "Paper only":
 elif paper_filter == "Live only":
     trades = [t for t in trades if not t.get("paper_trading")]
 
-summary_rows = performance_store.summarize_by_strategy(trades)
+allowed_perf_strategies: list[str] | None = None
+if not is_admin():
+    allowed_perf_strategies = [
+        _PERF_STRATEGY_BY_ENTITLEMENT[sid]
+        for sid in enabled_strategy_ids()
+        if sid in _PERF_STRATEGY_BY_ENTITLEMENT
+    ]
+
+summary_rows = performance_store.summarize_by_strategy(
+    trades,
+    allowed_strategies=allowed_perf_strategies,
+)
 index_rows = performance_store.summarize_by_index(trades)
 matrix_rows = performance_store.summarize_by_strategy_and_index(trades)
 summary_df = pd.DataFrame(summary_rows)
@@ -285,6 +307,11 @@ else:
         "by_strategy": [],
         "filter_note": "Rebuild cockpit image — loss analysis module not deployed yet.",
     }
+if not is_admin():
+    loss_report["filter_note"] = (
+        f"Your account · {enabled_strategy_labels_text()} · "
+        "only your attributed closed trades are counted."
+    )
 l1, l2, l3, l4 = st.columns(4)
 l1.metric("Total trades", loss_report["total_trades"])
 l2.metric("Wins", loss_report["wins"])
@@ -297,6 +324,9 @@ l4.metric(
 )
 
 st.caption(loss_report["filter_note"])
+
+if not is_admin():
+    st.caption("Showing only strategies assigned to your account.")
 
 if loss_report["losses"]:
     st.markdown("### Why losses happened")
@@ -314,15 +344,25 @@ if loss_report["losses"]:
     st.markdown("### Every losing trade")
     st.dataframe(loss_df, use_container_width=True, hide_index=True)
 
-    st.markdown(
-        """
+    if is_admin():
+        st.markdown(
+            """
 **Common causes (even with day-review filter on):**
 - **Stop-loss hit** — filter picks direction, not outcome; structural S3 SL can be wider than fixed TP.
 - **14:55 square-off** — open trade closed at market before TP.
 - **S1 / S6 exempt** — can take either side; not gated by S3 day review.
 - **Bad levels** — if Green/Red differ from TradingView, entries trigger at wrong prices (see S3 open source: prefer *candle* not *LTP*).
 - **Old engine build** — e.g. S1 at 60pt SL instead of 30pt; redeploy `engine` after config changes.
-        """
-    )
+            """
+        )
+    else:
+        st.markdown(
+            """
+**Notes for your assigned strategies:**
+- **Stop-loss hit** — direction can be right but premium still stops out.
+- **Square-off** — open trade closed before target at session end.
+- New exits appear here after your broker fill closes.
+            """
+        )
 else:
     st.info("No losing trades in the selected range.")
