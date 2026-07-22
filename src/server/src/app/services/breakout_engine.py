@@ -412,6 +412,78 @@ def _s3_trade_extra(
     }
 
 
+def _record_s3_completed_trades(
+    pos: BreakoutPosition,
+    *,
+    symbol: str,
+    entry_price: float,
+    exit_price: float,
+    pnl_points: float,
+    exit_reason: str,
+    spot_exit: float,
+) -> None:
+    """One performance row per live trader leg so each user sees only their PnL."""
+    base_extra = _s3_trade_extra(pos, spot_exit=spot_exit, exit_price=exit_price)
+    legs = [leg for leg in (pos.order_legs or []) if isinstance(leg, dict)]
+    attributed: list[tuple[str, dict[str, Any]]] = []
+    seen: set[str] = set()
+    for leg in legs:
+        username = str(leg.get("username") or "").strip()
+        if not username or username in seen:
+            continue
+        seen.add(username)
+        attributed.append((username, leg))
+
+    if not attributed:
+        performance_store.record_completed_trade(
+            strategy=performance_store.STRATEGY_BREAKOUT,
+            strategy_id="breakout",
+            symbol=symbol,
+            direction=pos.direction,
+            entry_price=entry_price,
+            exit_price=exit_price,
+            pnl_points=pnl_points,
+            exit_reason=exit_reason,
+            entry_at=pos.opened_at,
+            paper_trading=PAPER_TRADING,
+            extra=base_extra,
+        )
+        return
+
+    for username, leg in attributed:
+        extra = dict(base_extra)
+        extra["broker"] = str(leg.get("broker") or "")
+        if leg.get("premium_entry") is not None:
+            try:
+                extra["premium_entry"] = float(leg["premium_entry"])
+            except (TypeError, ValueError):
+                pass
+        if leg.get("option_strike"):
+            try:
+                extra["option_strike"] = int(leg["option_strike"])
+            except (TypeError, ValueError):
+                pass
+        if leg.get("option_type"):
+            extra["option_type"] = str(leg["option_type"])
+        label = str(leg.get("contract_label") or leg.get("trading_symbol") or "")
+        if label:
+            extra["contract_label"] = label
+        performance_store.record_completed_trade(
+            strategy=performance_store.STRATEGY_BREAKOUT,
+            strategy_id="breakout",
+            symbol=symbol,
+            direction=pos.direction,
+            entry_price=entry_price,
+            exit_price=exit_price,
+            pnl_points=pnl_points,
+            exit_reason=exit_reason,
+            entry_at=pos.opened_at,
+            paper_trading=PAPER_TRADING,
+            username=username,
+            extra=extra,
+        )
+
+
 def compute_blr_levels(
     prev_open: float,
     prev_high: float,
@@ -1993,18 +2065,14 @@ class BreakoutEngine:
         )
         state.signal_log.append(msg)
         logger.info(msg)
-        performance_store.record_completed_trade(
-            strategy=performance_store.STRATEGY_BREAKOUT,
-            strategy_id="breakout",
+        _record_s3_completed_trades(
+            pos,
             symbol=state.config.code,
-            direction=pos.direction,
             entry_price=pos.premium_entry if (pos.uses_options and pos.premium_entry) else pos.entry_price,
             exit_price=exit_price,
             pnl_points=pnl,
             exit_reason=exit_reason,
-            entry_at=pos.opened_at,
-            paper_trading=PAPER_TRADING,
-            extra=_s3_trade_extra(pos, spot_exit=spot, exit_price=exit_price),
+            spot_exit=spot,
         )
         state.setup_label = f"Flat after {exit_reason}"
         state.position = None
@@ -2033,18 +2101,14 @@ class BreakoutEngine:
                     exit_px = spot
                     entry_px = pos.entry_price
                     pnl = (spot - pos.entry_price) if pos.direction == "LONG" else (pos.entry_price - spot)
-                performance_store.record_completed_trade(
-                    strategy=performance_store.STRATEGY_BREAKOUT,
-                    strategy_id="breakout",
+                _record_s3_completed_trades(
+                    pos,
                     symbol=state.config.code,
-                    direction=pos.direction,
                     entry_price=entry_px,
                     exit_price=exit_px,
                     pnl_points=pnl,
                     exit_reason=reason,
-                    entry_at=pos.opened_at,
-                    paper_trading=PAPER_TRADING,
-                    extra=_s3_trade_extra(pos, spot_exit=spot, exit_price=exit_px),
+                    spot_exit=spot,
                 )
                 state.signal_log.append(f"Square-off {reason} @ {spot:.2f}")
                 state.position = None

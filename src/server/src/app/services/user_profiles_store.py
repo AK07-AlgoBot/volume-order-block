@@ -6,7 +6,9 @@ import json
 import re
 import threading
 from pathlib import Path
+from datetime import datetime
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from app.config.settings import get_settings
 from app.constants import (
@@ -18,12 +20,17 @@ from app.constants import (
 )
 
 _lock = threading.Lock()
+_IST = ZoneInfo("Asia/Kolkata")
 
 
 def _sanitize_username(username: str) -> str:
     u = (username or "").strip()
     u = re.sub(r"[^a-zA-Z0-9._-]", "", u)
     return u
+
+
+def _now_iso() -> str:
+    return datetime.now(_IST).isoformat()
 
 
 def profile_path(username: str) -> Path:
@@ -41,6 +48,7 @@ def _default_profile(username: str, role: str = USER_ROLE) -> dict[str, Any]:
         "paper_trading": True,
         "telegram_notifications": role == ADMIN_ROLE,
         "egress_ip": "",
+        "created_at": _now_iso(),
     }
 
 
@@ -66,6 +74,15 @@ def read_profile(username: str, *, role: str = USER_ROLE) -> dict[str, Any]:
         base["telegram_notifications"] = bool(raw.get("telegram_notifications"))
     egress_ip = str(raw.get("egress_ip") or "").strip()
     base["egress_ip"] = egress_ip
+    created_at = str(raw.get("created_at") or "").strip()
+    if created_at:
+        base["created_at"] = created_at
+    else:
+        # Backfill from profile file mtime so existing users get a stable first-day.
+        try:
+            base["created_at"] = datetime.fromtimestamp(path.stat().st_mtime, tz=_IST).isoformat()
+        except OSError:
+            pass
     return base
 
 
@@ -83,6 +100,10 @@ def write_profile(username: str, data: dict[str, Any]) -> dict[str, Any]:
         current["telegram_notifications"] = bool(data["telegram_notifications"])
     if "egress_ip" in data:
         current["egress_ip"] = str(data.get("egress_ip") or "").strip()
+    if "created_at" in data and str(data.get("created_at") or "").strip():
+        current["created_at"] = str(data["created_at"]).strip()
+    elif not str(current.get("created_at") or "").strip():
+        current["created_at"] = _now_iso()
     path = profile_path(safe)
     path.parent.mkdir(parents=True, exist_ok=True)
     current["username"] = safe
@@ -96,8 +117,17 @@ def ensure_profile(username: str, *, role: str = USER_ROLE) -> dict[str, Any]:
         path = profile_path(safe)
         if path.exists():
             prof = read_profile(safe, role=role)
+            dirty = False
             if role == ADMIN_ROLE and set(prof.get("enabled_strategies") or []) != set(ALL_STRATEGIES):
                 prof["enabled_strategies"] = list(ALL_STRATEGIES)
+                dirty = True
+            if not str(prof.get("created_at") or "").strip():
+                try:
+                    prof["created_at"] = datetime.fromtimestamp(path.stat().st_mtime, tz=_IST).isoformat()
+                except OSError:
+                    prof["created_at"] = _now_iso()
+                dirty = True
+            if dirty:
                 write_profile(safe, prof)
             return prof
         prof = _default_profile(safe, role=role)
@@ -107,6 +137,23 @@ def ensure_profile(username: str, *, role: str = USER_ROLE) -> dict[str, Any]:
             prof["telegram_notifications"] = True
         write_profile(safe, prof)
         return prof
+
+
+def profile_created_date(username: str, *, role: str = USER_ROLE):
+    """Calendar date the user was onboarded (IST)."""
+    from datetime import date as date_cls
+
+    prof = read_profile(username, role=role)
+    raw = str(prof.get("created_at") or "").strip()
+    if raw:
+        try:
+            dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=_IST)
+            return dt.astimezone(_IST).date()
+        except ValueError:
+            pass
+    return date_cls.today()
 
 
 def strategy_enabled(profile: dict[str, Any], strategy_id: str, *, role: str | None = None) -> bool:

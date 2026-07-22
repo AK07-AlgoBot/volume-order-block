@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import date
 from typing import Any
 
 from app.constants import (
@@ -65,12 +66,34 @@ def _entitlement_for_trade(trade: dict[str, Any]) -> str | None:
 
 
 def user_can_view_trade(trade: dict[str, Any]) -> bool:
-    from app.ui.auth_session import is_admin
+    """Non-admins: assigned strategies only, and only trades attributed to them."""
+    from app.ui.auth_session import current_username, is_admin
 
     entitlement = _entitlement_for_trade(trade)
     if entitlement is None:
         return is_admin()
-    return user_can_view_strategy(entitlement)
+    if not user_can_view_strategy(entitlement):
+        return False
+    if is_admin():
+        return True
+    trade_user = str(trade.get("username") or "").strip()
+    # Hide shared/historical unattributed rows from onboarded users.
+    if not trade_user:
+        return False
+    return trade_user == str(current_username() or "").strip()
+
+
+def performance_start_floor() -> date | None:
+    """Non-admin: clamp review range to onboarding day. Admin: no floor."""
+    from app.ui.auth_session import current_role, current_username, is_admin
+    from app.services.user_profiles_store import profile_created_date
+
+    if is_admin():
+        return None
+    username = str(current_username() or "").strip()
+    if not username:
+        return date.today()
+    return profile_created_date(username, role=str(current_role() or "user"))
 
 
 def tabbed_dashboard_index_codes() -> list[str]:

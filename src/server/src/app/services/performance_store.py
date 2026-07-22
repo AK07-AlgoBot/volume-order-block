@@ -102,6 +102,7 @@ def record_completed_trade(
     entry_at: str = "",
     exit_at: str | None = None,
     paper_trading: bool = True,
+    username: str = "",
     extra: dict[str, Any] | None = None,
 ) -> None:
     """Append one closed trade to the day bucket in Redis (fail-safe)."""
@@ -121,6 +122,9 @@ def record_completed_trade(
         "exit_at": exit_at or now.isoformat(),
         "paper_trading": paper_trading,
     }
+    user = str(username or "").strip()
+    if user:
+        record["username"] = user
     if extra:
         for key, value in extra.items():
             if value is None:
@@ -129,18 +133,22 @@ def record_completed_trade(
                 record[key] = round(value, 2)
             else:
                 record[key] = value
+        # Prefer explicit username arg over extra.username when both set.
+        if user:
+            record["username"] = user
     key = COMPLETED_TRADES_KEY_TEMPLATE.format(day=day)
     existing = cache_manager.get_json(key)
     trades: list[dict[str, Any]] = existing if isinstance(existing, list) else []
     trades.append(record)
     if cache_manager.set_json(key, trades, ttl_seconds=TRADE_TTL_SECONDS):
         logger.info(
-            "Recorded %s trade %s %s %+.2f pts (%s)",
+            "Recorded %s trade %s %s %+.2f pts (%s)%s",
             strategy,
             symbol,
             direction,
             pnl_points,
             exit_reason,
+            f" user={user}" if user else "",
         )
 
 
@@ -182,6 +190,7 @@ def s3_trade_log_rows(trades: list[dict[str, Any]]) -> list[dict[str, Any]]:
         out.append(
             {
                 "Exit at": str(row.get("exit_at") or "")[:19],
+                "User": row.get("username") or "—",
                 "Nifty": nifty,
                 "Strike": strike_label,
                 "Direction": row.get("direction") or "",
@@ -558,6 +567,7 @@ def _fingerprint(row: dict[str, Any]) -> str:
             str(row.get("strategy_id") or row.get("strategy")),
             str(row.get("symbol")),
             str(row.get("direction")),
+            str(row.get("username") or ""),
             exit_at,
             str(row.get("pnl_points")),
         ]

@@ -16,8 +16,12 @@ IST = ZoneInfo("Asia/Kolkata")
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
 from app.services import performance_store
-from app.ui.auth_session import require_login
-from app.ui.strategy_access import enabled_strategy_labels_text, user_can_view_trade
+from app.ui.auth_session import is_admin, require_login
+from app.ui.strategy_access import (
+    enabled_strategy_labels_text,
+    performance_start_floor,
+    user_can_view_trade,
+)
 from app.ui.styles import inject_dark_theme
 
 MOCK_MODE = os.environ.get("AK07_MOCK") == "1"
@@ -52,8 +56,12 @@ with f2:
 with f3:
     if MOCK_MODE:
         st.caption("MOCK DATA — sample trades · sidebar « only for page nav")
+    elif is_admin():
+        st.caption(f"All users · {enabled_strategy_labels_text()} · sidebar « for nav")
     else:
-        st.caption(f"Closed trades · {enabled_strategy_labels_text()} · sidebar « for nav")
+        st.caption(
+            f"Your trades only · from onboarding day · {enabled_strategy_labels_text()}"
+        )
 
 today = datetime.now(IST).date()
 if range_choice == "Today":
@@ -66,6 +74,10 @@ elif range_choice == "Last 90 days":
     start_date = today - timedelta(days=89)
 else:
     start_date = today - timedelta(days=365)
+
+floor = performance_start_floor()
+if floor is not None and start_date < floor:
+    start_date = floor
 
 trades = performance_store.load_trades(start_date=start_date, end_date=today)
 trades = [t for t in trades if user_can_view_trade(t)]
@@ -90,8 +102,9 @@ st.markdown("## Performance charts")
 
 if not trades:
     st.info(
-        "No completed trades in the selected range yet. "
-        "Trades appear when engines exit positions or when Strategy 1 archives at 15:30 IST."
+        "No completed trades in the selected range for your account yet. "
+        "New exits appear here after your broker fills close — "
+        "shared historical system trades are hidden from non-admin users."
     )
     with st.expander("Why is this empty?", expanded=True):
         st.markdown(
