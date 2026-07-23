@@ -188,6 +188,11 @@ def _parse_ist_time(env_key: str, default_hour: int, default_minute: int) -> dti
 SESSION_START: Final[dtime] = _parse_ist_time("BREAKOUT_SESSION_START_IST", 9, 15)
 ENTRY_START: Final[dtime] = _parse_ist_time("BREAKOUT_ENTRY_START_IST", 9, 20)
 NO_ENTRY_AFTER: Final[dtime] = _parse_ist_time("BREAKOUT_NO_ENTRY_AFTER_IST", 13, 0)
+# Skip breakout entries whose 5m bar closed more than this many seconds ago.
+# Prevents post-restart catch-up from firing a live order at the day high for an old signal.
+STALE_BREAKOUT_MAX_AGE_SEC: Final[float] = float(
+    os.environ.get("BREAKOUT_STALE_SIGNAL_SEC", "360")
+)
 
 
 def _parse_entries_indices() -> frozenset[str]:
@@ -560,6 +565,14 @@ def day_review_from_first_close(first_close: float, mid: float) -> str:
 def is_first_session_bar(candle_ts: datetime, prev_candle_ts: datetime) -> bool:
     """True when prev bar is pre-session (yesterday or before 9:15) — first 5m close at ~9:20."""
     return prev_candle_ts.date() < candle_ts.date() or prev_candle_ts.time() < SESSION_START
+
+
+def _candle_ts_key(raw: str) -> str:
+    """Normalize candle timestamps so Redis cursor matches Upstox feed after restart."""
+    try:
+        return parse_candle_ts(raw).astimezone(IST).isoformat()
+    except (TypeError, ValueError):
+        return str(raw or "")
 
 
 def detect_breakout_signal(
@@ -1678,10 +1691,25 @@ class BreakoutEngine:
 
         start_idx = 0
         if state.last_candle_ts:
+            last_key = _candle_ts_key(state.last_candle_ts)
+            found_cursor = False
             for i, candle in enumerate(session_candles):
-                if candle["timestamp"] == state.last_candle_ts:
+                if (
+                    candle["timestamp"] == state.last_candle_ts
+                    or _candle_ts_key(candle["timestamp"]) == last_key
+                ):
                     start_idx = i + 1
+                    found_cursor = True
                     break
+            if not found_cursor:
+                # Do not replay the whole session after a restart / timestamp format change.
+                # Only evaluate the latest closed bar (stale guard still applies).
+                logger.warning(
+                    "[%s] last_candle_ts %s not in feed — skipping full-day catch-up replay",
+                    state.config.code,
+                    state.last_candle_ts,
+                )
+                start_idx = max(0, len(session_candles) - 1)
 
         direction: str | None = None
         reason = ""
@@ -1721,14 +1749,33 @@ class BreakoutEngine:
                 candle_low=float(candle["low"]),
                 min_body_ratio=BREAKOUT_MIN_BODY_RATIO,
             )
-            if direction is not None:
-                break
+            if direction is None:
+                continue
+
+            # 5m bar timestamp is bar open; signal is valid at bar close.
+            bar_close_at = candle_ts + timedelta(minutes=CANDLE_5M)
+            age_sec = (now - bar_close_at).total_seconds()
+            if STALE_BREAKOUT_MAX_AGE_SEC > 0 and age_sec > STALE_BREAKOUT_MAX_AGE_SEC:
+                logger.warning(
+                    "[%s] skip stale %s breakout on %s (bar closed %.0fs ago) — "
+                    "catch-up only, not a live entry",
+                    state.config.code,
+                    direction,
+                    candle_ts.strftime("%H:%M"),
+                    age_sec,
+                )
+                reason = f"stale {direction} breakout skipped ({age_sec:.0f}s old)"
+                direction = None
+                continue
+            break
         else:
             blocked = reason or f"Watching breakouts (Review {state.day_review} day filter)"
             state.setup_label = blocked
+            self._save_session_state(state)
             return
 
         if direction is None:
+            self._save_session_state(state)
             return
 
         sl, tp1, tp2 = trade_levels(
