@@ -1,13 +1,16 @@
 """Per-user broker HTTP egress (SEBI static IP).
 
 Users without ``egress_ip`` use the host default outbound IP.
-Users with ``egress_ip`` send broker API calls via ``AK07_EGRESS_PROXY``
-(a host-side CONNECT proxy bound to that secondary IP), because Docker
-bridge containers cannot bind host secondary addresses directly.
+Users with ``egress_ip`` send broker API calls via a host-side CONNECT
+proxy bound to that IP (Docker bridge cannot bind host secondary IPs).
 
 Env:
   AK07_EGRESS_PROXY=http://172.19.0.1:18901
-  AK07_EGRESS_IPS=Kesavulu:65.109.255.239   # optional override of profile
+      Default proxy when egress_ip is set but not listed in the map.
+  AK07_EGRESS_PROXY_MAP=65.109.255.239=http://172.19.0.1:18901,95.216.179.8=http://172.19.0.1:18902
+      Per-IP proxy URLs (required when you have more than one secondary IP).
+  AK07_EGRESS_IPS=Kesavulu:65.109.255.239
+      Optional username→IP override of profile.egress_ip.
 """
 
 from __future__ import annotations
@@ -38,6 +41,23 @@ def _parse_egress_ips_env() -> dict[str, str]:
     return out
 
 
+def _parse_egress_proxy_map() -> dict[str, str]:
+    """Parse AK07_EGRESS_PROXY_MAP=ip=url,ip=url."""
+    raw = (os.environ.get("AK07_EGRESS_PROXY_MAP") or "").strip()
+    out: dict[str, str] = {}
+    if not raw:
+        return out
+    for part in raw.split(","):
+        part = part.strip()
+        if not part or "=" not in part:
+            continue
+        ip, url = part.split("=", 1)
+        ip, url = ip.strip(), url.strip()
+        if ip and url:
+            out[ip] = url
+    return out
+
+
 def resolve_egress_ip(username: str) -> str:
     """Return dedicated egress IP for username, or '' for default host IP."""
     safe = (username or "").strip()
@@ -56,9 +76,13 @@ def resolve_egress_ip(username: str) -> str:
 
 
 def resolve_egress_proxy(username: str) -> str:
-    """HTTP CONNECT proxy URL when user has a dedicated egress IP."""
-    if not resolve_egress_ip(username):
+    """HTTP CONNECT proxy URL for the user's dedicated egress IP."""
+    ip = resolve_egress_ip(username)
+    if not ip:
         return ""
+    mapped = _parse_egress_proxy_map().get(ip, "").strip()
+    if mapped:
+        return mapped
     return (os.environ.get("AK07_EGRESS_PROXY") or "").strip()
 
 
