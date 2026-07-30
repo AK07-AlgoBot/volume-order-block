@@ -448,9 +448,23 @@ class UpstoxClient:
             logger.exception("Unexpected failure during daily token refresh: %s", exc)
             return False
 
+    # Module-level 429 cool-down shared across clients (Upstox rate limit is account-wide).
+    _ltp_cooldown_until: float = 0.0
+
     def _get(self, url: str, params: dict[str, Any] | None = None) -> dict[str, Any] | None:
+        now = time.monotonic()
+        if now < UpstoxClient._ltp_cooldown_until and "market-quote" in url:
+            return None
         try:
             response = self.session.get(url, params=params, timeout=15)
+            if response.status_code == 429:
+                # Back off hard — hammering LTP prevents option SL/TP/trail forever.
+                UpstoxClient._ltp_cooldown_until = time.monotonic() + 15.0
+                logger.warning(
+                    "Upstox HTTP 429 on %s — cooling market-quote for 15s",
+                    url.split("?")[0],
+                )
+                return None
             if response.status_code != 200:
                 logger.warning("Upstox GET %s -> HTTP %d %s", url, response.status_code, response.text[:200])
                 return None

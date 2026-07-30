@@ -37,7 +37,8 @@ def _parse_egress_ips_env() -> dict[str, str]:
         user, ip = part.split(":", 1)
         user, ip = user.strip(), ip.strip()
         if user and ip:
-            out[user] = ip
+            # Case-insensitive username keys (Naresh / naresh)
+            out[user.lower()] = ip
     return out
 
 
@@ -64,8 +65,8 @@ def resolve_egress_ip(username: str) -> str:
     if not safe:
         return ""
     env_map = _parse_egress_ips_env()
-    if safe in env_map:
-        return env_map[safe]
+    if safe.lower() in env_map:
+        return env_map[safe.lower()]
     try:
         from app.services.user_profiles_store import read_profile
 
@@ -83,7 +84,15 @@ def resolve_egress_proxy(username: str) -> str:
     mapped = _parse_egress_proxy_map().get(ip, "").strip()
     if mapped:
         return mapped
-    return (os.environ.get("AK07_EGRESS_PROXY") or "").strip()
+    default = (os.environ.get("AK07_EGRESS_PROXY") or "").strip()
+    if default:
+        logger.warning(
+            "[%s] egress_ip=%s not in AK07_EGRESS_PROXY_MAP — falling back to AK07_EGRESS_PROXY=%s",
+            username,
+            ip,
+            default,
+        )
+    return default
 
 
 class _SourceAddressAdapter(HTTPAdapter):

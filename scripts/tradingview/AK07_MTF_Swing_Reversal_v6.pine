@@ -1,15 +1,22 @@
 //@version=6
-// AK07 · Intraday 30m Swing → 5m Entry · Indicator
+// AK07 · MTF Swing → Entry · Indicator
+//
+// PRESETS (chart TF → swing TF):
+//   Intraday · 30m → 5m   → chart 5m, swings on 30m
+//   Swing · Daily → 1H    → chart 60m, swings on Daily
+//   Position · Weekly → D → chart Daily, swings on Weekly
 //
 // FLOW:
-//   1) On the FIRST candle of the chart session, mark previous confirmed 30m swing H/L.
-//   2) After open, each new valid 30m pivot (same L/R conditions) SHIFTS the active swing H/L.
-//   3) Mode 1 / 2 / 3 entries vs the current active swing levels.
-//      Mode 1 = reversal on 5m close | Mode 2 = reversal on cross | Mode 3 = reclaim close, then retest entry
-//   4) Square-off on the LAST session candle. Today-only drawings (use Replay for older days).
+//   1) Collect HTF pivot H/L into a pool.
+//   2) Valid Swing H = closest UNtraded pivot HIGH still ABOVE price.
+//      Valid Swing L = closest UNtraded pivot LOW still BELOW price.
+//   3) After entry on a swing, invalidate it and select the next valid level.
+//   4) Mode 1 / 2 / 3 entries vs active valid swings.
+//   5) Optional HTF sticky sentiment gate (Bullish until L break / Bearish until H break).
+//   6) Sentiment panel + R:R boxes.
 //
 indicator(
-     "AK07 Intraday 30m Swing · 5m Entry",
+     "AK07 MTF Swing · Entry + Sentiment",
      overlay=true,
      max_labels_count=500,
      max_lines_count=200,
@@ -19,7 +26,8 @@ indicator(
 // Inputs
 // =============================================================================
 string GRP_MODE = "Entry mode"
-string GRP_TF   = "Structure"
+string GRP_TF   = "Structure / timeframe"
+string GRP_SENT = "Sentiment gate"
 string GRP_RISK = "Risk / session"
 string GRP_FILT = "Filters"
 string GRP_VIS  = "Visuals"
@@ -29,19 +37,44 @@ entryMode = input.string(
      "Entry mode",
      options=["1 — Reversal", "2 — Reversal (on cross)", "3 — Retest"],
      group=GRP_MODE,
-     tooltip="1: reversal on 5m close through swing → enter.\n2: same reversal on cross (no close wait) → enter.\n3: first 5m close reclaim through swing (arm), then retest that swing → enter.")
+     tooltip="1: reversal on chart-TF close through swing → enter.\n2: same reversal on cross (no close wait) → enter.\n3: reclaim close (arm), then retest swing → enter.")
 
-structTf = input.timeframe("30", "Swing timeframe (use 30 for intraday)", group=GRP_TF)
+tfPreset = input.string(
+     "Auto (from chart)",
+     "TF pair",
+     options=["Auto (from chart)", "Intraday · 30m → 5m", "Swing · Daily → 1H", "Position · Weekly → Daily"],
+     group=GRP_TF,
+     tooltip="Auto picks swing TF from the chart:\n• ≤15m chart → 30m swings\n• 30m–240m chart → Daily swings\n• Daily/Weekly chart → Weekly swings\nOr force a pair manually (use matching chart TF).")
+
+structTfManual = input.timeframe("30", "Manual swing TF (if override)", group=GRP_TF)
+useManualTf = input.bool(false, "Override with manual swing TF", group=GRP_TF)
 pivotLeft  = input.int(2, "Pivot left bars", minval=1, maxval=10, group=GRP_TF)
 pivotRight = input.int(2, "Pivot right bars", minval=1, maxval=10, group=GRP_TF)
+showDayHL = input.bool(true, "Show session / day High-Low in panel", group=GRP_TF)
 
-rrMult = input.float(2.0, "Reward : Risk", step=0.25, minval=0.5, group=GRP_RISK)
+useSentimentGate = input.bool(true, "Enable sentiment gate", group=GRP_SENT, tooltip="ON: only take reversals that match HTF sentiment.\n• Intraday (5m/30m) → Hourly sentiment\n• Swing (1H/Daily) → Weekly sentiment\n• Position (Daily/Weekly) → Monthly sentiment\nBullish HTF → BUY reversals only\nBearish HTF → SELL reversals only")
+sentStickyBias = input.bool(true, "Sticky bias until opposite swing break", group=GRP_SENT, tooltip="ON (recommended): once Bearish (close below Swing L), stay Bearish until close crosses above Swing H.\nOnce Bullish (close above Swing H), stay Bullish until close crosses below Swing L.\nInside the range does NOT flip to mild bull/bear.\nOFF: only Bullish above H / Bearish below L; inside range = Neutral (both sides).")
+
+rrMult = input.float(2.0, "Reward : Risk (chart modes)", step=0.25, minval=0.5, group=GRP_RISK, tooltip="Used when Trail profile = Chart R:R. Ignored for Nifty options profile.")
 slBuffer = input.float(0.0, "SL buffer (pts)", step=0.5, minval=0.0, group=GRP_RISK)
-maxTradesPerDay = input.int(5, "Max trades / day", minval=1, maxval=20, group=GRP_RISK)
-stopAfterFirstTp = input.bool(false, "Stop for day if 1st trade hits target", group=GRP_RISK)
+useTrailingSl = input.bool(true, "Enable trailing SL", group=GRP_RISK)
+trailProfile = input.string("Nifty options (−15 / +25 / trail +10)", "Trail profile", options=["Nifty options (−15 / +25 / trail +10)", "Chart R:R + points"], group=GRP_RISK, active=useTrailingSl, tooltip="Nifty options = same as live S3 engine:\n• Initial SL = entry − 15 premium pts\n• TP = entry + 25\n• After peak +10 → SL = entry+1, then +1 SL per +1 further peak")
+optSlPts = input.float(15.0, "Options initial SL (pts)", step=1.0, minval=1.0, group=GRP_RISK, active=useTrailingSl and trailProfile == "Nifty options (−15 / +25 / trail +10)")
+optTpPts = input.float(25.0, "Options TP (pts)", step=1.0, minval=1.0, group=GRP_RISK, active=useTrailingSl and trailProfile == "Nifty options (−15 / +25 / trail +10)")
+optTrailStartPts = input.float(10.0, "Start trail after peak +pts", step=1.0, minval=1.0, group=GRP_RISK, active=useTrailingSl and trailProfile == "Nifty options (−15 / +25 / trail +10)")
+optTrailLockPts = input.float(1.0, "Lock pts above entry when trail starts", step=1.0, minval=0.0, group=GRP_RISK, active=useTrailingSl and trailProfile == "Nifty options (−15 / +25 / trail +10)")
+trailMode = input.string("Points", "Trail activate by", options=["Points", "R-multiple"], group=GRP_RISK, active=useTrailingSl and trailProfile == "Chart R:R + points")
+beTriggerPts = input.float(10.0, "Activate trail after (pts)", step=1.0, minval=1.0, group=GRP_RISK, active=useTrailingSl and trailProfile == "Chart R:R + points" and trailMode == "Points")
+beTriggerR = input.float(1.0, "Activate trail after (R)", step=0.25, minval=0.25, group=GRP_RISK, active=useTrailingSl and trailProfile == "Chart R:R + points" and trailMode == "R-multiple")
+moveToBreakeven = input.bool(true, "First move SL to breakeven", group=GRP_RISK, active=useTrailingSl and trailProfile == "Chart R:R + points")
+trailPts = input.float(5.0, "Trail distance behind peak (pts)", step=1.0, minval=0.0, group=GRP_RISK, active=useTrailingSl and trailProfile == "Chart R:R + points")
+bool isOptTrail = trailProfile == "Nifty options (−15 / +25 / trail +10)"
+maxTradesPerDay = input.int(5, "Max trades / period", minval=1, maxval=20, group=GRP_RISK)
+stopAfterFirstTp = input.bool(false, "Stop for period if 1st trade hits target", group=GRP_RISK)
 
 tz = input.string("Asia/Kolkata", "Timezone", group=GRP_RISK)
-useChartSession = input.bool(true, "Use chart session (first → last candle)", group=GRP_RISK, tooltip="ON: lock on first session candle, flat on last (MCX 09:00…, NSE 09:15…). OFF: use manual times below.")
+useChartSession = input.bool(true, "Use chart session (intraday only)", group=GRP_RISK, tooltip="Used for Intraday preset. Higher TF pairs ignore session square-off by default.")
+useSquareOff = input.bool(true, "Square-off at period end", group=GRP_RISK, tooltip="Intraday: last session bar. Swing/Position: OFF recommended (holds across days).")
 sessionStr = input.session("0915-1515", "Manual session (if chart session OFF)", group=GRP_RISK, active=not useChartSession)
 lockHour = input.int(9, "Manual lock — hour", minval=0, maxval=23, group=GRP_RISK, active=not useChartSession)
 lockMin = input.int(15, "Manual lock — minute", minval=0, maxval=59, group=GRP_RISK, active=not useChartSession)
@@ -49,60 +82,217 @@ squareOffHour = input.int(15, "Manual square-off — hour", minval=0, maxval=23,
 squareOffMin = input.int(15, "Manual square-off — minute", minval=0, maxval=59, group=GRP_RISK, active=not useChartSession)
 noEntryAfterHour = input.int(14, "No new entries after — hour", minval=0, maxval=23, group=GRP_RISK)
 noEntryAfterMin = input.int(30, "No new entries after — minute", minval=0, maxval=59, group=GRP_RISK)
-useNoEntryClock = input.bool(false, "Use no-entry clock filter", group=GRP_RISK, tooltip="OFF recommended with chart session — entries allowed until last candle (minus square-off).")
+useNoEntryClock = input.bool(false, "Use no-entry clock filter (intraday)", group=GRP_RISK)
 
-useMidFilter = input.bool(false, "Use Mid filter (session open)", group=GRP_FILT)
+useMidFilter = input.bool(false, "Use Mid filter (period open)", group=GRP_FILT)
 requireAboveMid = input.bool(true, "Long only if close > Mid · Short only if close < Mid", group=GRP_FILT, active=useMidFilter)
 
-showSwings = input.bool(true, "Show active swing H/L (today only)", group=GRP_VIS)
-showArmedLevel = input.bool(true, "Show armed break level (today only)", group=GRP_VIS)
-showTradeBox = input.bool(true, "Trade R:R box (like Long/Short Position tool)", group=GRP_VIS)
-showTradeLevels = input.bool(false, "Show SL / TP lines in trade", group=GRP_VIS)
-showLabels = input.bool(true, "BUY / SELL / EXIT labels (today only)", group=GRP_VIS)
+showSwings = input.bool(true, "Show active swing H/L (period only)", group=GRP_VIS)
+showArmedLevel = input.bool(true, "Show armed break level", group=GRP_VIS)
+showTradeBox = input.bool(true, "Trade R:R box", group=GRP_VIS)
+showSetupPreview = input.bool(true, "Preview SL/TP while setup armed", group=GRP_VIS, tooltip="Shows planned SL/TP box before entry fills (same R:R).")
+showTradeLevels = input.bool(true, "Show SL / TP lines in trade", group=GRP_VIS)
+showLabels = input.bool(true, "BUY / SELL / EXIT labels", group=GRP_VIS)
 showSetupBg = input.bool(false, "Setup background tint", group=GRP_VIS)
 colRisk = input.color(color.new(color.red, 80), "Risk zone color", group=GRP_VIS, active=showTradeBox)
 colReward = input.color(color.new(color.green, 80), "Reward zone color", group=GRP_VIS, active=showTradeBox)
 colDiag = input.color(color.new(color.gray, 40), "Entry→exit diagonal", group=GRP_VIS, active=showTradeBox)
 
+// Resolve swing TF from preset / chart
+bool isAuto = tfPreset == "Auto (from chart)"
+bool autoIntraday = timeframe.isintraday and timeframe.multiplier <= 15
+bool autoSwingDH = timeframe.isintraday and timeframe.multiplier >= 30
+bool autoPosWD = timeframe.isdaily or timeframe.isweekly or timeframe.ismonthly
+
+bool isIntraday = isAuto ? autoIntraday : tfPreset == "Intraday · 30m → 5m"
+bool isSwingDH  = isAuto ? (autoSwingDH and not autoIntraday) : tfPreset == "Swing · Daily → 1H"
+bool isPosWD    = isAuto ? autoPosWD : tfPreset == "Position · Weekly → Daily"
+// Fallback if Auto on odd TF (e.g. 240): treat as swing Daily
+if isAuto and not isIntraday and not isSwingDH and not isPosWD
+    isSwingDH := true
+
+string structTf = useManualTf ? structTfManual : (isIntraday ? "30" : isSwingDH ? "D" : "W")
+// Sentiment TF: one step above structure pair
+string sentTf = isIntraday ? "60" : isSwingDH ? "W" : "M"
+string sentTfLabel = isIntraday ? "1H" : isSwingDH ? "Weekly" : "Monthly"
+string pairTxt = isIntraday ? "Intraday · 30m swings" : isSwingDH ? "Swing · Daily swings" : "Position · Weekly swings"
+string chartHint = "chart: " + timeframe.period
+string swingLabel = isIntraday ? "30m" : isSwingDH ? "Daily" : "Weekly"
+
 // =============================================================================
-// Live 30m pivots (rolling) — seeded at session open
+// HTF swing pool — valid tradeable swings only:
+//   Swing H = closest UNtraded pivot HIGH still ABOVE price
+//   Swing L = closest UNtraded pivot LOW  still BELOW price
+// After an entry on a level, that swing is invalidated → next valid is selected.
 // =============================================================================
-htfPivotHigh = request.security(
+htfPhFilled = request.security(
      syminfo.tickerid, structTf,
      ta.pivothigh(high, pivotLeft, pivotRight),
      gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_off)
-htfPivotLow = request.security(
+htfPlFilled = request.security(
      syminfo.tickerid, structTf,
      ta.pivotlow(low, pivotLeft, pivotRight),
      gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_off)
+htfPhEvent = request.security(
+     syminfo.tickerid, structTf,
+     ta.pivothigh(high, pivotLeft, pivotRight),
+     gaps=barmerge.gaps_on, lookahead=barmerge.lookahead_off)
+htfPlEvent = request.security(
+     syminfo.tickerid, structTf,
+     ta.pivotlow(low, pivotLeft, pivotRight),
+     gaps=barmerge.gaps_on, lookahead=barmerge.lookahead_off)
 
-var float last30mSwingHigh = na
-var float last30mSwingLow  = na
-if not na(htfPivotHigh)
-    last30mSwingHigh := htfPivotHigh
-if not na(htfPivotLow)
-    last30mSwingLow := htfPivotLow
+var array<float> phPool = array.new_float()
+var array<float> plPool = array.new_float()
+var array<float> usedHighs = array.new_float()
+var array<float> usedLows = array.new_float()
+int maxSwingPool = 40
+
+f_near(_a, _b) =>
+    not na(_a) and not na(_b) and math.abs(_a - _b) <= syminfo.mintick
+
+f_in_array(_arr, _v) =>
+    bool found = false
+    if array.size(_arr) > 0 and not na(_v)
+        for i = 0 to array.size(_arr) - 1
+            if not found and f_near(array.get(_arr, i), _v)
+                found := true
+    found
+
+f_push_unique(_arr, _v, _max) =>
+    if not na(_v) and not f_in_array(_arr, _v)
+        array.push(_arr, _v)
+        if array.size(_arr) > _max
+            array.shift(_arr)
+
+f_mark_used(_used, _v) =>
+    if not na(_v) and not f_in_array(_used, _v)
+        array.push(_used, _v)
+
+// Closest pivot HIGH still above ref price (resistance)
+f_pick_valid_high(_ref) =>
+    float best = na
+    if array.size(phPool) > 0 and not na(_ref)
+        for i = 0 to array.size(phPool) - 1
+            float v = array.get(phPool, i)
+            if v > _ref and not f_in_array(usedHighs, v)
+                if na(best) or v < best
+                    best := v
+    best
+
+// Closest pivot LOW still below ref price (support)
+f_pick_valid_low(_ref) =>
+    float best = na
+    if array.size(plPool) > 0 and not na(_ref)
+        for i = 0 to array.size(plPool) - 1
+            float v = array.get(plPool, i)
+            if v < _ref and not f_in_array(usedLows, v)
+                if na(best) or v > best
+                    best := v
+    best
+
+// Collect confirmed HTF pivots into pools
+if not na(htfPhEvent)
+    f_push_unique(phPool, htfPhEvent, maxSwingPool)
+else if not na(htfPhFilled)
+    f_push_unique(phPool, htfPhFilled, maxSwingPool)
+if not na(htfPlEvent)
+    f_push_unique(plPool, htfPlEvent, maxSwingPool)
+else if not na(htfPlFilled)
+    f_push_unique(plPool, htfPlFilled, maxSwingPool)
+
+var float lastHtfSwingHigh = na
+var float lastHtfSwingLow  = na
+if array.size(phPool) > 0
+    lastHtfSwingHigh := array.get(phPool, array.size(phPool) - 1)
+if array.size(plPool) > 0
+    lastHtfSwingLow := array.get(plPool, array.size(plPool) - 1)
 
 // =============================================================================
-// Session: first candle → last candle (chart exchange session)
+// Sentiment-gate TF pivots + close (Hourly / Weekly / Monthly)
+// =============================================================================
+sentPhFilled = request.security(
+     syminfo.tickerid, sentTf,
+     ta.pivothigh(high, pivotLeft, pivotRight),
+     gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_off)
+sentPlFilled = request.security(
+     syminfo.tickerid, sentTf,
+     ta.pivotlow(low, pivotLeft, pivotRight),
+     gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_off)
+sentClose = request.security(
+     syminfo.tickerid, sentTf, close,
+     gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_off)
+
+var float sentSwingHigh = na
+var float sentSwingLow = na
+if not na(sentPhFilled) and (na(sentSwingHigh) or sentPhFilled != sentSwingHigh)
+    sentSwingHigh := sentPhFilled
+if not na(sentPlFilled) and (na(sentSwingLow) or sentPlFilled != sentSwingLow)
+    sentSwingLow := sentPlFilled
+
+// Sticky HTF sentiment:
+//   close > Swing H → Bullish, stays Bullish until close < Swing L
+//   close < Swing L → Bearish, stays Bearish until close > Swing H
+//   inside range → keep last bias (does not flip on mid)
+var int gateDir = 0
+string gateSentTxt = sentTfLabel + " · waiting swings"
+color gateSentCol = color.silver
+bool haveSentLevels = not na(sentSwingHigh) and not na(sentSwingLow) and not na(sentClose)
+if haveSentLevels
+    if sentClose > sentSwingHigh
+        gateDir := 1
+        gateSentTxt := sentTfLabel + " BULLISH · above H"
+        gateSentCol := color.lime
+    else if sentClose < sentSwingLow
+        gateDir := -1
+        gateSentTxt := sentTfLabel + " BEARISH · below L"
+        gateSentCol := color.red
+    else
+        // Inside Swing H–L range
+        if sentStickyBias
+            if gateDir == 1
+                gateSentTxt := sentTfLabel + " BULLISH · until L break"
+                gateSentCol := color.lime
+            else if gateDir == -1
+                gateSentTxt := sentTfLabel + " BEARISH · until H break"
+                gateSentCol := color.red
+            else
+                // First time inside range with no prior break — seed from mid once
+                float sentMid = (sentSwingHigh + sentSwingLow) / 2.0
+                gateDir := sentClose >= sentMid ? 1 : -1
+                gateSentTxt := gateDir == 1 ? sentTfLabel + " BULLISH · until L break" : sentTfLabel + " BEARISH · until H break"
+                gateSentCol := gateDir == 1 ? color.lime : color.red
+        else
+            gateDir := 0
+            gateSentTxt := sentTfLabel + " Neutral · inside range"
+            gateSentCol := color.silver
+
+bool sentOkLong = not useSentimentGate or gateDir == 0 or gateDir == 1
+bool sentOkShort = not useSentimentGate or gateDir == 0 or gateDir == -1
+
+// =============================================================================
+// Period / session gates
+// Intraday: chart session first→last bar
+// Swing Daily→1H: reset/seed each new day
+// Position Weekly→Daily: reset/seed each new week
 // =============================================================================
 bool newDay = ta.change(time("D", tz)) != 0
+bool newWeek = ta.change(time("W", tz)) != 0
+bool newPeriod = isPosWD ? newWeek : newDay
 int todHour = hour(time, tz)
 int todMin = minute(time, tz)
 int todSec = second(time, tz)
 int todMins = todHour * 60 + todMin
 int noEntryMins = noEntryAfterHour * 60 + noEntryAfterMin
 
-bool inSess = useChartSession ? session.ismarket : not na(time(timeframe.period, sessionStr, tz))
-bool atLockTime = useChartSession ? session.isfirstbar : (todHour == lockHour and todMin == lockMin and (todSec <= 1 or barstate.isnew))
-bool atSquareOff = useChartSession ? session.islastbar : (todMins >= squareOffHour * 60 + squareOffMin)
-bool pastNoEntry = useNoEntryClock and todMins >= noEntryMins
+bool inSessIntraday = useChartSession ? session.ismarket : not na(time(timeframe.period, sessionStr, tz))
+bool atLockIntraday = useChartSession ? session.isfirstbar : (todHour == lockHour and todMin == lockMin and (todSec <= 1 or barstate.isnew))
+bool atSqIntraday = useChartSession ? session.islastbar : (todMins >= squareOffHour * 60 + squareOffMin)
 
-var float daySwingHigh = na
-var float daySwingLow  = na
 var bool levelsLocked = false
+var float daySwingHigh = na
+var float daySwingLow = na
 var float dayMid = na
-
 var int breakDir = 0
 var float breakLevel = na
 var float breakCandleHigh = na
@@ -115,14 +305,33 @@ var int tradesToday = 0
 var bool dayStopped = false
 var float mode2ConsumedHigh = na
 var float mode2ConsumedLow = na
-
 var int posDir = 0
 var float activeEntry = na
 var float activeSl = na
 var float activeTp = na
+var float activeInitialRisk = na
+var float tradeExtreme = na
+var bool slTrailed = false
 var int entryBar = na
 
-// Today-only drawings (cleared every new day → no backdated staircase)
+// Running session / calendar-day high-low (updates every bar — not pivot-based)
+var float sessHigh = na
+var float sessLow = na
+if newDay or na(sessHigh)
+    sessHigh := high
+    sessLow := low
+else
+    sessHigh := math.max(sessHigh, high)
+    sessLow := math.min(sessLow, low)
+
+// Higher TF: always "in session"; lock on new period, or immediately if still unlocked mid-period
+// Intraday: lock on session first bar, OR first in-session bar if loaded mid-day
+bool inSess = isIntraday ? inSessIntraday : true
+bool atLockTime = isIntraday ? (atLockIntraday or (not levelsLocked and inSessIntraday)) : (newPeriod or not levelsLocked)
+bool atSquareOff = useSquareOff and (isIntraday ? atSqIntraday : false)
+bool pastNoEntry = isIntraday and useNoEntryClock and todMins >= noEntryMins
+
+// Period-only drawings (cleared on new day / new week)
 var line lnHigh = na
 var line lnLow = na
 var line lnArm = na
@@ -131,12 +340,15 @@ var line lnSl = na
 var line lnTp = na
 var box bxRisk = na
 var box bxReward = na
+var box bxPrevRisk = na
+var box bxPrevReward = na
+var label lbPrev = na
 var array<label> dayLabels = array.new_label()
 var array<box> dayBoxes = array.new_box()
 var array<line> dayDiag = array.new_line()
 var array<line> daySwingSegs = array.new_line()
 
-if newDay
+if newPeriod
     line.delete(lnHigh)
     line.delete(lnLow)
     line.delete(lnArm)
@@ -151,6 +363,12 @@ if newDay
     lnTp := na
     bxRisk := na
     bxReward := na
+    box.delete(bxPrevRisk)
+    box.delete(bxPrevReward)
+    label.delete(lbPrev)
+    bxPrevRisk := na
+    bxPrevReward := na
+    lbPrev := na
     if array.size(dayLabels) > 0
         for i = 0 to array.size(dayLabels) - 1
             label.delete(array.get(dayLabels, i))
@@ -183,27 +401,34 @@ if newDay
     dayStopped := false
     mode2ConsumedHigh := na
     mode2ConsumedLow := na
+    array.clear(usedHighs)
+    array.clear(usedLows)
     posDir := 0
     activeEntry := na
     activeSl := na
     activeTp := na
+    activeInitialRisk := na
+    tradeExtreme := na
+    slTrailed := false
     entryBar := na
 
-// Open: mark previous 30m swing H/L
+// Lock session/period, then always resolve VALID swings vs current price:
+//   H must be above price · L must be below price · skip already-traded levels
 bool swingHighShifted = false
 bool swingLowShifted = false
 if atLockTime and not levelsLocked
-    daySwingHigh := last30mSwingHigh
-    daySwingLow := last30mSwingLow
     dayMid := open
     levelsLocked := true
-// After open: shift whenever a new valid 30m pivot confirms (same pivot L/R rules)
-else if levelsLocked and inSess
-    if not na(htfPivotHigh)
-        if na(daySwingHigh) or htfPivotHigh != daySwingHigh
+
+if levelsLocked
+    float refPx = close
+    float nextHigh = f_pick_valid_high(refPx)
+    float nextLow = f_pick_valid_low(refPx)
+    if not f_near(daySwingHigh, nextHigh)
+        if not na(daySwingHigh) or not na(nextHigh)
             swingHighShifted := true
-            mode2ConsumedHigh := na
-        daySwingHigh := htfPivotHigh
+        mode2ConsumedHigh := na
+        daySwingHigh := nextHigh
         if breakDir == 1
             breakDir := 0
             breakLevel := na
@@ -211,11 +436,11 @@ else if levelsLocked and inSess
             awaitingRetest := false
             retestTouched := false
             retestArmBar := na
-    if not na(htfPivotLow)
-        if na(daySwingLow) or htfPivotLow != daySwingLow
+    if not f_near(daySwingLow, nextLow)
+        if not na(daySwingLow) or not na(nextLow)
             swingLowShifted := true
-            mode2ConsumedLow := na
-        daySwingLow := htfPivotLow
+        mode2ConsumedLow := na
+        daySwingLow := nextLow
         if breakDir == -1
             breakDir := 0
             breakLevel := na
@@ -225,27 +450,49 @@ else if levelsLocked and inSess
             retestArmBar := na
 
 bool flat = posDir == 0
-bool haveLevels = levelsLocked and not na(daySwingHigh) and not na(daySwingLow)
-bool canTrade = flat and haveLevels and not dayStopped and tradesToday < maxTradesPerDay and inSess and not pastNoEntry and not atSquareOff
-bool midOkLong = not useMidFilter or not requireAboveMid or (not na(dayMid) and close > dayMid)
-bool midOkShort = not useMidFilter or not requireAboveMid or (not na(dayMid) and close < dayMid)
+bool haveHigh = levelsLocked and not na(daySwingHigh)
+bool haveLow = levelsLocked and not na(daySwingLow)
+bool haveLevels = haveHigh and haveLow
+bool canTradeBase = flat and not dayStopped and tradesToday < maxTradesPerDay and inSess and not pastNoEntry and not atSquareOff
+bool canTrade = canTradeBase and haveLevels
+bool canTradeLong = canTradeBase and haveLow
+bool canTradeShort = canTradeBase and haveHigh
+bool midOkLong = (not useMidFilter or not requireAboveMid or (not na(dayMid) and close > dayMid)) and sentOkLong
+bool midOkShort = (not useMidFilter or not requireAboveMid or (not na(dayMid) and close < dayMid)) and sentOkShort
 
-// Close-based break arm for Mode 1 only (confirmed 5m bar)
-bool brokeHigh = haveLevels and close > daySwingHigh and close[1] <= daySwingHigh
-bool brokeLow  = haveLevels and close < daySwingLow  and close[1] >= daySwingLow
+// Close-based break arm for Mode 1 only (confirmed chart bar)
+bool brokeHigh = haveHigh and close > daySwingHigh and close[1] <= daySwingHigh
+bool brokeLow  = haveLow and close < daySwingLow and close[1] >= daySwingLow
 
 bool isMode2 = entryMode == "2 — Reversal (on cross)"
 bool isMode3 = entryMode == "3 — Retest"
 
-if haveLevels and breakDir == 0 and barstate.isconfirmed and entryMode == "1 — Reversal"
-    if brokeHigh
+// Drop armed setups that conflict with HTF sentiment gate
+if useSentimentGate and breakDir == 1 and not sentOkShort
+    breakDir := 0
+    breakLevel := na
+    awaitingReversal := false
+    awaitingRetest := false
+    retestTouched := false
+    retestArmBar := na
+if useSentimentGate and breakDir == -1 and not sentOkLong
+    breakDir := 0
+    breakLevel := na
+    awaitingReversal := false
+    awaitingRetest := false
+    retestTouched := false
+    retestArmBar := na
+
+// Arm only setups allowed by sentiment (when gate ON)
+if breakDir == 0 and barstate.isconfirmed and entryMode == "1 — Reversal"
+    if brokeHigh and sentOkShort
         breakDir := 1
         breakLevel := daySwingHigh
         breakCandleHigh := high
         breakCandleLow := low
         awaitingReversal := true
         retestTouched := false
-    else if brokeLow
+    else if brokeLow and sentOkLong
         breakDir := -1
         breakLevel := daySwingLow
         breakCandleHigh := high
@@ -254,15 +501,15 @@ if haveLevels and breakDir == 0 and barstate.isconfirmed and entryMode == "1 —
         retestTouched := false
 
 // Mode 2 arm: price traded beyond swing (no close wait) — still a REVERSAL setup
-if haveLevels and isMode2 and breakDir == 0
-    if high >= daySwingHigh and close[1] <= daySwingHigh
+if isMode2 and breakDir == 0
+    if haveHigh and high >= daySwingHigh and close[1] <= daySwingHigh and sentOkShort
         breakDir := 1
         breakLevel := daySwingHigh
         breakCandleHigh := high
         breakCandleLow := low
         awaitingReversal := true
         retestTouched := false
-    else if low <= daySwingLow and close[1] >= daySwingLow
+    else if haveLow and low <= daySwingLow and close[1] >= daySwingLow and sentOkLong
         breakDir := -1
         breakLevel := daySwingLow
         breakCandleHigh := high
@@ -281,38 +528,36 @@ bool shortSignal = false
 float signalSl = na
 float signalEntry = na
 
-// Mode 1 — reversal on confirmed 5m close → ENTER
-bool mode1BuyCross = entryMode == "1 — Reversal" and haveLevels and close[1] < daySwingLow and close > daySwingLow
-bool mode1SellCross = entryMode == "1 — Reversal" and haveLevels and close[1] > daySwingHigh and close < daySwingHigh
+// Mode 1 — reversal on confirmed close → ENTER
+bool mode1BuyCross = entryMode == "1 — Reversal" and haveLow and close[1] < daySwingLow and close > daySwingLow
+bool mode1SellCross = entryMode == "1 — Reversal" and haveHigh and close[1] > daySwingHigh and close < daySwingHigh
 
-if canTrade and barstate.isconfirmed
-    if mode1BuyCross and midOkLong
+if barstate.isconfirmed
+    if canTradeLong and mode1BuyCross and midOkLong
         longSignal := true
         signalSl := low[1] - slBuffer
         breakDir := 0
         breakLevel := na
         awaitingReversal := false
-    if mode1SellCross and midOkShort
+    if canTradeShort and mode1SellCross and midOkShort
         shortSignal := true
         signalSl := high[1] + slBuffer
         breakDir := 0
         breakLevel := na
         awaitingReversal := false
 
-if canTrade and breakDir != 0 and not na(breakLevel) and not longSignal and not shortSignal and barstate.isconfirmed
+if breakDir != 0 and not na(breakLevel) and not longSignal and not shortSignal and barstate.isconfirmed
     if entryMode == "1 — Reversal" and awaitingReversal
-        if breakDir == 1 and close < breakLevel and close[1] >= breakLevel and midOkShort
+        if breakDir == 1 and canTradeShort and close < breakLevel and close[1] >= breakLevel and midOkShort
             shortSignal := true
             signalSl := breakCandleHigh + slBuffer
-        if breakDir == -1 and close > breakLevel and close[1] <= breakLevel and midOkLong
+        if breakDir == -1 and canTradeLong and close > breakLevel and close[1] <= breakLevel and midOkLong
             longSignal := true
             signalSl := breakCandleLow - slBuffer
 
-// Mode 3 — ARM on same reclaim close as Mode 1, ENTER on later retest of that swing
-// SELL: prior close > Swing H, this close < Swing H → arm; later high retests Swing H → SELL
-// BUY:  prior close < Swing L, this close > Swing L → arm; later low retests Swing L → BUY
-bool mode3ArmSell = isMode3 and haveLevels and close[1] > daySwingHigh and close < daySwingHigh
-bool mode3ArmBuy  = isMode3 and haveLevels and close[1] < daySwingLow and close > daySwingLow
+// Mode 3 — ARM on reclaim close, ENTER on later retest
+bool mode3ArmSell = isMode3 and haveHigh and close[1] > daySwingHigh and close < daySwingHigh and sentOkShort
+bool mode3ArmBuy  = isMode3 and haveLow and close[1] < daySwingLow and close > daySwingLow and sentOkLong
 if barstate.isconfirmed and breakDir == 0 and not awaitingRetest
     if mode3ArmSell
         breakDir := 1
@@ -331,8 +576,8 @@ if barstate.isconfirmed and breakDir == 0 and not awaitingRetest
         retestArmBar := bar_index
         retestTouched := false
 
-if canTrade and isMode3 and awaitingRetest and breakDir != 0 and not na(breakLevel) and not na(retestArmBar) and bar_index > retestArmBar and not longSignal and not shortSignal
-    if breakDir == 1 and high >= breakLevel and midOkShort
+if isMode3 and awaitingRetest and breakDir != 0 and not na(breakLevel) and not na(retestArmBar) and bar_index > retestArmBar and not longSignal and not shortSignal
+    if breakDir == 1 and canTradeShort and high >= breakLevel and midOkShort
         shortSignal := true
         signalEntry := breakLevel
         signalSl := math.max(breakCandleHigh, high) + slBuffer
@@ -340,7 +585,7 @@ if canTrade and isMode3 and awaitingRetest and breakDir != 0 and not na(breakLev
         breakLevel := na
         awaitingRetest := false
         retestArmBar := na
-    if breakDir == -1 and low <= breakLevel and midOkLong
+    if breakDir == -1 and canTradeLong and low <= breakLevel and midOkLong
         longSignal := true
         signalEntry := breakLevel
         signalSl := math.min(breakCandleLow, low) - slBuffer
@@ -350,10 +595,10 @@ if canTrade and isMode3 and awaitingRetest and breakDir != 0 and not na(breakLev
         retestArmBar := na
 
 // Mode 2 — same REVERSAL as Mode 1, but enter on the CROSS (no candle-close wait)
-bool mode2SellCross = haveLevels and close[1] > daySwingHigh and low <= daySwingHigh
-bool mode2BuyCross  = haveLevels and close[1] < daySwingLow and high >= daySwingLow
-if canTrade and isMode2 and not longSignal and not shortSignal
-    if mode2BuyCross and midOkLong and (na(mode2ConsumedLow) or mode2ConsumedLow != daySwingLow)
+bool mode2SellCross = haveHigh and close[1] > daySwingHigh and low <= daySwingHigh
+bool mode2BuyCross  = haveLow and close[1] < daySwingLow and high >= daySwingLow
+if isMode2 and not longSignal and not shortSignal
+    if canTradeLong and mode2BuyCross and midOkLong and not f_in_array(usedLows, daySwingLow)
         longSignal := true
         signalEntry := daySwingLow
         signalSl := math.min(low[1], low) - slBuffer
@@ -361,7 +606,7 @@ if canTrade and isMode2 and not longSignal and not shortSignal
         breakDir := 0
         breakLevel := na
         awaitingReversal := false
-    if mode2SellCross and midOkShort and (na(mode2ConsumedHigh) or mode2ConsumedHigh != daySwingHigh)
+    if canTradeShort and mode2SellCross and midOkShort and not f_in_array(usedHighs, daySwingHigh)
         shortSignal := true
         signalEntry := daySwingHigh
         signalSl := math.max(high[1], high) + slBuffer
@@ -370,7 +615,7 @@ if canTrade and isMode2 and not longSignal and not shortSignal
         breakLevel := na
         awaitingReversal := false
     if not longSignal and not shortSignal and awaitingReversal and breakDir != 0 and not na(breakLevel)
-        if breakDir == 1 and low <= breakLevel and midOkShort and (na(mode2ConsumedHigh) or mode2ConsumedHigh != breakLevel)
+        if breakDir == 1 and canTradeShort and low <= breakLevel and midOkShort and not f_in_array(usedHighs, breakLevel)
             shortSignal := true
             signalEntry := breakLevel
             signalSl := breakCandleHigh + slBuffer
@@ -378,7 +623,7 @@ if canTrade and isMode2 and not longSignal and not shortSignal
             breakDir := 0
             breakLevel := na
             awaitingReversal := false
-        if breakDir == -1 and high >= breakLevel and midOkLong and (na(mode2ConsumedLow) or mode2ConsumedLow != breakLevel)
+        if breakDir == -1 and canTradeLong and high >= breakLevel and midOkLong and not f_in_array(usedLows, breakLevel)
             longSignal := true
             signalEntry := breakLevel
             signalSl := breakCandleLow - slBuffer
@@ -394,14 +639,73 @@ bool sellPlaced = false
 bool exitPlaced = false
 string exitReason = ""
 
+// Trailing SL (tighten only) — runs before exit checks
+// Nifty options profile matches live S3: after peak +10 → SL entry+1, then +1 SL per +1 peak
+if not flat and useTrailingSl and not na(activeEntry) and not na(activeSl)
+    if isOptTrail
+        if posDir == 1
+            tradeExtreme := na(tradeExtreme) ? high : math.max(tradeExtreme, high)
+            float peakProfit = tradeExtreme - activeEntry
+            if peakProfit + 1e-9 >= optTrailStartPts
+                float stepsBeyond = math.max(0.0, math.floor(peakProfit - optTrailStartPts))
+                float newSl = activeEntry + optTrailLockPts + stepsBeyond
+                newSl := math.min(newSl, activeTp - syminfo.mintick)
+                if newSl > activeSl
+                    activeSl := newSl
+                    slTrailed := true
+                    if showTradeBox and not na(bxRisk)
+                        box.set_bottom(bxRisk, math.min(activeEntry, activeSl))
+                        box.set_top(bxRisk, math.max(activeEntry, activeSl))
+        else if posDir == -1
+            tradeExtreme := na(tradeExtreme) ? low : math.min(tradeExtreme, low)
+            float peakProfit = activeEntry - tradeExtreme
+            if peakProfit + 1e-9 >= optTrailStartPts
+                float stepsBeyond = math.max(0.0, math.floor(peakProfit - optTrailStartPts))
+                float newSl = activeEntry - optTrailLockPts - stepsBeyond
+                newSl := math.max(newSl, activeTp + syminfo.mintick)
+                if newSl < activeSl
+                    activeSl := newSl
+                    slTrailed := true
+                    if showTradeBox and not na(bxRisk)
+                        box.set_bottom(bxRisk, math.min(activeEntry, activeSl))
+                        box.set_top(bxRisk, math.max(activeEntry, activeSl))
+    else if not na(activeInitialRisk) and activeInitialRisk > 0
+        float needFavor = trailMode == "Points" ? beTriggerPts : beTriggerR * activeInitialRisk
+        if posDir == 1
+            tradeExtreme := na(tradeExtreme) ? high : math.max(tradeExtreme, high)
+            float favor = tradeExtreme - activeEntry
+            if favor >= needFavor
+                float newSl = moveToBreakeven ? activeEntry : activeSl
+                if trailPts > 0
+                    newSl := math.max(newSl, tradeExtreme - trailPts)
+                if newSl > activeSl and newSl < tradeExtreme
+                    activeSl := newSl
+                    slTrailed := true
+                    if showTradeBox and not na(bxRisk)
+                        box.set_bottom(bxRisk, math.min(activeEntry, activeSl))
+                        box.set_top(bxRisk, math.max(activeEntry, activeSl))
+        else if posDir == -1
+            tradeExtreme := na(tradeExtreme) ? low : math.min(tradeExtreme, low)
+            float favor = activeEntry - tradeExtreme
+            if favor >= needFavor
+                float newSl = moveToBreakeven ? activeEntry : activeSl
+                if trailPts > 0
+                    newSl := math.min(newSl, tradeExtreme + trailPts)
+                if newSl < activeSl and newSl > tradeExtreme
+                    activeSl := newSl
+                    slTrailed := true
+                    if showTradeBox and not na(bxRisk)
+                        box.set_bottom(bxRisk, math.min(activeEntry, activeSl))
+                        box.set_top(bxRisk, math.max(activeEntry, activeSl))
+
 if not flat and not na(activeSl) and not na(activeTp)
     bool hitSl = posDir == 1 ? low <= activeSl : high >= activeSl
     bool hitTp = posDir == 1 ? high >= activeTp : low <= activeTp
     if hitSl or hitTp
         if hitSl and hitTp
-            exitReason := math.abs(open - activeTp) <= math.abs(open - activeSl) ? "TP" : "SL"
+            exitReason := math.abs(open - activeTp) <= math.abs(open - activeSl) ? "TP" : (slTrailed ? "TRAIL" : "SL")
         else
-            exitReason := hitTp ? "TP" : "SL"
+            exitReason := hitTp ? "TP" : (slTrailed ? "TRAIL" : "SL")
         float exitPx = exitReason == "TP" ? activeTp : activeSl
         if exitReason == "TP" and stopAfterFirstTp
             dayStopped := true
@@ -420,6 +724,9 @@ if not flat and not na(activeSl) and not na(activeTp)
         activeEntry := na
         activeSl := na
         activeTp := na
+        activeInitialRisk := na
+        tradeExtreme := na
+        slTrailed := false
         breakDir := 0
         breakLevel := na
         awaitingReversal := false
@@ -445,6 +752,9 @@ if atSquareOff and posDir != 0 and not exitPlaced
     activeEntry := na
     activeSl := na
     activeTp := na
+    activeInitialRisk := na
+    tradeExtreme := na
+    slTrailed := false
     breakDir := 0
     breakLevel := na
     awaitingReversal := false
@@ -454,19 +764,29 @@ if atSquareOff and posDir != 0 and not exitPlaced
         array.push(dayLabels, label.new(bar_index, close, "EXIT EOD", style=label.style_label_center, color=color.new(color.gray, 10), textcolor=color.white, size=size.small))
 
 flat := posDir == 0
-canTrade := flat and haveLevels and not dayStopped and tradesToday < maxTradesPerDay and inSess and not pastNoEntry and not atSquareOff
+canTradeLong := flat and haveLow and not dayStopped and tradesToday < maxTradesPerDay and inSess and not pastNoEntry and not atSquareOff
+canTradeShort := flat and haveHigh and not dayStopped and tradesToday < maxTradesPerDay and inSess and not pastNoEntry and not atSquareOff
+canTrade := canTradeLong and canTradeShort
 
-if longSignal and canTrade and not na(signalSl) and not exitPlaced
+if longSignal and canTradeLong and not na(signalSl) and not exitPlaced
     float fillPx = na(signalEntry) ? close : signalEntry
-    float sl = math.min(signalSl, fillPx - syminfo.mintick)
+    float sl = isOptTrail ? fillPx - optSlPts : math.min(signalSl, fillPx - syminfo.mintick)
     float risk = fillPx - sl
     if risk > 0
-        float tp = fillPx + risk * rrMult
+        float tp = isOptTrail ? fillPx + optTpPts : fillPx + risk * rrMult
+        // Invalidate the traded swing low — look for next valid L below price
+        float usedL = not na(signalEntry) ? signalEntry : daySwingLow
+        f_mark_used(usedLows, usedL)
+        daySwingLow := f_pick_valid_low(close)
+        swingLowShifted := true
         posDir := 1
         tradesToday += 1
         activeEntry := fillPx
         activeSl := sl
         activeTp := tp
+        activeInitialRisk := risk
+        tradeExtreme := fillPx
+        slTrailed := false
         entryBar := bar_index
         breakDir := 0
         breakLevel := na
@@ -484,17 +804,25 @@ if longSignal and canTrade and not na(signalSl) and not exitPlaced
         if showLabels
             array.push(dayLabels, label.new(bar_index, low, "BUY\nSL " + str.tostring(sl, format.mintick) + "\nTP " + str.tostring(tp, format.mintick), style=label.style_label_up, color=color.new(#089981, 0), textcolor=color.white, size=size.small))
 
-if shortSignal and canTrade and not na(signalSl) and not exitPlaced and not buyPlaced
+if shortSignal and canTradeShort and not na(signalSl) and not exitPlaced and not buyPlaced
     float fillPx = na(signalEntry) ? close : signalEntry
-    float sl = math.max(signalSl, fillPx + syminfo.mintick)
+    float sl = isOptTrail ? fillPx + optSlPts : math.max(signalSl, fillPx + syminfo.mintick)
     float risk = sl - fillPx
     if risk > 0
-        float tp = fillPx - risk * rrMult
+        float tp = isOptTrail ? fillPx - optTpPts : fillPx - risk * rrMult
+        // Invalidate the traded swing high — look for next valid H above price
+        float usedH = not na(signalEntry) ? signalEntry : daySwingHigh
+        f_mark_used(usedHighs, usedH)
+        daySwingHigh := f_pick_valid_high(close)
+        swingHighShifted := true
         posDir := -1
         tradesToday += 1
         activeEntry := fillPx
         activeSl := sl
         activeTp := tp
+        activeInitialRisk := risk
+        tradeExtreme := fillPx
+        slTrailed := false
         entryBar := bar_index
         breakDir := 0
         breakLevel := na
@@ -517,8 +845,68 @@ if showTradeBox and not flat and not na(bxRisk)
     box.set_right(bxRisk, bar_index)
     if not na(bxReward)
         box.set_right(bxReward, bar_index)
+
+// Preview SL/TP while a setup is armed (before fill) — same R:R as live trade
+bool showPrev = showSetupPreview and flat and breakDir != 0 and not na(breakLevel) and not na(breakCandleHigh) and not na(breakCandleLow)
+if showPrev
+    float prevEntry = breakLevel
+    float prevSl = breakDir == 1 ? breakCandleHigh + slBuffer : breakCandleLow - slBuffer
+    float prevRisk = breakDir == 1 ? (prevSl - prevEntry) : (prevEntry - prevSl)
+    float prevTp = na
+    if prevRisk > 0
+        prevTp := breakDir == 1 ? prevEntry - prevRisk * rrMult : prevEntry + prevRisk * rrMult
+    if not na(prevTp) and showTradeBox
+        if na(bxPrevRisk)
+            if breakDir == 1
+                bxPrevRisk := box.new(bar_index, prevSl, bar_index, prevEntry, border_color=color.new(color.red, 40), bgcolor=color.new(color.red, 88), border_width=1)
+                bxPrevReward := box.new(bar_index, prevEntry, bar_index, prevTp, border_color=color.new(color.green, 40), bgcolor=color.new(color.green, 88), border_width=1)
+            else
+                bxPrevRisk := box.new(bar_index, prevEntry, bar_index, prevSl, border_color=color.new(color.red, 40), bgcolor=color.new(color.red, 88), border_width=1)
+                bxPrevReward := box.new(bar_index, prevTp, bar_index, prevEntry, border_color=color.new(color.green, 40), bgcolor=color.new(color.green, 88), border_width=1)
+        else
+            if breakDir == 1
+                box.set_top(bxPrevRisk, prevSl)
+                box.set_bottom(bxPrevRisk, prevEntry)
+                box.set_top(bxPrevReward, prevEntry)
+                box.set_bottom(bxPrevReward, prevTp)
+            else
+                box.set_top(bxPrevRisk, prevEntry)
+                box.set_bottom(bxPrevRisk, prevSl)
+                box.set_top(bxPrevReward, prevTp)
+                box.set_bottom(bxPrevReward, prevEntry)
+            box.set_right(bxPrevRisk, bar_index)
+            box.set_right(bxPrevReward, bar_index)
+        if showLabels
+            string prevSide = breakDir == 1 ? "SELL" : "BUY"
+            string prevTxt = prevSide + " setup\nSL " + str.tostring(prevSl, format.mintick) + "\nTP " + str.tostring(prevTp, format.mintick)
+            if na(lbPrev)
+                lbPrev := label.new(bar_index, breakDir == 1 ? prevSl : prevSl, prevTxt, style=breakDir == 1 ? label.style_label_down : label.style_label_up, color=color.new(breakDir == 1 ? color.red : #089981, 20), textcolor=color.white, size=size.small)
+            else
+                label.set_xy(lbPrev, bar_index, prevSl)
+                label.set_text(lbPrev, prevTxt)
+    if showTradeLevels and not na(prevTp)
+        if na(lnSl)
+            lnSl := line.new(bar_index, prevSl, bar_index, prevSl, color=color.fuchsia, width=1, style=line.style_dotted, extend=extend.none)
+        else
+            line.set_xy2(lnSl, bar_index, prevSl)
+            line.set_y1(lnSl, prevSl)
+            line.set_style(lnSl, line.style_dotted)
+        if na(lnTp)
+            lnTp := line.new(bar_index, prevTp, bar_index, prevTp, color=color.lime, width=1, style=line.style_dotted, extend=extend.none)
+        else
+            line.set_xy2(lnTp, bar_index, prevTp)
+            line.set_y1(lnTp, prevTp)
+            line.set_style(lnTp, line.style_dotted)
+else
+    box.delete(bxPrevRisk)
+    box.delete(bxPrevReward)
+    label.delete(lbPrev)
+    bxPrevRisk := na
+    bxPrevReward := na
+    lbPrev := na
+
 // =============================================================================
-// Today-only lines — swing H/L step to each new 30m pivot (segments kept for today)
+// Period-only lines — swing H/L step to each new HTF pivot
 // =============================================================================
 if levelsLocked and showSwings and not na(daySwingHigh)
     if swingHighShifted and not na(lnHigh)
@@ -561,12 +949,14 @@ if showTradeLevels and not flat and not na(activeSl)
     else
         line.set_xy2(lnSl, bar_index, activeSl)
         line.set_y1(lnSl, activeSl)
+        line.set_style(lnSl, line.style_solid)
     if na(lnTp)
         lnTp := line.new(bar_index, activeTp, bar_index, activeTp, color=color.lime, width=1, style=line.style_solid, extend=extend.none)
     else
         line.set_xy2(lnTp, bar_index, activeTp)
         line.set_y1(lnTp, activeTp)
-else
+        line.set_style(lnTp, line.style_solid)
+else if not showPrev
     line.delete(lnSl)
     line.delete(lnTp)
     lnSl := na
@@ -574,18 +964,31 @@ else
 
 bgcolor(showSetupBg ? (breakDir == 1 ? color.new(color.red, 93) : breakDir == -1 ? color.new(color.teal, 93) : na) : na)
 
-var table info = table.new(position.top_right, 1, 7, bgcolor=color.new(color.black, 70))
+// =============================================================================
+// Panel: Sentiment (one line) + trading info (no Gate/Local/Structure clutter)
+// =============================================================================
+string panelSent = gateDir == 1 ? "Bullish" : gateDir == -1 ? "Bearish" : "Neutral"
+color panelCol = gateDir == 1 ? #69f0ae : gateDir == -1 ? #ff5252 : #e0e0e0
+string setupBias = breakDir == 0 ? "Neutral" : (breakDir == 1 ? "Bearish setup" : "Bullish setup")
+color setupCol = breakDir == 0 ? #e0e0e0 : (breakDir == 1 ? #ff8a80 : #69f0ae)
+
+var table info = table.new(position.top_right, 1, 8, bgcolor=color.new(#1a1a1a, 15), border_width=1, border_color=color.new(color.gray, 50))
 if barstate.islast
-    string lockTxt = useChartSession ? "Open seed → shift each new 30m swing" : "Lock @ " + str.tostring(lockHour) + ":" + (lockMin < 10 ? "0" : "") + str.tostring(lockMin)
-    table.cell(info, 0, 0, "Mode: " + entryMode, text_color=color.white, text_size=size.small)
-    table.cell(info, 0, 1, lockTxt, text_color=color.silver, text_size=size.tiny)
-    table.cell(info, 0, 2, "Swing H " + str.tostring(daySwingHigh, format.mintick), text_color=color.red, text_size=size.small)
-    table.cell(info, 0, 3, "Swing L " + str.tostring(daySwingLow, format.mintick), text_color=color.teal, text_size=size.small)
+    table.cell(info, 0, 0, "Sentiment: " + panelSent, text_color=panelCol, text_size=size.normal)
+    table.cell(info, 0, 1, pairTxt + " · " + chartHint, text_color=color.white, text_size=size.tiny)
+    table.cell(info, 0, 2, "Mode: " + entryMode, text_color=color.white, text_size=size.small)
+    table.cell(info, 0, 3, swingLabel + " H/L " + (na(daySwingHigh) ? "—" : str.tostring(daySwingHigh, format.mintick)) + "/" + (na(daySwingLow) ? "—" : str.tostring(daySwingLow, format.mintick)), text_color=#e0e0e0, text_size=size.small)
+    if showDayHL
+        table.cell(info, 0, 4, "Day H " + str.tostring(sessHigh, format.mintick) + " · L " + str.tostring(sessLow, format.mintick), text_color=#ffd54f, text_size=size.tiny)
+    else
+        table.cell(info, 0, 4, "", text_color=color.white, text_size=size.tiny)
     string posTxt = posDir == 1 ? "LONG" : posDir == -1 ? "SHORT" : "FLAT"
-    table.cell(info, 0, 4, "Pos: " + posTxt, text_color=color.aqua, text_size=size.small)
-    table.cell(info, 0, 5, "Trades: " + str.tostring(tradesToday) + (dayStopped ? " STOP" : "") + (levelsLocked ? "" : " · waiting open"), text_color=color.yellow, text_size=size.small)
-    string arm = breakDir == 0 ? "Idle" : (breakDir == 1 ? "SELL setup @ " : "BUY setup @ ") + str.tostring(breakLevel, format.mintick)
-    table.cell(info, 0, 6, arm, text_color=color.orange, text_size=size.small)
+    table.cell(info, 0, 5, "Pos: " + posTxt, text_color=#4dd0e1, text_size=size.small)
+    table.cell(info, 0, 6, "Trades: " + str.tostring(tradesToday) + (dayStopped ? " STOP" : "") + (levelsLocked ? "" : " · waiting open"), text_color=#ffd54f, text_size=size.small)
+    string arm = breakDir == 0 ? "Idle · Neutral" : (breakDir == 1 ? "SELL setup @ " : "BUY setup @ ") + str.tostring(breakLevel, format.mintick)
+    if breakDir != 0 and not flat
+        arm := "In trade"
+    table.cell(info, 0, 7, arm, text_color=setupCol, text_size=size.small)
 
 alertcondition(buyPlaced, title="BUY", message="AK07: BUY")
 alertcondition(sellPlaced, title="SELL", message="AK07: SELL")

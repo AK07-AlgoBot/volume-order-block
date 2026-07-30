@@ -732,7 +732,10 @@ class BreakoutMarketClient:
             if ltp is not None:
                 self._mock_spots[cfg.code] = ltp
                 return ltp
-        return self._mock_spot(cfg)
+            # Live: never invent spot from mock seed (was returning ~23100 and breaking strikes).
+            logger.warning("[%s] spot LTP unavailable — skipping tick (no mock fallback)", cfg.code)
+            return None
+        return None
 
     def _mock_spot(self, cfg: IndexConfig) -> float:
         base = self._mock_spots.get(cfg.code, 23_100.0)
@@ -1993,6 +1996,20 @@ class BreakoutEngine:
 
         if pos.uses_options:
             premium = self._option_premium_ltp(pos)
+            if premium is None and pos.premium_last is not None:
+                # Upstox 429 / LTP gaps: still evaluate SL/TP against last known premium
+                # so positions can exit instead of running naked.
+                premium = float(pos.premium_last)
+                logger.warning(
+                    "[%s] option LTP missing — using last premium %.2f for SL/TP check",
+                    state.config.code,
+                    premium,
+                )
+            elif premium is None:
+                logger.error(
+                    "[%s] option LTP unavailable and no last premium — cannot exit this tick",
+                    state.config.code,
+                )
             prev_premium = pos.premium_last
             if pos.premium_entry is None and premium is not None and premium > 0:
                 pos.premium_entry = premium
