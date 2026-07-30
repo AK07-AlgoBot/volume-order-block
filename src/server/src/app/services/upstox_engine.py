@@ -450,6 +450,10 @@ class UpstoxClient:
 
     # Module-level 429 cool-down shared across clients (Upstox rate limit is account-wide).
     _ltp_cooldown_until: float = 0.0
+    # Day open is static after auction — cache per instrument for the IST calendar day.
+    _day_open_cache: dict[str, tuple[float, date]] = {}
+    # After a failed day-OHLC fetch, wait before retrying (avoids 429 thrash every poll).
+    _day_open_retry_after: dict[str, float] = {}
 
     def _get(self, url: str, params: dict[str, Any] | None = None) -> dict[str, Any] | None:
         now = time.monotonic()
@@ -458,10 +462,10 @@ class UpstoxClient:
         try:
             response = self.session.get(url, params=params, timeout=15)
             if response.status_code == 429:
-                # Back off hard — hammering LTP prevents option SL/TP/trail forever.
-                UpstoxClient._ltp_cooldown_until = time.monotonic() + 15.0
+                # Back off hard — hammering LTP/OHLC prevents option SL/TP/trail forever.
+                UpstoxClient._ltp_cooldown_until = time.monotonic() + 60.0
                 logger.warning(
-                    "Upstox HTTP 429 on %s — cooling market-quote for 15s",
+                    "Upstox HTTP 429 on %s — cooling market-quote for 60s",
                     url.split("?")[0],
                 )
                 return None
@@ -505,17 +509,36 @@ class UpstoxClient:
         return out
 
     def get_index_day_open(self, instrument_key: str) -> float | None:
-        """NSE session open from daily OHLC quote (often matches TradingView index open)."""
+        """NSE session open from daily OHLC quote (often matches TradingView index open).
+
+        Cached for the IST calendar day once known — value does not change intraday, and
+        re-hitting /market-quote/ohlc every poll burns the shared Upstox rate limit (429).
+        """
+        today = datetime.now(IST).date()
+        cached = UpstoxClient._day_open_cache.get(instrument_key)
+        if cached is not None and cached[1] == today:
+            return cached[0]
+
+        now = time.monotonic()
+        if now < UpstoxClient._day_open_retry_after.get(instrument_key, 0.0):
+            return None
+
         data = self._get(
             f"{self.base_url}/market-quote/ohlc",
             {"instrument_key": instrument_key, "interval": "1d"},
         )
         if not isinstance(data, dict):
+            # Miss / 429 / cool-down: back off so breakout poll does not thrash OHLC.
+            UpstoxClient._day_open_retry_after[instrument_key] = now + 120.0
             return None
         for row in data.values():
             day_open = (row.get("ohlc") or {}).get("open")
             if day_open is not None:
-                return float(day_open)
+                value = float(day_open)
+                UpstoxClient._day_open_cache[instrument_key] = (value, today)
+                UpstoxClient._day_open_retry_after.pop(instrument_key, None)
+                return value
+        UpstoxClient._day_open_retry_after[instrument_key] = now + 120.0
         return None
 
     def get_closed_5min_candles(self, instrument_key: str) -> list[dict[str, float]] | None:

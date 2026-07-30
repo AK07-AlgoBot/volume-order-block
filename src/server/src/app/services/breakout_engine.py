@@ -983,8 +983,8 @@ class BreakoutEngine:
         mid = state.mid
         if mid is None:
             return
-        # Never override a manual TV Mid.
-        if source in ("manual_tv", "manual_admin"):
+        # Never override a manual TV Mid; day_ohlc is already the preferred auto source.
+        if source in ("manual_tv", "manual_admin", "day_ohlc"):
             return
 
         day_open = self.client.get_session_day_open(state.config)
@@ -1396,12 +1396,32 @@ class BreakoutEngine:
         spot: float | None,
     ) -> None:
         if state.levels_ready:
+            cur_source = state.session_open_source or ""
+            # Already on best auto Mid (or manual) — do not re-hit /market-quote/ohlc every poll.
+            if cur_source in ("day_ohlc", "manual_tv", "manual_admin"):
+                first = self._first_session_candle(candles, now.date())
+                if first and state.day_review == "PENDING":
+                    close = float(first["close"])
+                    state.first_candle_close = close
+                    if state.mid is not None:
+                        state.day_review = day_review_from_first_close(close, state.mid)
+                        state.setup_label = (
+                            f"Review {state.day_review} side "
+                            f"(1st 5m close {close:.2f} vs mid {state.mid:.2f})"
+                        )
+                        msg = (
+                            f"{state.config.display} day review={state.day_review} "
+                            f"(1st 5m {close:.2f} vs mid {state.mid:.2f})"
+                        )
+                        state.signal_log.append(msg)
+                        logger.info(msg)
+                return
+
             best_open, best_source = self._best_session_open(state, candles, now, spot)
             cur_broker = state.broker_session_open
             if cur_broker is None and state.session_open is not None:
                 cur_broker = state.session_open - state.session_open_tv_offset
             cur_broker = cur_broker or 0.0
-            cur_source = state.session_open_source or ""
             if best_open is not None and self._should_upgrade_session_open(
                 cur_source, cur_broker, best_open, best_source
             ):
