@@ -1051,9 +1051,12 @@ class BreakoutEngine:
         if now.time() >= SESSION_END:
             self._square_off_all("SESSION_END", now)
             for state in self.states.values():
-                spot = self.client.get_spot(state.config)
-                if spot is not None:
-                    state.spot = spot
+                # Avoid LTP storms at close — reuse last known / candle close.
+                if state.cached_candles:
+                    try:
+                        state.spot = float(state.cached_candles[-1]["close"])
+                    except (KeyError, TypeError, ValueError, IndexError):
+                        pass
                 self._restore_frozen_levels(state, now.date().isoformat())
                 if state.levels_ready:
                     state.setup_label = (
@@ -1162,14 +1165,7 @@ class BreakoutEngine:
 
         self._reconcile_session_position_if_flat(state, now.date().isoformat())
 
-        spot = self.client.get_spot(cfg)
-        if spot is not None:
-            state.spot = spot
-        self._restore_session_open_tick(state, now)
-        self._maybe_capture_session_open_tick(state, now, spot)
-        self._invalidate_auction_frozen(state, now)
-
-        # Holding options: refresh option premium every ~2s; reuse candles most ticks
+        # Holding options: refresh option premium on option poll; reuse candles most ticks
         # so we don't hammer Upstox historical on every premium check.
         holding_options = state.position is not None and state.position.uses_options
         need_candles = (
@@ -1180,6 +1176,27 @@ class BreakoutEngine:
         if need_candles:
             state.cached_candles = self.client.get_5m_candles(cfg) or []
             state.last_candle_fetch_mono = time.monotonic()
+
+        # Spot LTP burns the shared Upstox quota (3 indices × every poll). Prefer last
+        # 5m close except during the open-capture window (need live LTP vs auction).
+        spot: float | None = None
+        if self._in_session_open_capture_window(now):
+            spot = self.client.get_spot(cfg)
+        elif state.cached_candles:
+            try:
+                spot = float(state.cached_candles[-1]["close"])
+            except (KeyError, TypeError, ValueError, IndexError):
+                spot = state.spot
+        else:
+            spot = state.spot
+
+        if spot is not None:
+            state.spot = spot
+        self._restore_session_open_tick(state, now)
+        self._maybe_capture_session_open_tick(state, now, spot)
+        self._invalidate_auction_frozen(state, now)
+
+        if need_candles:
             self._refresh_levels(state, state.cached_candles, now, spot)
         candles = state.cached_candles
 

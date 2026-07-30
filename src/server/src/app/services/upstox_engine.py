@@ -450,6 +450,9 @@ class UpstoxClient:
 
     # Module-level 429 cool-down shared across clients (Upstox rate limit is account-wide).
     _ltp_cooldown_until: float = 0.0
+    # Short-lived LTP cache — many engines ask the same keys every few seconds.
+    _ltp_cache: dict[str, tuple[float, float]] = {}  # key -> (price, mono_expiry)
+    _ltp_cache_ttl_sec: float = float(os.environ.get("AK07_LTP_CACHE_SEC", "20"))
     # Day open is static after auction — cache per instrument for the IST calendar day.
     _day_open_cache: dict[str, tuple[float, date]] = {}
     # After a failed day-OHLC fetch, wait before retrying (avoids 429 thrash every poll).
@@ -463,9 +466,10 @@ class UpstoxClient:
             response = self.session.get(url, params=params, timeout=15)
             if response.status_code == 429:
                 # Back off hard — hammering LTP/OHLC prevents option SL/TP/trail forever.
-                UpstoxClient._ltp_cooldown_until = time.monotonic() + 60.0
+                # 3 minutes: account quota often stays hot after gamma/multi-engine bursts.
+                UpstoxClient._ltp_cooldown_until = time.monotonic() + 180.0
                 logger.warning(
-                    "Upstox HTTP 429 on %s — cooling market-quote for 60s",
+                    "Upstox HTTP 429 on %s — cooling market-quote for 180s",
                     url.split("?")[0],
                 )
                 return None
@@ -482,13 +486,26 @@ class UpstoxClient:
             return None
 
     def get_ltp(self, instrument_key: str) -> float | None:
+        now = time.monotonic()
+        cached = UpstoxClient._ltp_cache.get(instrument_key)
+        if cached is not None and cached[1] > now:
+            return cached[0]
+
         data = self._get(f"{self.base_url}/market-quote/ltp", {"instrument_key": instrument_key})
         if not isinstance(data, dict):
+            # Serve stale cache during cool-down / 429 so option trail can still evaluate.
+            if cached is not None:
+                return cached[0]
             return None
         for row in data.values():
             ltp = row.get("last_price")
             if ltp is not None:
-                return float(ltp)
+                value = float(ltp)
+                ttl = max(5.0, UpstoxClient._ltp_cache_ttl_sec)
+                UpstoxClient._ltp_cache[instrument_key] = (value, now + ttl)
+                return value
+        if cached is not None:
+            return cached[0]
         return None
 
     def get_ohlc_quotes(self, instrument_keys: list[str]) -> dict[str, dict[str, float]]:
