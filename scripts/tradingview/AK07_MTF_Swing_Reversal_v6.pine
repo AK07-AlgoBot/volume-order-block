@@ -8,8 +8,10 @@
 //
 // FLOW:
 //   1) Collect HTF pivot H/L into a pool.
-//   2) Valid Swing H = closest UNtraded pivot HIGH still ABOVE price.
-//      Valid Swing L = closest UNtraded pivot LOW still BELOW price.
+//   2) Valid Swing H/L (default OUTER of nearest cluster):
+//        Find closest H above price, then take the TOP of pivots within "nearby" pts of it.
+//        Same for L: closest below, then BOTTOM of that nearby cluster.
+//        Inner: closest only (old). Absolute max/min of whole pool is NOT used.
 //   3) After entry on a swing, invalidate it and select the next valid level.
 //   4) Mode 1 / 2 / 3 entries vs active valid swings.
 //   5) Optional HTF sticky sentiment gate (Bullish until L break / Bearish until H break).
@@ -44,12 +46,12 @@ tfPreset = input.string(
      "TF pair",
      options=["Auto (from chart)", "Intraday · 30m → 5m", "Swing · Daily → 1H", "Position · Weekly → Daily"],
      group=GRP_TF,
-     tooltip="Auto picks swing TF from the chart:\n• ≤15m chart → 30m swings\n• 30m–240m chart → Daily swings\n• Daily/Weekly chart → Weekly swings\nOr force a pair manually (use matching chart TF).")
+     tooltip="Auto picks swing TF from the chart:\n• ≤30m chart → 30m swings\n• 60m–240m chart → Daily swings\n• Daily/Weekly chart → Weekly swings\nOr force a pair manually (use matching chart TF).")
 
 structTfManual = input.timeframe("30", "Manual swing TF (if override)", group=GRP_TF)
 useManualTf = input.bool(false, "Override with manual swing TF", group=GRP_TF)
-pivotLeft  = input.int(2, "Pivot left bars", minval=1, maxval=10, group=GRP_TF)
-pivotRight = input.int(2, "Pivot right bars", minval=1, maxval=10, group=GRP_TF)
+pivotLeft  = input.int(2, "Pivot left bars", minval=1, maxval=10, group=GRP_TF, tooltip="Swing needs this many candles on the LEFT lower (for H) / higher (for L).")
+pivotRight = input.int(2, "Pivot right bars", minval=1, maxval=10, group=GRP_TF, tooltip="Swing needs this many candles on the RIGHT to confirm. 2 = your two-candle rule.")
 showDayHL = input.bool(true, "Show session / day High-Low in panel", group=GRP_TF)
 
 useSentimentGate = input.bool(true, "Enable sentiment gate", group=GRP_SENT, tooltip="ON: only take reversals that match HTF sentiment.\n• Intraday (5m/30m) → Hourly sentiment\n• Swing (1H/Daily) → Weekly sentiment\n• Position (Daily/Weekly) → Monthly sentiment\nBullish HTF → BUY reversals only\nBearish HTF → SELL reversals only")
@@ -90,7 +92,7 @@ requireAboveMid = input.bool(true, "Long only if close > Mid · Short only if cl
 showSwings = input.bool(true, "Show active swing H/L (period only)", group=GRP_VIS)
 showArmedLevel = input.bool(true, "Show armed break level", group=GRP_VIS)
 showTradeBox = input.bool(true, "Trade R:R box", group=GRP_VIS)
-showSetupPreview = input.bool(true, "Preview SL/TP while setup armed", group=GRP_VIS, tooltip="Shows planned SL/TP box before entry fills (same R:R).")
+showSetupPreview = input.bool(false, "Preview SL/TP on confirmed reclaim only", group=GRP_VIS, tooltip="Shows planned SL/TP box before entry fills (same R:R).")
 showTradeLevels = input.bool(true, "Show SL / TP lines in trade", group=GRP_VIS)
 showLabels = input.bool(true, "BUY / SELL / EXIT labels", group=GRP_VIS)
 showSetupBg = input.bool(false, "Setup background tint", group=GRP_VIS)
@@ -100,8 +102,10 @@ colDiag = input.color(color.new(color.gray, 40), "Entry→exit diagonal", group=
 
 // Resolve swing TF from preset / chart
 bool isAuto = tfPreset == "Auto (from chart)"
-bool autoIntraday = timeframe.isintraday and timeframe.multiplier <= 15
-bool autoSwingDH = timeframe.isintraday and timeframe.multiplier >= 30
+// Intraday structure = 30m swings for BOTH the 5m entry chart AND the 30m chart,
+// so the panel/lines match whichever of the two you're viewing (mark on 30m → enter on 5m).
+bool autoIntraday = timeframe.isintraday and timeframe.multiplier <= 30
+bool autoSwingDH  = timeframe.isintraday and timeframe.multiplier > 30
 bool autoPosWD = timeframe.isdaily or timeframe.isweekly or timeframe.ismonthly
 
 bool isIntraday = isAuto ? autoIntraday : tfPreset == "Intraday · 30m → 5m"
@@ -120,10 +124,11 @@ string chartHint = "chart: " + timeframe.period
 string swingLabel = isIntraday ? "30m" : isSwingDH ? "Daily" : "Weekly"
 
 // =============================================================================
-// HTF swing pool — valid tradeable swings only:
-//   Swing H = closest UNtraded pivot HIGH still ABOVE price
-//   Swing L = closest UNtraded pivot LOW  still BELOW price
-// After an entry on a level, that swing is invalidated → next valid is selected.
+// HTF swing pool — simple rule:
+//   Swing HIGH = closest untraded pivot high still ABOVE price.
+//   Swing LOW  = closest untraded pivot low  still BELOW price.
+//   Pivots use pivotLeft/pivotRight (two-candle confirmation) on the structure TF.
+// After an entry on a level, that swing is marked used → next closest is selected.
 // =============================================================================
 htfPhFilled = request.security(
      syminfo.tickerid, structTf,
@@ -146,7 +151,7 @@ var array<float> phPool = array.new_float()
 var array<float> plPool = array.new_float()
 var array<float> usedHighs = array.new_float()
 var array<float> usedLows = array.new_float()
-int maxSwingPool = 40
+int maxSwingPool = 100
 
 f_near(_a, _b) =>
     not na(_a) and not na(_b) and math.abs(_a - _b) <= syminfo.mintick
@@ -162,14 +167,23 @@ f_in_array(_arr, _v) =>
 f_push_unique(_arr, _v, _max) =>
     if not na(_v) and not f_in_array(_arr, _v)
         array.push(_arr, _v)
-        if array.size(_arr) > _max
-            array.shift(_arr)
+        // Drop farthest-from-price levels first (keep nearby structure like 77816, not FIFO-old 78044).
+        while array.size(_arr) > _max
+            int worst = 0
+            float worstDist = math.abs(array.get(_arr, 0) - close)
+            if array.size(_arr) > 1
+                for i = 1 to array.size(_arr) - 1
+                    float d = math.abs(array.get(_arr, i) - close)
+                    if d > worstDist
+                        worstDist := d
+                        worst := i
+            array.remove(_arr, worst)
 
 f_mark_used(_used, _v) =>
     if not na(_v) and not f_in_array(_used, _v)
         array.push(_used, _v)
 
-// Closest pivot HIGH still above ref price (resistance)
+// Active Swing HIGH = CLOSEST untraded pivot high still ABOVE price.
 f_pick_valid_high(_ref) =>
     float best = na
     if array.size(phPool) > 0 and not na(_ref)
@@ -180,7 +194,7 @@ f_pick_valid_high(_ref) =>
                     best := v
     best
 
-// Closest pivot LOW still below ref price (support)
+// Active Swing LOW = CLOSEST untraded pivot low still BELOW price.
 f_pick_valid_low(_ref) =>
     float best = na
     if array.size(plPool) > 0 and not na(_ref)
@@ -413,7 +427,7 @@ if newPeriod
     entryBar := na
 
 // Lock session/period, then always resolve VALID swings vs current price:
-//   H must be above price · L must be below price · skip already-traded levels
+//   H above price · L below price · skip used · Outer/Inner pick mode
 bool swingHighShifted = false
 bool swingLowShifted = false
 if atLockTime and not levelsLocked
@@ -424,30 +438,21 @@ if levelsLocked
     float refPx = close
     float nextHigh = f_pick_valid_high(refPx)
     float nextLow = f_pick_valid_low(refPx)
+    // Rule (user): H is ALWAYS the closest untraded pivot high ABOVE price,
+    //              L is ALWAYS the closest untraded pivot low  BELOW price.
+    // The level simply follows price each bar — no sticky/cluster freeze.
+    // The arm→entry sequence is kept alive via breakLevel (captured below), not
+    // by pinning daySwingHigh/daySwingLow, so the panel & lines stay valid.
     if not f_near(daySwingHigh, nextHigh)
         if not na(daySwingHigh) or not na(nextHigh)
             swingHighShifted := true
         mode2ConsumedHigh := na
         daySwingHigh := nextHigh
-        if breakDir == 1
-            breakDir := 0
-            breakLevel := na
-            awaitingReversal := false
-            awaitingRetest := false
-            retestTouched := false
-            retestArmBar := na
     if not f_near(daySwingLow, nextLow)
         if not na(daySwingLow) or not na(nextLow)
             swingLowShifted := true
         mode2ConsumedLow := na
         daySwingLow := nextLow
-        if breakDir == -1
-            breakDir := 0
-            breakLevel := na
-            awaitingReversal := false
-            awaitingRetest := false
-            retestTouched := false
-            retestArmBar := na
 
 bool flat = posDir == 0
 bool haveHigh = levelsLocked and not na(daySwingHigh)
@@ -455,14 +460,23 @@ bool haveLow = levelsLocked and not na(daySwingLow)
 bool haveLevels = haveHigh and haveLow
 bool canTradeBase = flat and not dayStopped and tradesToday < maxTradesPerDay and inSess and not pastNoEntry and not atSquareOff
 bool canTrade = canTradeBase and haveLevels
-bool canTradeLong = canTradeBase and haveLow
-bool canTradeShort = canTradeBase and haveHigh
+// While sweeping active H (liquidity grab), only allow the SHORT reclaim — no BUY into resistance.
+// While sweeping active L, only allow the LONG reclaim — no SELL into support.
+bool sweepingHigh = haveHigh and high >= daySwingHigh
+bool sweepingLow = haveLow and low <= daySwingLow
+bool canTradeLong = canTradeBase and haveLow and not sweepingHigh and breakDir != 1
+bool canTradeShort = canTradeBase and haveHigh and not sweepingLow and breakDir != -1
 bool midOkLong = (not useMidFilter or not requireAboveMid or (not na(dayMid) and close > dayMid)) and sentOkLong
 bool midOkShort = (not useMidFilter or not requireAboveMid or (not na(dayMid) and close < dayMid)) and sentOkShort
 
-// Close-based break arm for Mode 1 only (confirmed chart bar)
-bool brokeHigh = haveHigh and close > daySwingHigh and close[1] <= daySwingHigh
-bool brokeLow  = haveLow and close < daySwingLow and close[1] >= daySwingLow
+// Close-based break arm for Mode 1 only (confirmed chart bar).
+// daySwingHigh/daySwingLow now follow price every bar, so on the bar that closes
+// through the swing the level has already stepped to the next pivot. Detect the
+// break against the PREVIOUS bar's level so the swept swing is captured correctly.
+float refBreakHigh = daySwingHigh[1]
+float refBreakLow  = daySwingLow[1]
+bool brokeHigh = levelsLocked and not na(refBreakHigh) and close > refBreakHigh and close[1] <= refBreakHigh
+bool brokeLow  = levelsLocked and not na(refBreakLow)  and close < refBreakLow  and close[1] >= refBreakLow
 
 bool isMode2 = entryMode == "2 — Reversal (on cross)"
 bool isMode3 = entryMode == "3 — Retest"
@@ -487,14 +501,14 @@ if useSentimentGate and breakDir == -1 and not sentOkLong
 if breakDir == 0 and barstate.isconfirmed and entryMode == "1 — Reversal"
     if brokeHigh and sentOkShort
         breakDir := 1
-        breakLevel := daySwingHigh
+        breakLevel := refBreakHigh
         breakCandleHigh := high
         breakCandleLow := low
         awaitingReversal := true
         retestTouched := false
     else if brokeLow and sentOkLong
         breakDir := -1
-        breakLevel := daySwingLow
+        breakLevel := refBreakLow
         breakCandleHigh := high
         breakCandleLow := low
         awaitingReversal := true
@@ -528,25 +542,9 @@ bool shortSignal = false
 float signalSl = na
 float signalEntry = na
 
-// Mode 1 — reversal on confirmed close → ENTER
-bool mode1BuyCross = entryMode == "1 — Reversal" and haveLow and close[1] < daySwingLow and close > daySwingLow
-bool mode1SellCross = entryMode == "1 — Reversal" and haveHigh and close[1] > daySwingHigh and close < daySwingHigh
-
-if barstate.isconfirmed
-    if canTradeLong and mode1BuyCross and midOkLong
-        longSignal := true
-        signalSl := low[1] - slBuffer
-        breakDir := 0
-        breakLevel := na
-        awaitingReversal := false
-    if canTradeShort and mode1SellCross and midOkShort
-        shortSignal := true
-        signalSl := high[1] + slBuffer
-        breakDir := 0
-        breakLevel := na
-        awaitingReversal := false
-
-if breakDir != 0 and not na(breakLevel) and not longSignal and not shortSignal and barstate.isconfirmed
+// Mode 1 — ENTER only after sweep ARM then reclaim (no naked L/H cross buys).
+// Naked close-cross entries were firing BUY on tiny mid-drop pivots with no real swing low.
+if breakDir != 0 and not na(breakLevel) and barstate.isconfirmed
     if entryMode == "1 — Reversal" and awaitingReversal
         if breakDir == 1 and canTradeShort and close < breakLevel and close[1] >= breakLevel and midOkShort
             shortSignal := true
@@ -597,8 +595,9 @@ if isMode3 and awaitingRetest and breakDir != 0 and not na(breakLevel) and not n
 // Mode 2 — same REVERSAL as Mode 1, but enter on the CROSS (no candle-close wait)
 bool mode2SellCross = haveHigh and close[1] > daySwingHigh and low <= daySwingHigh
 bool mode2BuyCross  = haveLow and close[1] < daySwingLow and high >= daySwingLow
-if isMode2 and not longSignal and not shortSignal
-    if canTradeLong and mode2BuyCross and midOkLong and not f_in_array(usedLows, daySwingLow)
+// Mode 2 — same reclaim as Mode 1 but still requires CONFIRMED close through the swing (no mid-candle fill).
+if isMode2 and not longSignal and not shortSignal and barstate.isconfirmed
+    if canTradeLong and mode2BuyCross and midOkLong and not f_in_array(usedLows, daySwingLow) and close > daySwingLow
         longSignal := true
         signalEntry := daySwingLow
         signalSl := math.min(low[1], low) - slBuffer
@@ -606,7 +605,7 @@ if isMode2 and not longSignal and not shortSignal
         breakDir := 0
         breakLevel := na
         awaitingReversal := false
-    if canTradeShort and mode2SellCross and midOkShort and not f_in_array(usedHighs, daySwingHigh)
+    if canTradeShort and mode2SellCross and midOkShort and not f_in_array(usedHighs, daySwingHigh) and close < daySwingHigh
         shortSignal := true
         signalEntry := daySwingHigh
         signalSl := math.max(high[1], high) + slBuffer
@@ -615,7 +614,7 @@ if isMode2 and not longSignal and not shortSignal
         breakLevel := na
         awaitingReversal := false
     if not longSignal and not shortSignal and awaitingReversal and breakDir != 0 and not na(breakLevel)
-        if breakDir == 1 and canTradeShort and low <= breakLevel and midOkShort and not f_in_array(usedHighs, breakLevel)
+        if breakDir == 1 and canTradeShort and close < breakLevel and close[1] >= breakLevel and midOkShort and not f_in_array(usedHighs, breakLevel)
             shortSignal := true
             signalEntry := breakLevel
             signalSl := breakCandleHigh + slBuffer
@@ -623,7 +622,7 @@ if isMode2 and not longSignal and not shortSignal
             breakDir := 0
             breakLevel := na
             awaitingReversal := false
-        if breakDir == -1 and canTradeLong and high >= breakLevel and midOkLong and not f_in_array(usedLows, breakLevel)
+        if breakDir == -1 and canTradeLong and close > breakLevel and close[1] <= breakLevel and midOkLong and not f_in_array(usedLows, breakLevel)
             longSignal := true
             signalEntry := breakLevel
             signalSl := breakCandleLow - slBuffer
@@ -764,9 +763,10 @@ if atSquareOff and posDir != 0 and not exitPlaced
         array.push(dayLabels, label.new(bar_index, close, "EXIT EOD", style=label.style_label_center, color=color.new(color.gray, 10), textcolor=color.white, size=size.small))
 
 flat := posDir == 0
-canTradeLong := flat and haveLow and not dayStopped and tradesToday < maxTradesPerDay and inSess and not pastNoEntry and not atSquareOff
-canTradeShort := flat and haveHigh and not dayStopped and tradesToday < maxTradesPerDay and inSess and not pastNoEntry and not atSquareOff
-canTrade := canTradeLong and canTradeShort
+// Keep sweep guards — do not widen canTrade* again here (was allowing BUY into active H).
+canTradeLong := flat and haveLow and not dayStopped and tradesToday < maxTradesPerDay and inSess and not pastNoEntry and not atSquareOff and not sweepingHigh and breakDir != 1
+canTradeShort := flat and haveHigh and not dayStopped and tradesToday < maxTradesPerDay and inSess and not pastNoEntry and not atSquareOff and not sweepingLow and breakDir != -1
+canTrade := canTradeLong or canTradeShort
 
 if longSignal and canTradeLong and not na(signalSl) and not exitPlaced
     float fillPx = na(signalEntry) ? close : signalEntry
@@ -847,7 +847,10 @@ if showTradeBox and not flat and not na(bxRisk)
         box.set_right(bxReward, bar_index)
 
 // Preview SL/TP while a setup is armed (before fill) — same R:R as live trade
-bool showPrev = showSetupPreview and flat and breakDir != 0 and not na(breakLevel) and not na(breakCandleHigh) and not na(breakCandleLow)
+// Preview only once reclaim close is CONFIRMED (no boxes while candle still above swing H).
+bool reclaimShortPrev = breakDir == 1 and close < breakLevel and close[1] >= breakLevel
+bool reclaimLongPrev = breakDir == -1 and close > breakLevel and close[1] <= breakLevel
+bool showPrev = showSetupPreview and flat and barstate.isconfirmed and awaitingReversal and breakDir != 0 and not na(breakLevel) and not na(breakCandleHigh) and not na(breakCandleLow) and (reclaimShortPrev or reclaimLongPrev)
 if showPrev
     float prevEntry = breakLevel
     float prevSl = breakDir == 1 ? breakCandleHigh + slBuffer : breakCandleLow - slBuffer
@@ -908,22 +911,22 @@ else
 // =============================================================================
 // Period-only lines — swing H/L step to each new HTF pivot
 // =============================================================================
+// ONE clean line per side. It tracks the current closest-above H / closest-below L
+// and simply jumps to the new level when the swing steps (no leftover stubs).
 if levelsLocked and showSwings and not na(daySwingHigh)
-    if swingHighShifted and not na(lnHigh)
-        array.push(daySwingSegs, lnHigh)
-        lnHigh := na
     if na(lnHigh)
         lnHigh := line.new(bar_index, daySwingHigh, bar_index, daySwingHigh, color=color.red, width=2, style=line.style_solid, extend=extend.none)
     else
+        if swingHighShifted
+            line.set_xy1(lnHigh, bar_index, daySwingHigh)
         line.set_xy2(lnHigh, bar_index, daySwingHigh)
 
 if levelsLocked and showSwings and not na(daySwingLow)
-    if swingLowShifted and not na(lnLow)
-        array.push(daySwingSegs, lnLow)
-        lnLow := na
     if na(lnLow)
         lnLow := line.new(bar_index, daySwingLow, bar_index, daySwingLow, color=color.teal, width=2, style=line.style_solid, extend=extend.none)
     else
+        if swingLowShifted
+            line.set_xy1(lnLow, bar_index, daySwingLow)
         line.set_xy2(lnLow, bar_index, daySwingLow)
 
 if showArmedLevel and breakDir != 0 and not na(breakLevel)
@@ -975,7 +978,7 @@ color setupCol = breakDir == 0 ? #e0e0e0 : (breakDir == 1 ? #ff8a80 : #69f0ae)
 var table info = table.new(position.top_right, 1, 8, bgcolor=color.new(#1a1a1a, 15), border_width=1, border_color=color.new(color.gray, 50))
 if barstate.islast
     table.cell(info, 0, 0, "Sentiment: " + panelSent, text_color=panelCol, text_size=size.normal)
-    table.cell(info, 0, 1, pairTxt + " · " + chartHint, text_color=color.white, text_size=size.tiny)
+    table.cell(info, 0, 1, pairTxt + " · " + chartHint + " · H>price / L<price", text_color=color.white, text_size=size.tiny)
     table.cell(info, 0, 2, "Mode: " + entryMode, text_color=color.white, text_size=size.small)
     table.cell(info, 0, 3, swingLabel + " H/L " + (na(daySwingHigh) ? "—" : str.tostring(daySwingHigh, format.mintick)) + "/" + (na(daySwingLow) ? "—" : str.tostring(daySwingLow, format.mintick)), text_color=#e0e0e0, text_size=size.small)
     if showDayHL
@@ -985,9 +988,7 @@ if barstate.islast
     string posTxt = posDir == 1 ? "LONG" : posDir == -1 ? "SHORT" : "FLAT"
     table.cell(info, 0, 5, "Pos: " + posTxt, text_color=#4dd0e1, text_size=size.small)
     table.cell(info, 0, 6, "Trades: " + str.tostring(tradesToday) + (dayStopped ? " STOP" : "") + (levelsLocked ? "" : " · waiting open"), text_color=#ffd54f, text_size=size.small)
-    string arm = breakDir == 0 ? "Idle · Neutral" : (breakDir == 1 ? "SELL setup @ " : "BUY setup @ ") + str.tostring(breakLevel, format.mintick)
-    if breakDir != 0 and not flat
-        arm := "In trade"
+    string arm = not flat and breakDir != 0 ? "In trade" : breakDir == 1 and not na(breakLevel) ? (close < breakLevel ? "SELL ready @ " : "WAIT close below @ ") + str.tostring(breakLevel, format.mintick) : breakDir == -1 and not na(breakLevel) ? (close > breakLevel ? "BUY ready @ " : "WAIT close above @ ") + str.tostring(breakLevel, format.mintick) : "Idle · Neutral"
     table.cell(info, 0, 7, arm, text_color=setupCol, text_size=size.small)
 
 alertcondition(buyPlaced, title="BUY", message="AK07: BUY")

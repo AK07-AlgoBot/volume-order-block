@@ -458,6 +458,45 @@ class UpstoxClient:
     # After a failed day-OHLC fetch, wait before retrying (avoids 429 thrash every poll).
     _day_open_retry_after: dict[str, float] = {}
 
+    # --- Live WebSocket feed (V3) --------------------------------------------
+    # When enabled, a single WS connection streams ltpc ticks straight into
+    # _ltp_cache, so get_ltp() serves live ticks and REST market-quote polling
+    # (the 429 source) is only used as fallback. Kill switch: AK07_WS_FEED=0.
+    _ws_feed_enabled: bool = os.environ.get("AK07_WS_FEED", "1").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+        "off",
+    )
+    # How long a streamed tick stays valid in the cache. Kept short so that if the
+    # socket dies, entries expire quickly and get_ltp resumes REST within seconds.
+    _ws_feed_tick_ttl: float = float(os.environ.get("AK07_WS_FEED_TICK_TTL", "10"))
+
+    def _feed_cache_put(self, instrument_key: str, ltp: float) -> None:
+        """Called from the feed thread on every tick — refresh the LTP cache."""
+        UpstoxClient._ltp_cache[instrument_key] = (
+            float(ltp),
+            time.monotonic() + UpstoxClient._ws_feed_tick_ttl,
+        )
+
+    def _ensure_feed(self, instrument_key: str) -> None:
+        """Lazily start the WS feed and subscribe this key (best-effort, never raises)."""
+        if not UpstoxClient._ws_feed_enabled:
+            return
+        try:
+            from app.services.upstox_feed import UpstoxMarketFeed  # noqa: PLC0415
+
+            feed = UpstoxMarketFeed.get(
+                token_provider=lambda: self.session.headers.get("Authorization", "")
+                .replace("Bearer ", "")
+                .strip(),
+                cache_writer=self._feed_cache_put,
+            )
+            feed.ensure_started()
+            feed.want(instrument_key)
+        except Exception:  # noqa: BLE001 - feed must never break REST price retrieval
+            pass
+
     def _get(self, url: str, params: dict[str, Any] | None = None) -> dict[str, Any] | None:
         now = time.monotonic()
         if now < UpstoxClient._ltp_cooldown_until and "market-quote" in url:
@@ -490,6 +529,10 @@ class UpstoxClient:
         cached = UpstoxClient._ltp_cache.get(instrument_key)
         if cached is not None and cached[1] > now:
             return cached[0]
+
+        # Ensure the live WS feed is streaming this key so subsequent reads are
+        # served from ticks (no REST). First call still uses REST below.
+        self._ensure_feed(instrument_key)
 
         data = self._get(f"{self.base_url}/market-quote/ltp", {"instrument_key": instrument_key})
         if not isinstance(data, dict):
