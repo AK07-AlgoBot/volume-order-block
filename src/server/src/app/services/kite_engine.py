@@ -309,8 +309,9 @@ class KiteClient:
         direction: str,
         *,
         itm_offset: float = 50.0,
+        force_strike: int | None = None,
     ) -> dict[str, Any] | None:
-        """Mild-ITM CE (LONG) or PE (SHORT) — 1-step ITM preferred so premium tracks spot."""
+        """Mild-ITM CE (LONG) or PE (SHORT). ``force_strike`` locks S3 to the shared Upstox pick."""
         from app.services.options_greeks import preferred_itm_strikes
 
         code = index_code.upper()
@@ -339,15 +340,27 @@ class KiteClient:
                 by_strike[strike] = row
 
         best: dict[str, str] | None = None
-        for strike in preferred:
-            if strike in by_strike:
-                best = by_strike[strike]
-                break
-        if not best:
-            if not by_strike:
-                return None
-            strike_i = min(by_strike.keys(), key=lambda s: abs(s - atm))
-            best = by_strike[strike_i]
+        selection = "itm_first_spot_aligned"
+        if force_strike and int(force_strike) in by_strike:
+            best = by_strike[int(force_strike)]
+            selection = "shared_s3_strike"
+        else:
+            if force_strike:
+                logger.warning(
+                    "[%s] Kite missing forced strike %s%s — falling back to ITM-first",
+                    self.username,
+                    force_strike,
+                    opt,
+                )
+            for strike in preferred:
+                if strike in by_strike:
+                    best = by_strike[strike]
+                    break
+            if not best:
+                if not by_strike:
+                    return None
+                strike_i = min(by_strike.keys(), key=lambda s: abs(s - atm))
+                best = by_strike[strike_i]
 
         strike_i = int(float(best.get("strike_price") or 0))
         exchange = best["exchange"]
@@ -361,11 +374,12 @@ class KiteClient:
         except Exception:
             pass
         logger.info(
-            "[%s] Kite option pick %s %s%d ITM-first ≈ATM %d (spot=%.2f delta≈%s)",
+            "[%s] Kite option pick %s %s%d %s ≈ATM %d (spot=%.2f delta≈%s)",
             self.username,
             direction,
             opt,
             strike_i,
+            selection,
             atm,
             spot,
             f"{abs(delta):.2f}" if delta is not None else "?",
@@ -380,7 +394,7 @@ class KiteClient:
             "strike": strike_i,
             "option_type": opt,
             "delta": delta,
-            "selection": "itm_first_spot_aligned",
+            "selection": selection,
         }
 
     def place_market_order(

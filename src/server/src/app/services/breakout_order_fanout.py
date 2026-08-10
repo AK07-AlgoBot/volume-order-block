@@ -106,6 +106,29 @@ def place_s3_entries(
     side = _entry_side(direction, options=options)
     legs: list[dict[str, Any]] = []
 
+    # One shared strike for ALL brokers (Upstox delta pick). Prevents Kite/Groww
+    # ITM-first from choosing a different strike so trail/SL sees one premium path.
+    shared_strike: int | None = None
+    shared_opt: str | None = None
+    shared_upstox_contract: dict[str, Any] | None = None
+    if options and upstox_market_client is not None:
+        from app.services.upstox_engine import INDEX_CONFIGS
+
+        cfg = INDEX_CONFIGS.get(index_code.upper())
+        if cfg:
+            shared_upstox_contract = upstox_market_client.get_itm_option_contract(
+                cfg.spot_instrument_key, float(spot), direction
+            )
+            if shared_upstox_contract:
+                shared_strike = int(shared_upstox_contract.get("strike") or 0) or None
+                shared_opt = str(shared_upstox_contract.get("option_type") or "") or None
+                logger.info(
+                    "S3 shared option strike %s%s (selection=%s) — all brokers must use this",
+                    shared_strike,
+                    shared_opt,
+                    shared_upstox_contract.get("selection"),
+                )
+
     for trader in list_live_s3_traders():
         if only_usernames and trader.username not in only_usernames:
             continue
@@ -117,7 +140,9 @@ def place_s3_entries(
                 logger.error("[%s] S3 entry skipped — no Groww token", trader.username)
                 continue
             if options:
-                contract = groww.get_itm_option_contract(index_code, float(spot), direction)
+                contract = groww.get_itm_option_contract(
+                    index_code, float(spot), direction, force_strike=shared_strike
+                )
             else:
                 contract = groww.get_index_future_contract(index_code)
             if not contract:
@@ -165,6 +190,7 @@ def place_s3_entries(
                     "option_strike": int(contract.get("strike") or 0),
                     "option_type": str(contract.get("option_type") or ""),
                     "premium_entry": float(premium) if premium is not None else None,
+                    "selection": contract.get("selection"),
                 }
             )
             logger.info(
@@ -184,7 +210,9 @@ def place_s3_entries(
                 logger.error("[%s] S3 entry skipped — no Kite token", trader.username)
                 continue
             if options:
-                contract = kite.get_itm_option_contract(index_code, float(spot), direction)
+                contract = kite.get_itm_option_contract(
+                    index_code, float(spot), direction, force_strike=shared_strike
+                )
             else:
                 contract = kite.get_index_future_contract(index_code)
             if not contract:
@@ -228,6 +256,7 @@ def place_s3_entries(
                     "option_strike": int(contract.get("strike") or 0),
                     "option_type": str(contract.get("option_type") or ""),
                     "premium_entry": float(premium) if premium is not None else None,
+                    "selection": contract.get("selection"),
                 }
             )
             logger.info(
@@ -252,7 +281,9 @@ def place_s3_entries(
                     logger.error("[%s] S3 entry skipped — unknown index %s", trader.username, index_code)
                     continue
                 client = upstox_market_client or upstox
-                contract = client.get_itm_option_contract(cfg.spot_instrument_key, float(spot), direction)
+                contract = shared_upstox_contract or client.get_itm_option_contract(
+                    cfg.spot_instrument_key, float(spot), direction
+                )
                 if not contract or not contract.get("instrument_key"):
                     logger.error("[%s] S3 entry skipped — no Upstox %s ITM option", trader.username, index_code)
                     continue
@@ -277,7 +308,7 @@ def place_s3_entries(
                         "premium_entry": float(premium) if premium is not None else None,
                         "delta": contract.get("delta"),
                         "abs_delta": contract.get("abs_delta"),
-                        "selection": contract.get("selection"),
+                        "selection": contract.get("selection") or "shared_s3_strike",
                     }
                 )
                 logger.info(

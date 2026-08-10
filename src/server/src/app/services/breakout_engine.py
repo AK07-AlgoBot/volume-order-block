@@ -1847,7 +1847,8 @@ class BreakoutEngine:
             logger.error("[%s] breakout entry aborted — no broker orders placed", state.config.code)
             return
 
-        primary = legs[0]
+        # Prefer an Upstox leg as primary so instrument_key/premium path is shared-strike LTP.
+        primary = next((leg for leg in legs if leg.get("broker") == "upstox"), legs[0])
         contract_label = str(
             primary.get("contract_label")
             or (contract or {}).get("contract_label")
@@ -1858,14 +1859,22 @@ class BreakoutEngine:
         option_type = str(primary.get("option_type") or "")
         premium_entry: float | None = None
         if uses_options:
+            # Prefer Upstox entry premium (canonical); else max across legs.
+            upstox_prems = [
+                float(leg["premium_entry"])
+                for leg in legs
+                if leg.get("broker") == "upstox" and leg.get("premium_entry") is not None
+            ]
             premiums = [
                 float(leg["premium_entry"])
                 for leg in legs
                 if leg.get("premium_entry") is not None
             ]
-            if premiums:
-                premium_entry = sum(premiums) / len(premiums)
-            elif primary_key and self.client._upstox and not primary_key.startswith("groww:"):
+            if upstox_prems:
+                premium_entry = max(upstox_prems)
+            elif premiums:
+                premium_entry = max(premiums)
+            elif primary_key and self.client._upstox and not primary_key.startswith(("groww:", "kite:")):
                 premium_entry = self.client._upstox.get_ltp(primary_key)
             if premium_entry is not None and premium_entry > 0:
                 # Options: TP/SL on premium; spot SL from trade_levels is replaced.
@@ -1985,27 +1994,51 @@ class BreakoutEngine:
         self._save_session_state(state)
 
     def _option_premium_ltp(self, pos: BreakoutPosition) -> float | None:
-        """Live option LTP from Upstox (primary) or Groww leg symbol."""
+        """Best live option LTP across legs (max) so trail/SL can fire if any quote moved.
+
+        Prefers Upstox quotes for the shared strike; also samples Groww/Kite when available
+        so a silent Upstox feed cannot leave Kite/Groww unprotected after +10.
+        """
+        quotes: list[float] = []
+
+        def _add(val: float | None) -> None:
+            if val is not None and val > 0:
+                quotes.append(float(val))
+
         key = pos.instrument_key
-        if key and not key.startswith("groww:") and self.client._upstox:
-            ltp = self.client._upstox.get_ltp(key)
-            if ltp is not None:
-                return float(ltp)
+        if key and not key.startswith(("groww:", "kite:")) and self.client._upstox:
+            _add(self.client._upstox.get_ltp(key))
         for leg in pos.order_legs or []:
             if not isinstance(leg, dict):
                 continue
-            if leg.get("broker") == "groww" and leg.get("trading_symbol"):
-                from app.services.groww_engine import GrowwClient
+            broker = str(leg.get("broker") or "")
+            if broker == "upstox" or (not broker and leg.get("instrument_key")):
+                ik = str(leg.get("instrument_key") or "")
+                if ik and not ik.startswith(("groww:", "kite:")) and self.client._upstox:
+                    _add(self.client._upstox.get_ltp(ik))
+            if broker == "groww" and leg.get("trading_symbol"):
+                try:
+                    from app.services.groww_engine import GrowwClient
 
-                groww = GrowwClient(str(leg.get("username") or "Nani"))
-                ltp = groww.get_fno_ltp(str(leg["trading_symbol"]))
-                if ltp is not None:
-                    return float(ltp)
-            ik = str(leg.get("instrument_key") or "")
-            if ik and not ik.startswith("groww:") and self.client._upstox:
-                ltp = self.client._upstox.get_ltp(ik)
-                if ltp is not None:
-                    return float(ltp)
+                    groww = GrowwClient(str(leg.get("username") or "Nani"))
+                    _add(groww.get_fno_ltp(str(leg["trading_symbol"])))
+                except Exception:
+                    pass
+            if broker == "kite" and leg.get("trading_symbol"):
+                try:
+                    from app.services.kite_engine import KiteClient
+
+                    kite = KiteClient(str(leg.get("username") or "Arun"))
+                    _add(
+                        kite.get_fno_ltp(
+                            str(leg.get("exchange") or "NFO"),
+                            str(leg["trading_symbol"]),
+                        )
+                    )
+                except Exception:
+                    pass
+        if quotes:
+            return max(quotes)
         return None
 
     def _manage_position(
