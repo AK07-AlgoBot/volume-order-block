@@ -69,17 +69,46 @@ def main() -> int:
     elif isinstance(pos_session, dict):
         direction = str(pos_session.get("direction") or "")
 
+    pos_for_entered = pos_state if isinstance(pos_state, dict) else pos_session
+    entered = []
+    if isinstance(pos_for_entered, dict):
+        entered = [
+            str(u).strip()
+            for u in (pos_for_entered.get("fanout_entered_usernames") or [])
+            if str(u).strip()
+        ]
+    # Legacy: absorb PARTIAL_EXIT names from session signal_log.
+    signals = session.get("signal_log") if isinstance(session, dict) else None
+    if isinstance(signals, list):
+        for line in signals:
+            text = str(line)
+            if "PARTIAL_EXIT others=" not in text:
+                continue
+            try:
+                part = text.split("PARTIAL_EXIT others=", 1)[1]
+                others = part.split(" keep=", 1)[0]
+                for name in others.split(","):
+                    n = name.strip()
+                    if n and n not in entered:
+                        entered.append(n)
+            except IndexError:
+                pass
+
     missing = missing_s3_traders(
         legs if isinstance(legs, list) else [],
         assume_upstox_filled=not legs,
         index_code=index_code,
         direction=direction or None,
+        exclude_usernames=frozenset(entered),
     )
     print(f"\n--- fan-out ---")
     print(f"  legs: {[leg.get('username') for leg in legs if isinstance(leg, dict)]}")
+    print(f"  already_entered: {entered or '-'}")
     print(f"  missing traders: {[f'{t.username}@{t.broker}' for t in missing]}")
 
-    signals = session.get("signal_log") or raw.get("signals") or []
+    signals = (session.get("signal_log") if isinstance(session, dict) else None) or (
+        raw.get("signals") if isinstance(raw, dict) else None
+    ) or []
     if signals:
         print("\n--- recent signals ---")
         for line in signals[-5:]:
@@ -101,6 +130,9 @@ def _print_position(pos: dict) -> None:
     print(f"  entry_price: {pos.get('entry_price')}")
     print(f"  sl: {pos.get('sl_price')}  tp1: {pos.get('tp1_price')}")
     print(f"  contract: {pos.get('contract_label')}")
+    entered = pos.get("fanout_entered_usernames") or []
+    if entered:
+        print(f"  fanout_entered: {entered}")
     legs = pos.get("order_legs") or []
     if legs:
         print(f"  order_legs: {json.dumps(legs, indent=4)}")

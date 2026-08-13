@@ -417,16 +417,29 @@ def missing_s3_traders(
     direction: str | None = None,
     lot_size: int = 65,
     lots: int = 1,
+    exclude_usernames: frozenset[str] | set[str] | None = None,
 ) -> list[S3Trader]:
-    """Live traders who did not get an entry leg yet."""
+    """Live traders who did not get an entry leg yet.
+
+    ``exclude_usernames`` — already entered this position (even if leg was later
+    removed). Prevents catch-up from re-buying after a partial kill.
+    """
     covered = {str(leg.get("username") or "") for leg in existing_legs if leg.get("username")}
+    if exclude_usernames:
+        for name in exclude_usernames:
+            n = str(name or "").strip()
+            if n:
+                covered.add(n)
+    # Case-insensitive cover check
+    covered_l = {c.lower() for c in covered if c}
     if assume_upstox_filled and not covered:
         for trader in list_live_s3_traders():
             if trader.broker == "upstox":
                 covered.add(trader.username)
+                covered_l.add(trader.username.lower())
     if index_code and direction and not s3_uses_options():
         for trader in list_live_s3_traders():
-            if trader.username in covered or trader.broker not in ("groww", "kite"):
+            if trader.username in covered or trader.username.lower() in covered_l:
                 continue
             trader_lots = max(1, int(trader.lots or lots or 1))
             if trader.broker == "groww":
@@ -445,6 +458,7 @@ def missing_s3_traders(
                         need,
                     )
                     covered.add(trader.username)
+                    covered_l.add(trader.username.lower())
                 continue
             kite = KiteClient(trader.username)
             contract = kite.get_index_future_contract(index_code)
@@ -462,7 +476,12 @@ def missing_s3_traders(
                     sym,
                 )
                 covered.add(trader.username)
-    return [t for t in list_live_s3_traders() if t.username not in covered]
+                covered_l.add(trader.username.lower())
+    return [
+        t
+        for t in list_live_s3_traders()
+        if t.username not in covered and t.username.lower() not in covered_l
+    ]
 
 
 def catchup_s3_legs(
@@ -475,6 +494,7 @@ def catchup_s3_legs(
     upstox_market_client: UpstoxClient | None,
     global_paper: bool,
     spot: float | None = None,
+    exclude_usernames: frozenset[str] | set[str] | None = None,
 ) -> list[dict[str, Any]]:
     """Place entries for live traders missing from an open position's legs."""
     missing = missing_s3_traders(
@@ -484,6 +504,7 @@ def catchup_s3_legs(
         direction=direction,
         lot_size=lot_size,
         lots=lots,
+        exclude_usernames=exclude_usernames,
     )
     if not missing:
         return []

@@ -252,6 +252,9 @@ class BreakoutPosition:
     premium_entry: float | None = None  # option LTP at entry (options mode)
     premium_last: float | None = None  # last observed option LTP (tick-to-tick)
     premium_high: float | None = None  # peak premium since entry (favorable excursion)
+    # Usernames that already received an S3 entry for THIS position (survives leg removal).
+    # Catch-up must never re-buy these — fixes partial-kill → auto re-entry.
+    fanout_entered_usernames: list[str] = field(default_factory=list)
 
     @property
     def quantity(self) -> int:
@@ -301,6 +304,52 @@ class IndexBreakoutState:
     cached_candles: list[dict[str, float]] = field(default_factory=list)
 
 
+def _usernames_from_legs(legs: list[dict[str, Any]] | None) -> list[str]:
+    names: list[str] = []
+    seen: set[str] = set()
+    for leg in legs or []:
+        if not isinstance(leg, dict):
+            continue
+        user = str(leg.get("username") or "").strip()
+        if not user or user in seen:
+            continue
+        seen.add(user)
+        names.append(user)
+    return names
+
+
+def _merge_fanout_entered(pos: BreakoutPosition, legs: list[dict[str, Any]] | None) -> None:
+    """Record everyone who got an entry leg so catch-up cannot re-buy them later."""
+    merged = list(pos.fanout_entered_usernames or [])
+    seen = {u.lower() for u in merged}
+    for user in _usernames_from_legs(legs):
+        if user.lower() in seen:
+            continue
+        merged.append(user)
+        seen.add(user.lower())
+    pos.fanout_entered_usernames = merged
+
+
+def _absorb_partial_exit_entered(
+    pos: BreakoutPosition,
+    signal_log: list[str] | None,
+) -> None:
+    """Merge intentional partial-kill names from signal_log into fanout_entered."""
+    for line in signal_log or []:
+        text = str(line)
+        if "PARTIAL_EXIT others=" not in text:
+            continue
+        try:
+            part = text.split("PARTIAL_EXIT others=", 1)[1]
+            others = part.split(" keep=", 1)[0]
+            extra = [n.strip() for n in others.split(",") if n.strip()]
+        except IndexError:
+            extra = []
+        if extra:
+            _merge_fanout_entered(pos, [{"username": n} for n in extra])
+    _merge_fanout_entered(pos, pos.order_legs)
+
+
 def _position_to_dict(pos: BreakoutPosition) -> dict[str, Any]:
     return {
         "direction": pos.direction,
@@ -321,6 +370,7 @@ def _position_to_dict(pos: BreakoutPosition) -> dict[str, Any]:
         "premium_last": pos.premium_last,
         "premium_high": pos.premium_high,
         "exit_pending": pos.exit_pending,
+        "fanout_entered_usernames": list(pos.fanout_entered_usernames or []),
     }
 
 
@@ -359,6 +409,12 @@ def _position_from_dict(raw: dict[str, Any]) -> BreakoutPosition | None:
         high_raw = raw.get("premium_high")
         premium_high = float(high_raw) if high_raw is not None else None
         kind = str(raw.get("instrument_kind") or ("options" if option_type else "futures"))
+        entered_raw = raw.get("fanout_entered_usernames")
+        if isinstance(entered_raw, list) and entered_raw:
+            fanout_entered = [str(u).strip() for u in entered_raw if str(u).strip()]
+        else:
+            # Legacy sessions: at least treat current legs as already entered.
+            fanout_entered = _usernames_from_legs(order_legs)
         return BreakoutPosition(
             direction=direction,
             entry_price=entry,
@@ -378,6 +434,7 @@ def _position_from_dict(raw: dict[str, Any]) -> BreakoutPosition | None:
             premium_entry=premium_entry,
             premium_last=premium_last,
             premium_high=premium_high,
+            fanout_entered_usernames=fanout_entered,
         )
     except (KeyError, TypeError, ValueError):
         return None
@@ -1542,19 +1599,21 @@ class BreakoutEngine:
         if isinstance(pos_raw, dict):
             pos = _position_from_dict(pos_raw)
             if pos is not None:
+                _absorb_partial_exit_entered(pos, state.signal_log)
                 state.position = pos
                 state.setup_label = (
                     f"{pos.direction} open — restored "
                     f"{pos.display_contract} @ spot {pos.entry_price:.2f}"
                 )
                 logger.info(
-                    "[%s] restored breakout position %s %s @ %.2f (SL %.2f TP1 %.2f)",
+                    "[%s] restored breakout position %s %s @ %.2f (SL %.2f TP1 %.2f) entered=%s",
                     state.config.code,
                     pos.direction,
                     pos.display_contract,
                     pos.entry_price,
                     pos.sl_price,
                     pos.tp1_price,
+                    ",".join(pos.fanout_entered_usernames) or "-",
                 )
         if state.trades_today or state.position:
             logger.info(
@@ -1579,23 +1638,26 @@ class BreakoutEngine:
         if pos is None:
             logger.error("[%s] session has position blob but parse failed — check Redis", state.config.code)
             return False
-        state.position = pos
         state.trades_today = max(state.trades_today, int(raw.get("trades_today") or 0))
         logs = raw.get("signal_log")
         if isinstance(logs, list) and logs:
             state.signal_log = [str(line) for line in logs[-20:]]
+        _absorb_partial_exit_entered(pos, state.signal_log)
+        state.position = pos
         state.setup_label = (
             f"{pos.direction} open — reconciled from session "
             f"{pos.display_contract} @ {pos.entry_price:.2f}"
         )
         logger.warning(
-            "[%s] reconciled open position from session (engine was flat): %s %s @ %.2f SL %.2f TP1 %.2f",
+            "[%s] reconciled open position from session (engine was flat): %s %s @ %.2f "
+            "SL %.2f TP1 %.2f entered=%s",
             state.config.code,
             pos.direction,
             pos.display_contract,
             pos.entry_price,
             pos.sl_price,
             pos.tp1_price,
+            ",".join(pos.fanout_entered_usernames) or "-",
         )
         return True
 
@@ -1906,6 +1968,7 @@ class BreakoutEngine:
             premium_entry=premium_entry,
             premium_last=premium_entry,
             premium_high=premium_entry,
+            fanout_entered_usernames=_usernames_from_legs(legs),
         )
         state.trades_today += 1
         if uses_options and premium_entry is not None:
@@ -1964,7 +2027,11 @@ class BreakoutEngine:
         return high, low
 
     def _catchup_missing_fanout_legs(self, state: IndexBreakoutState) -> None:
-        """Retry S3 entry for live traders who missed the initial fan-out (e.g. Groww ref error)."""
+        """Retry S3 entry for live traders who missed the initial fan-out (e.g. Groww ref error).
+
+        Never re-enters a username that already had a leg on this position (even if that
+        leg was later removed by a partial kill) — see fanout_entered_usernames.
+        """
         pos = state.position
         if pos is None or PAPER_TRADING or MOCK_MODE:
             return
@@ -1972,6 +2039,9 @@ class BreakoutEngine:
         if now_mono - state.last_fanout_catchup_mono < 60.0:
             return
         state.last_fanout_catchup_mono = now_mono
+
+        # Keep the entered set in sync with any legs present (covers legacy sessions).
+        _merge_fanout_entered(pos, pos.order_legs)
 
         existing = list(pos.order_legs or [])
         new_legs = catchup_s3_legs(
@@ -1983,10 +2053,12 @@ class BreakoutEngine:
             upstox_market_client=self.client._upstox,
             global_paper=False,
             spot=state.spot or pos.entry_price,
+            exclude_usernames=frozenset(pos.fanout_entered_usernames or []),
         )
         if not new_legs:
             return
         pos.order_legs = existing + new_legs
+        _merge_fanout_entered(pos, new_legs)
         note = legs_summary(new_legs)
         msg = f"{state.config.display} S3 catch-up entry [{note}]"
         state.signal_log.append(msg)

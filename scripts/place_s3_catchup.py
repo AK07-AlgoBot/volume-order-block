@@ -68,12 +68,28 @@ def main() -> int:
         direction=direction or None,
         lot_size=cfg.lot_size,
         lots=LOTS_PER_TRADE,
+        exclude_usernames=frozenset(
+            str(u).strip()
+            for u in (pos.get("fanout_entered_usernames") or [])
+            if str(u).strip()
+        ),
     )
     targets = [t for t in missing if t.username == username]
     if not targets:
+        entered = [
+            str(u).strip()
+            for u in (pos.get("fanout_entered_usernames") or [])
+            if str(u).strip()
+        ]
         print(f"{username} is not in missing traders list.")
         print(f"  live traders: {[f'{t.username}@{t.broker}' for t in list_live_s3_traders()]}")
         print(f"  covered legs: {[leg.get('username') for leg in legs if isinstance(leg, dict)]}")
+        print(f"  already_entered: {entered or '-'}")
+        if username in entered or username.lower() in {u.lower() for u in entered}:
+            print(
+                f"  note: {username} already entered this position — "
+                "catch-up will not re-buy after partial kill."
+            )
         return 0
 
     print(f"Open position: {direction} @ {pos.get('entry_price')} — catching up {username}")
@@ -95,6 +111,14 @@ def main() -> int:
 
     merged = list(legs) + placed
     pos["order_legs"] = merged
+    entered = list(pos.get("fanout_entered_usernames") or [])
+    seen = {str(u).lower() for u in entered}
+    for leg in placed:
+        user = str(leg.get("username") or "").strip()
+        if user and user.lower() not in seen:
+            entered.append(user)
+            seen.add(user.lower())
+    pos["fanout_entered_usernames"] = entered
     raw["position"] = pos
     cache_manager.set_json(cache_manager.BREAKOUT_STATE_KEY_TEMPLATE.format(index=index_code), raw, ttl_seconds=86_400)
 
