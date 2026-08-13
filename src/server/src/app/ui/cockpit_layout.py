@@ -2,10 +2,16 @@
 
 from __future__ import annotations
 
+import base64
+import os
 from collections.abc import Callable
+from datetime import datetime
+from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import streamlit as st
 
+from app.config.paths import repo_root
 from app.constants import (
     STRATEGY_GAMMA,
     STRATEGY_PILL_SHORT,
@@ -24,6 +30,181 @@ from app.services.broker_pnl_store import (
 )
 from app.services.upstox_engine import emergency_square_off_all, release_kill_switch
 from app.ui.styles import status_pill
+
+IST = ZoneInfo("Asia/Kolkata")
+
+
+def brand_logo_path() -> Path:
+    return repo_root() / "assets" / "branding" / "ak07_instagram_profile_logo.png"
+
+
+def _brand_logo_data_uri() -> str:
+    logo = brand_logo_path()
+    if not logo.is_file():
+        return ""
+    try:
+        raw = base64.b64encode(logo.read_bytes()).decode("ascii")
+    except OSError:
+        return ""
+    return f"data:image/png;base64,{raw}"
+
+
+def render_sidebar_brand() -> None:
+    """Brand at top of left panel via st.logo; wordmark comes from theme CSS (::after)."""
+    logo = brand_logo_path()
+    if logo.is_file():
+        st.logo(str(logo), size="large")
+
+
+def render_brand_topbar(
+    *,
+    username: str = "",
+    production_domain: str = "",
+    broker: str = "upstox",
+    admin_mode: bool = False,
+) -> None:
+    """Slim utility chips + mobile page navbar (desktop brand lives in the sidebar)."""
+    domain = (production_domain or os.environ.get("PRODUCTION_DOMAIN") or "ak07.in").strip()
+    now = datetime.now(IST).strftime("%d %b %Y")
+    user = (username or "U").strip() or "U"
+    initial = user[:1].upper()
+    broker_label = {"upstox": "Upstox", "kite": "Kite", "groww": "Groww"}.get(
+        (broker or "upstox").strip().lower(), "Broker"
+    )
+    nav_links = [
+        ("/", "Dashboard"),
+        ("/Performance_Review", "Performance"),
+        ("/Token_Update", "Token"),
+        ("/Stock_OI_Scanner", "OI Scanner"),
+    ]
+    if admin_mode:
+        nav_links.extend(
+            [
+                ("/Deploy", "Deploy"),
+                ("/Admin_Users", "Users"),
+                ("/Broker_Settings", "Broker"),
+            ]
+        )
+    nav_html = "".join(
+        f'<a class="ak07-mobile-nav-link" href="{href}" target="_self">{label}</a>'
+        for href, label in nav_links
+    )
+    st.markdown(
+        f"""
+<div class="ak07-topbar">
+  <div class="ak07-topbar-brand" aria-hidden="true">AK07</div>
+  <div class="ak07-topbar-meta">
+    <span class="ak07-topbar-chip">🕒 {now}</span>
+    <span class="ak07-topbar-chip"><span class="dot"></span>{domain}</span>
+    <span class="ak07-topbar-chip accent"><a href="/Token_Update" target="_self">Broker connect · {broker_label}</a></span>
+    <span class="ak07-topbar-avatar" title="{user}">{initial}</span>
+  </div>
+</div>
+<nav class="ak07-mobile-nav" aria-label="Main pages">{nav_html}</nav>
+""",
+        unsafe_allow_html=True,
+    )
+
+
+def _format_inr_plain(value: float | None) -> str:
+    if value is None:
+        return "—"
+    return f"₹{float(value):,.2f}"
+
+
+def render_funds_summary(*, username: str = "", broker: str = "upstox") -> None:
+    """Available capital + today's P&L card (reference-style summary)."""
+    broker_key = (broker or "upstox").strip().lower()
+    capital: float | None = None
+    day_pnl: float | None = None
+
+    cache_key = f"_ak07_funds_cache_{username}_{broker_key}"
+    cached = st.session_state.get(cache_key)
+    now_m = datetime.now(IST).timestamp()
+    if isinstance(cached, dict) and now_m - float(cached.get("at") or 0) < 30:
+        capital = cached.get("capital")
+        day_pnl = cached.get("day_pnl")
+    else:
+        if broker_key == "groww" and username:
+            snap = refresh_groww_pnl_if_stale(username)
+            day_pnl = snap.get("total_pnl_inr")
+            if day_pnl is not None:
+                day_pnl = float(day_pnl)
+        else:
+            snap = get_user_broker_pnl(username, broker_key)
+            if snap.get("total_pnl_inr") is not None:
+                day_pnl = float(snap["total_pnl_inr"])
+            try:
+                from app.services.upstox_engine import build_upstox_client
+
+                client = build_upstox_client(username or "AK07")
+                capital = client.get_available_margin()
+                if day_pnl is None:
+                    pnl = client.get_portfolio_day_pnl()
+                    if pnl is not None:
+                        day_pnl = float(pnl.get("total_pnl") or 0.0)
+            except Exception:
+                capital = None
+        st.session_state[cache_key] = {
+            "at": now_m,
+            "capital": capital,
+            "day_pnl": day_pnl,
+        }
+
+    if day_pnl is None:
+        pnl_cls = "muted"
+        pnl_txt = "—"
+    elif abs(float(day_pnl)) < 0.005:
+        pnl_cls = "muted"
+        pnl_txt = "₹0.00"
+    elif float(day_pnl) > 0:
+        pnl_cls = "win"
+        pnl_txt = f"₹{float(day_pnl):+,.2f}"
+    else:
+        pnl_cls = "loss"
+        pnl_txt = f"₹{float(day_pnl):+,.2f}"
+
+    cap_txt = _format_inr_plain(capital if capital is None else float(capital))
+    cap_cls = "muted" if capital is None else ""
+
+    st.markdown(
+        f"""
+<div class="ak07-funds-card">
+  <div class="ak07-funds-cell">
+    <div class="ak07-funds-ico">₹</div>
+    <div>
+      <p class="lbl">Available capital</p>
+      <p class="val {cap_cls}">{cap_txt}</p>
+    </div>
+  </div>
+  <div class="ak07-funds-cell">
+    <div>
+      <p class="lbl">Today's P&amp;L</p>
+      <p class="val {pnl_cls}">{pnl_txt}</p>
+    </div>
+  </div>
+</div>
+""",
+        unsafe_allow_html=True,
+    )
+
+
+def render_app_chrome() -> None:
+    """Shared chrome: sidebar brand + slim utility strip (funds card is Dashboard-only)."""
+    from app.ui import auth_session as auth
+
+    from app.ui.styles import inject_dark_theme
+
+    inject_dark_theme()
+    render_sidebar_brand()
+    profile = auth.current_profile()
+    broker = str(profile.get("broker") or "upstox")
+    render_brand_topbar(
+        username=auth.current_username(),
+        production_domain=(os.environ.get("PRODUCTION_DOMAIN") or "").strip() or "ak07.in",
+        broker=broker,
+        admin_mode=auth.is_admin(),
+    )
 
 
 def render_top_status_bar(
@@ -92,7 +273,8 @@ def render_top_status_bar(
     if mock_mode:
         pills += ' <span class="ak07-pill ak07-dot-warn">● MOCK</span>'
 
-    bar_col, refresh_col = st.columns([12, 1], gap="small")
+    # Wide status row + refresh; CSS stacks these on narrow screens.
+    bar_col, refresh_col = st.columns([11, 1.2], gap="small")
     with bar_col:
         st.markdown(f'<div class="ak07-status-bar">{pills}</div>', unsafe_allow_html=True)
     with refresh_col:
@@ -124,5 +306,3 @@ def render_compact_sidebar(*, mock_mode: bool, admin_mode: bool = False) -> None
                 results = emergency_square_off_all()
             for scope, outcome in results.items():
                 st.warning(f"{scope}: {outcome}")
-
-        st.caption("Use « to collapse this panel for full-width charts.")

@@ -47,6 +47,14 @@ def build_navigation(*, dashboard_runner) -> st.navigation:
         )
 
     consume_upstox_oauth_flash()
+
+    from app.ui.cockpit_layout import render_app_chrome
+
+    # Reset per-run style guards (session persists across reruns; DOM does not).
+    st.session_state["_ak07_dark_theme_injected"] = False
+
+    # Sidebar brand + slim top utility strip on every logged-in page.
+    render_app_chrome()
     render_auth_sidebar()
 
     core = [

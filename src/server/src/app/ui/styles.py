@@ -14,7 +14,47 @@ DARK_THEME_CSS = """
     --ak07-border: #232b38;
   }
 
-  .stApp { background-color: var(--ak07-bg); color: #e6e9ef; }
+  html, body, .stApp, [data-testid="stAppViewContainer"],
+  [data-testid="stAppViewContainer"] > .main,
+  section.main {
+    background-color: var(--ak07-bg) !important;
+    color: #e6e9ef;
+  }
+  /* Desktop: collapse Streamlit chrome (mobile keeps header — sidebar toggle lives there). */
+  @media (min-width: 769px) {
+    .stAppHeader, header.stAppHeader, header[data-testid="stHeader"],
+    div[data-testid="stToolbar"],
+    div[data-testid="stDecoration"],
+    div[data-testid="stStatusWidget"],
+    .stAppDeployButton,
+    div[data-testid="stAppToolbar"],
+    div[data-testid="stToolbarActions"] {
+      display: none !important;
+      height: 0 !important;
+      min-height: 0 !important;
+      max-height: 0 !important;
+      visibility: hidden !important;
+      opacity: 0 !important;
+      pointer-events: none !important;
+      padding: 0 !important;
+      margin: 0 !important;
+      border: none !important;
+      background: transparent !important;
+    }
+    :root, .stApp, [data-testid="stAppViewContainer"] {
+      --header-height: 0px !important;
+    }
+    [data-testid="stAppViewContainer"] {
+      padding-top: 0 !important;
+    }
+  }
+  [data-testid="stAppViewContainer"] > .main,
+  section.main,
+  section.stMain,
+  [data-testid="stMain"] {
+    margin-top: 0 !important;
+    padding-top: 0 !important;
+  }
 
   /* --- Full-width main canvas (wide layout without dead side margins) --- */
   [data-testid="stAppViewContainer"],
@@ -24,44 +64,163 @@ DARK_THEME_CSS = """
     width: 100% !important;
   }
 
-  section.main > div.block-container {
-    padding-top: 0.75rem !important;
+  /* Modern Streamlit class + legacy selectors — kill the top gap */
+  .stMainBlockContainer,
+  .stAppViewBlockContainer,
+  section.stMain .block-container,
+  section.main > div.block-container,
+  [data-testid="stMain"] > div.block-container,
+  [data-testid="stMainBlockContainer"],
+  div[class*="block-container"] {
+    padding-top: 0 !important;
+    margin-top: 0 !important;
+  }
+  /* Keep brand bar flush with sidebar header so the hairlines meet */
+  section[data-testid="stMain"] .block-container {
+    padding-top: 0 !important;
+  }
+  section.main > div.block-container,
+  [data-testid="stMain"] > div.block-container {
     padding-bottom: 1.5rem !important;
     padding-left: 1.25rem !important;
     padding-right: 1.5rem !important;
   }
-
-  /* Sidebar expanded: main uses remaining viewport */
-  section[data-testid="stSidebar"][aria-expanded="true"] ~ section[data-testid="stMain"] > div.block-container {
-    width: calc(100vw - 17.5rem) !important;
-    max-width: calc(100vw - 17.5rem) !important;
+  /* Kill leftover top spacer widgets Streamlit inserts above page content */
+  section.main > div.block-container > div:first-child,
+  [data-testid="stMain"] > div.block-container > div:first-child {
+    margin-top: 0 !important;
+    padding-top: 0 !important;
+  }
+  /* Markdown widgets that host the slim topbar should not add vertical slack */
+  section.main div[data-testid="stMarkdownContainer"]:has(.ak07-topbar),
+  [data-testid="stMain"] div[data-testid="stMarkdownContainer"]:has(.ak07-topbar) {
+    margin: 0 !important;
+    padding: 0 !important;
+  }
+  section.main div[data-testid="stMarkdownContainer"]:has(.ak07-topbar) > div,
+  [data-testid="stMain"] div[data-testid="stMarkdownContainer"]:has(.ak07-topbar) > div {
+    margin: 0 !important;
+    padding: 0 !important;
+  }
+  /* Collapse empty markdown hosts left after browsers hoist <style> out of the body */
+  section.main div[data-testid="stMarkdownContainer"]:empty,
+  [data-testid="stMain"] div[data-testid="stMarkdownContainer"]:empty,
+  section.main .stElementContainer:has(> div[data-testid="stMarkdownContainer"]:empty),
+  [data-testid="stMain"] .stElementContainer:has(> div[data-testid="stMarkdownContainer"]:empty) {
+    display: none !important;
+    height: 0 !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    min-height: 0 !important;
   }
 
-  /* Sidebar collapsed: stretch main edge-to-edge */
-  section[data-testid="stSidebar"][aria-expanded="false"] ~ section[data-testid="stMain"] {
-    margin-left: 0 !important;
-  }
-  section[data-testid="stSidebar"][aria-expanded="false"] ~ section[data-testid="stMain"] > div.block-container {
-    width: calc(100vw - 2.5rem) !important;
-    max-width: calc(100vw - 2.5rem) !important;
-    padding-left: 1.5rem !important;
-    padding-right: 2rem !important;
-  }
-
-  /* Slim sidebar when open */
+  /* Shared sidebar chrome (desktop pinning + mobile drawer overrides below) */
   section[data-testid="stSidebar"] {
     background-color: #11151c;
-    width: 16rem !important;
-    min-width: 16rem !important;
+    overflow-x: hidden !important;
+    box-sizing: border-box !important;
   }
   section[data-testid="stSidebar"] > div {
-    width: 16rem !important;
-    min-width: 16rem !important;
+    display: flex !important;
+    flex-direction: column !important;
+    height: 100% !important;
+    box-sizing: border-box !important;
+    overflow-x: hidden !important;
   }
   section[data-testid="stSidebar"] .block-container {
+    width: 100% !important;
+    max-width: 100% !important;
     padding-top: 0.5rem !important;
     padding-left: 0.75rem !important;
     padding-right: 0.75rem !important;
+    padding-bottom: 0.75rem !important;
+    box-sizing: border-box !important;
+    overflow-x: hidden !important;
+  }
+  [data-testid="stSidebarNav"] {
+    padding-top: 0.15rem !important;
+    width: 100% !important;
+    box-sizing: border-box !important;
+  }
+  /* Profile / sign-out / kill-switch: keep inside sidebar; full-width top rule */
+  [data-testid="stSidebarUserContent"] {
+    position: relative !important;
+    margin-top: auto !important;
+    width: 100% !important;
+    max-width: 100% !important;
+    box-sizing: border-box !important;
+    overflow-x: hidden !important;
+    border-top: none !important;
+    padding-top: 0.85rem !important;
+  }
+  /* Full-bleed hairline matching the brand bar (not Streamlit's short inset hr) */
+  [data-testid="stSidebarUserContent"]::before {
+    content: "";
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 1px;
+    background: var(--ak07-border);
+    pointer-events: none;
+  }
+  section[data-testid="stSidebar"] hr {
+    display: none !important;
+  }
+  section[data-testid="stSidebar"] button,
+  section[data-testid="stSidebar"] [data-testid="stBaseButton-primary"],
+  section[data-testid="stSidebar"] [data-testid="stBaseButton-secondary"],
+  section[data-testid="stSidebar"] [data-testid="baseButton-primary"],
+  section[data-testid="stSidebar"] [data-testid="baseButton-secondary"] {
+    max-width: 100% !important;
+    width: 100% !important;
+    box-sizing: border-box !important;
+  }
+  section[data-testid="stSidebar"] [data-testid="stMarkdownContainer"],
+  section[data-testid="stSidebar"] [data-testid="stCaptionContainer"] {
+    max-width: 100% !important;
+    overflow-wrap: anywhere !important;
+  }
+
+  /* Desktop: sidebar always open in flex flow (no margin-left on main). */
+  @media (min-width: 769px) {
+    section[data-testid="stSidebar"] {
+      width: 16rem !important;
+      min-width: 16rem !important;
+      max-width: 16rem !important;
+      transform: none !important;
+      visibility: visible !important;
+      flex: 0 0 16rem !important;
+    }
+    section[data-testid="stSidebar"] > div {
+      width: 16rem !important;
+      min-width: 16rem !important;
+      max-width: 16rem !important;
+    }
+    [data-testid="stSidebarCollapseButton"],
+    [data-testid="stSidebarCollapsedControl"],
+    [data-testid="collapsedControl"],
+    [data-testid="stExpandSidebarButton"],
+    button[kind="headerNoPadding"] {
+      display: none !important;
+    }
+  }
+
+  /* Content pane uses remaining width beside sidebar — no extra offset */
+  [data-testid="stAppViewContainer"] [data-testid="stMain"],
+  [data-testid="stAppViewContainer"] section.stMain,
+  section.stMain {
+    margin-left: 0 !important;
+    flex: 1 1 auto !important;
+    min-width: 0 !important;
+    overflow-x: clip !important; /* stop topbar bleed from creating a page scrollbar */
+  }
+  [data-testid="stAppViewContainer"] [data-testid="stMain"] > div.block-container,
+  [data-testid="stAppViewContainer"] section.stMain > div.block-container,
+  section.stMain > div.block-container,
+  .stMainBlockContainer {
+    width: 100% !important;
+    max-width: none !important;
   }
 
   /* Tabs use full row width */
@@ -107,8 +266,9 @@ DARK_THEME_CSS = """
     flex-wrap: wrap;
     gap: 0.45rem 0.75rem;
     align-items: center;
-    flex: 1 1 520px;
-    background: var(--ak07-panel);
+    width: 100%;
+    box-sizing: border-box;
+    background: #12161d;
     border: 1px solid var(--ak07-border);
     border-radius: 10px;
     padding: 0.5rem 0.85rem;
@@ -190,21 +350,24 @@ DARK_THEME_CSS = """
   .ak07-chip .val.loss { color: #f87171; }
   .ak07-chip .val.muted { color: #9ca3af; }
 
-  .ak07-strategy-card {
-    background: var(--ak07-panel);
-    border: 1px solid var(--ak07-border);
-    border-radius: 12px;
-    padding: 0.85rem 1rem 0.35rem 1rem;
-    margin: 0.5rem 0 0.75rem 0;
+  .ak07-strategy-card,
+  .ak07-sec-head {
+    background: transparent;
+    border: none;
+    border-radius: 0;
+    padding: 0;
+    margin: 0 0 0.45rem 0;
   }
-  .ak07-strategy-card h3 {
+  .ak07-strategy-card h3,
+  .ak07-sec-head h3 {
     margin: 0;
-    font-size: 1.05rem;
-    color: #e6e9ef;
-    font-weight: 700;
+    font-size: 1.12rem;
+    color: #f1f5f9;
+    font-weight: 800;
   }
-  .ak07-strategy-card .sub {
-    margin: 0.2rem 0 0.55rem 0;
+  .ak07-strategy-card .sub,
+  .ak07-sec-head .sub {
+    margin: 0.2rem 0 0.35rem 0;
     color: #8b96a8;
     font-size: 0.84rem;
   }
@@ -465,19 +628,610 @@ DARK_THEME_CSS = """
     margin: 0.15rem 0;
   }
 
-  header[data-testid="stHeader"] { background: transparent; }
+  .stAppDeployButton { display: none !important; }
   footer { visibility: hidden; }
+
+  .ak07-funds-card {
+    display: inline-flex;
+    flex-wrap: wrap;
+    align-items: stretch;
+    gap: 0;
+    width: fit-content;
+    max-width: 100%;
+    margin: 0 0 0.45rem 0;
+    background: var(--ak07-panel);
+    border: 1px solid var(--ak07-border);
+    border-radius: 12px;
+    overflow: hidden;
+  }
+  .ak07-funds-cell {
+    flex: 0 1 auto;
+    min-width: 11rem;
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    padding: 0.85rem 1.15rem;
+  }
+  .ak07-funds-cell + .ak07-funds-cell {
+    border-left: 1px solid var(--ak07-border);
+  }
+  .ak07-funds-ico {
+    width: 2.35rem;
+    height: 2.35rem;
+    border-radius: 8px;
+    background: #2563eb;
+    color: #fff;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-weight: 800;
+    font-size: 1.05rem;
+  }
+  .ak07-funds-cell .lbl {
+    margin: 0;
+    color: #94a3b8;
+    font-size: 0.72rem;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+  }
+  .ak07-funds-cell .val {
+    margin: 0.15rem 0 0 0;
+    color: #f1f5f9;
+    font-size: 1.35rem;
+    font-weight: 800;
+    line-height: 1.15;
+  }
+  .ak07-funds-cell .val.win { color: #4ade80; }
+  .ak07-funds-cell .val.loss { color: #f87171; }
+  .ak07-funds-cell .val.muted { color: #94a3b8; font-size: 1.15rem; }
+
+  /* Utility strip — same height + hairline as sidebar brand bar */
+  .ak07-topbar {
+    --ak07-brand-bar-h: 4.5rem;
+    position: relative;
+    top: 0;
+    z-index: 1000;
+    display: flex;
+    flex-wrap: nowrap;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 0.35rem;
+    /* Bleed left to meet sidebar hairline; keep right inset so avatar stays in view */
+    margin: 0 0 0.45rem -1.25rem;
+    padding: 0 0.35rem 0 1.25rem;
+    width: calc(100% + 1.25rem);
+    max-width: calc(100% + 1.25rem);
+    min-height: var(--ak07-brand-bar-h) !important;
+    height: var(--ak07-brand-bar-h) !important;
+    box-sizing: border-box;
+    background: var(--ak07-bg);
+    border: none;
+    border-radius: 0;
+    box-shadow: none;
+    border-bottom: 1px solid var(--ak07-border);
+    overflow: hidden;
+  }
+  .ak07-topbar-brand {
+    display: none; /* mobile header only */
+    font-weight: 800;
+    font-size: 1.05rem;
+    letter-spacing: -0.02em;
+    color: #f8fafc;
+    line-height: 1;
+  }
+  /* Mobile page navbar — hidden on desktop (sidebar owns navigation) */
+  .ak07-mobile-nav {
+    display: none;
+  }
+  .ak07-topbar-meta {
+    display: flex;
+    flex-wrap: nowrap;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 0.3rem 0.35rem;
+    margin-left: auto;
+    margin-right: 0;
+    flex: 0 1 auto;
+    min-width: 0;
+    max-width: 100%;
+  }
+  .ak07-topbar-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.3rem;
+    border: 1px solid var(--ak07-border);
+    background: #161b24;
+    color: #cbd5e1;
+    border-radius: 999px;
+    padding: 0.22rem 0.6rem;
+    font-size: 0.74rem;
+    font-weight: 600;
+    white-space: nowrap;
+    line-height: 1.2;
+  }
+  .ak07-topbar-chip.accent {
+    background: rgba(37, 99, 235, 0.18);
+    border-color: #2563eb;
+    color: #bfdbfe;
+  }
+  .ak07-topbar-chip.accent a {
+    color: #bfdbfe !important;
+  }
+  .ak07-topbar-chip .dot {
+    width: 0.45rem;
+    height: 0.45rem;
+    border-radius: 999px;
+    background: #22c55e;
+    box-shadow: 0 0 0 3px rgba(34, 197, 94, 0.15);
+  }
+  .ak07-topbar-chip a {
+    color: inherit !important;
+    text-decoration: none !important;
+    font-weight: 700;
+  }
+  .ak07-topbar-avatar {
+    flex: 0 0 1.85rem;
+    width: 1.85rem;
+    height: 1.85rem;
+    margin-right: 0.15rem;
+    border-radius: 999px;
+    background: #4c1d95;
+    color: #f5f3ff;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-weight: 800;
+    font-size: 0.8rem;
+    border: 1px solid #6d28d9;
+  }
+
+  /* Brand at sidebar top — same bar height + same hairline as .ak07-topbar */
+  section[data-testid="stSidebar"] [data-testid="stSidebarHeader"],
+  [data-testid="stSidebarHeader"] {
+    --ak07-brand-bar-h: 4.5rem;
+    position: relative !important;
+    height: var(--ak07-brand-bar-h) !important;
+    min-height: var(--ak07-brand-bar-h) !important;
+    width: 100% !important;
+    max-width: none !important;
+    align-self: stretch !important;
+    display: flex !important;
+    align-items: center !important;
+    gap: 0.55rem !important;
+    padding: 0 0.75rem !important;
+    margin: 0 !important;
+    border: none !important;
+    border-bottom: 1px solid var(--ak07-border) !important;
+    background: #11151c !important;
+    overflow: hidden !important; /* keep mark + text inside the bar above the line */
+    box-sizing: border-box !important;
+  }
+  /* Hide Streamlit's main-area logo copy if present — brand lives in the sidebar only */
+  [data-testid="stHeader"] [data-testid="stLogo"],
+  [data-testid="stHeader"] [data-testid="stLogoLink"],
+  header[data-testid="stHeader"] img,
+  .stAppHeader [data-testid="stLogo"] {
+    display: none !important;
+  }
+  [data-testid="stSidebarHeader"] [data-testid="stLogo"],
+  [data-testid="stSidebarHeader"] [data-testid="stLogoLink"] {
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    flex: 0 0 2.75rem !important;
+    width: 2.75rem !important;
+    height: 2.75rem !important;
+    overflow: hidden !important;
+    border-radius: 8px !important;
+    border: 1px solid var(--ak07-border) !important;
+    background: #0c0f14 !important;
+  }
+  [data-testid="stSidebarHeader"] img,
+  [data-testid="stLogo"] img {
+    display: block !important;
+    width: 100% !important;
+    height: 100% !important;
+    max-width: 100% !important;
+    max-height: 100% !important;
+    border-radius: 0 !important;
+    border: none !important;
+    object-fit: contain !important;
+    object-position: center !important;
+    background: #0c0f14 !important;
+  }
+  /* Two clean lines only — do not re-wrap "Algo Trading" */
+  [data-testid="stSidebarHeader"]::after {
+    content: "AK07\\00000aAlgo Trading";
+    white-space: pre; /* pre (not pre-line) prevents "Algo" / "Tradi" wrap */
+    display: block;
+    color: #ffffff;
+    font-size: 1.15rem;
+    font-weight: 800;
+    line-height: 1.2;
+    letter-spacing: -0.02em;
+    flex: 1 1 auto;
+    min-width: 6.75rem;
+    overflow: visible;
+  }
+
+  /* Dashboard + each strategy: same card shell (reference-style sections) */
+  div[data-testid="stVerticalBlockBorderWrapper"]:has(.ak07-dash-title),
+  div[data-testid="stVerticalBlockBorderWrapper"]:has(.ak07-sec-head),
+  div[data-testid="stVerticalBlockBorderWrapper"]:has(.ak07-strategy-card),
+  div[class*="st-key-ak07_dash_home"],
+  div[class*="st-key-ak07_s1"],
+  div[class*="st-key-ak07_s2"],
+  div[class*="st-key-ak07_s3"],
+  div[class*="st-key-ak07_s7"],
+  div[class*="st-key-ak07_gamma"] {
+    background: var(--ak07-panel) !important;
+    border: 1px solid var(--ak07-border) !important;
+    border-radius: 12px !important;
+    padding: 0.75rem 0.95rem 0.85rem 0.95rem !important;
+    margin: 0 0 0.55rem 0 !important;
+  }
+  .ak07-dash-title {
+    margin: 0 0 0.2rem 0 !important;
+    color: #f8fafc !important;
+    font-size: 1.35rem !important;
+    font-weight: 800 !important;
+    line-height: 1.2 !important;
+  }
+  .ak07-dash-sub {
+    margin: 0 0 0.55rem 0 !important;
+    color: #94a3b8 !important;
+    font-size: 0.82rem !important;
+    line-height: 1.35 !important;
+    border: none !important;
+    padding: 0 !important;
+  }
+  /* No extra divider line inside Dashboard card above the pills */
+  div[class*="st-key-ak07_dash_home"] hr {
+    display: none !important;
+  }
+  /* Kill Streamlit's default spacer under bordered blocks */
+  div[class*="st-key-ak07_dash_home"] + div,
+  div[class*="st-key-ak07_s3"] + div {
+    margin-top: 0 !important;
+  }
+  section.main hr,
+  [data-testid="stMain"] hr {
+    display: none !important;
+    margin: 0 !important;
+  }
 
   /* Charts / dataframes on performance page */
   [data-testid="stVerticalBlock"] > div:has(> div[data-testid="stArrowVegaLiteChart"]),
   [data-testid="stVerticalBlock"] > div:has(> [data-testid="stDataFrame"]) {
     width: 100%;
   }
+
+  /* ========== Mobile / narrow viewports ========== */
+  @media (max-width: 768px) {
+    /* Full-width main; drawer nav instead of pinned sidebar */
+    section.main > div.block-container,
+    [data-testid="stMain"] > div.block-container,
+    .stMainBlockContainer {
+      padding-left: 0.75rem !important;
+      padding-right: 0.75rem !important;
+      padding-bottom: 1.25rem !important;
+    }
+
+    /* Drawer sidebar (overlay) — does not crush main content width */
+    section[data-testid="stSidebar"] {
+      position: fixed !important;
+      left: 0 !important;
+      top: 0 !important;
+      bottom: 0 !important;
+      height: 100% !important;
+      width: min(18rem, 88vw) !important;
+      min-width: 0 !important;
+      max-width: min(18rem, 88vw) !important;
+      flex: 0 0 auto !important;
+      z-index: 1000400 !important;
+      box-shadow: 8px 0 28px rgba(0, 0, 0, 0.45);
+    }
+    section[data-testid="stSidebar"] > div {
+      width: 100% !important;
+      min-width: 0 !important;
+      max-width: 100% !important;
+    }
+    [data-testid="stAppViewContainer"] [data-testid="stMain"],
+    [data-testid="stAppViewContainer"] section.stMain,
+    section.stMain {
+      width: 100% !important;
+      max-width: 100% !important;
+      margin-left: 0 !important;
+    }
+
+    /* Mobile navbar: Streamlit header hosts the sidebar (pages) toggle */
+    :root, .stApp, [data-testid="stAppViewContainer"] {
+      --header-height: 3.5rem !important;
+    }
+    .stAppHeader,
+    header.stAppHeader,
+    header[data-testid="stHeader"] {
+      display: flex !important;
+      align-items: center !important;
+      height: 3.5rem !important;
+      min-height: 3.5rem !important;
+      max-height: 3.5rem !important;
+      visibility: visible !important;
+      opacity: 1 !important;
+      pointer-events: auto !important;
+      padding: 0 0.65rem !important;
+      margin: 0 !important;
+      border: none !important;
+      border-bottom: 1px solid var(--ak07-border) !important;
+      background: #11151c !important;
+      overflow: visible !important;
+      z-index: 1000300 !important;
+    }
+    /* Expand button lives inside the toolbar — must unhide the whole chain */
+    header[data-testid="stHeader"] div[data-testid="stToolbar"],
+    header[data-testid="stHeader"] [data-testid="stToolbar"],
+    div[data-testid="stToolbar"] {
+      display: flex !important;
+      align-items: center !important;
+      visibility: visible !important;
+      opacity: 1 !important;
+      height: 3.5rem !important;
+      min-height: 3.5rem !important;
+      max-height: none !important;
+      pointer-events: auto !important;
+      padding: 0 !important;
+      margin: 0 !important;
+      background: transparent !important;
+      border: none !important;
+    }
+    header[data-testid="stHeader"] div[data-testid="stToolbar"] *,
+    div[data-testid="stToolbar"] > div {
+      visibility: visible !important;
+      opacity: 1 !important;
+      pointer-events: auto !important;
+    }
+    [data-testid="stSidebarCollapsedControl"],
+    [data-testid="collapsedControl"],
+    [data-testid="stExpandSidebarButton"],
+    [data-testid="stSidebarCollapseButton"],
+    [data-testid="stBaseButton-headerNoPadding"],
+    button[kind="headerNoPadding"][data-testid="stExpandSidebarButton"],
+    button[kind="headerNoPadding"][data-testid="stBaseButton-headerNoPadding"] {
+      display: inline-flex !important;
+      visibility: visible !important;
+      opacity: 1 !important;
+      pointer-events: auto !important;
+      position: relative !important;
+      top: auto !important;
+      left: auto !important;
+      width: 2.6rem !important;
+      height: 2.6rem !important;
+      min-width: 2.6rem !important;
+      min-height: 2.6rem !important;
+      border-radius: 10px !important;
+      background: #161b24 !important;
+      border: 1px solid var(--ak07-border) !important;
+      box-shadow: none !important;
+      color: #f8fafc !important;
+    }
+    [data-testid="stExpandSidebarButton"] [data-testid="stIconMaterial"],
+    [data-testid="stExpandSidebarButton"] span {
+      color: #f8fafc !important;
+      font-size: 1.35rem !important;
+    }
+    [data-testid="stSidebarCollapseButton"] {
+      display: flex !important;
+      visibility: visible !important;
+      opacity: 1 !important;
+      pointer-events: auto !important;
+    }
+    /* Hide Streamlit clutter; keep sidebar toggle */
+    div[data-testid="stDecoration"],
+    div[data-testid="stStatusWidget"],
+    .stAppDeployButton,
+    div[data-testid="stAppToolbar"],
+    div[data-testid="stToolbarActions"],
+    [data-testid="stMainMenuButton"] {
+      display: none !important;
+    }
+
+    .ak07-topbar {
+      flex-wrap: nowrap;
+      justify-content: space-between;
+      align-items: center;
+      height: auto !important;
+      min-height: 2.85rem !important;
+      margin: 0 -0.75rem 0.35rem -0.75rem;
+      padding: 0.45rem 0.75rem;
+      width: calc(100% + 1.5rem);
+      max-width: calc(100% + 1.5rem);
+      gap: 0.35rem;
+    }
+    .ak07-topbar-brand {
+      display: block;
+      flex: 0 0 auto;
+    }
+    .ak07-topbar-meta {
+      justify-content: flex-end;
+      width: 100%;
+      flex-wrap: wrap;
+    }
+    .ak07-topbar-chip {
+      font-size: 0.7rem;
+      padding: 0.2rem 0.5rem;
+    }
+
+    /* Always-visible page navbar on phones (sidebar may be collapsed) */
+    .ak07-mobile-nav {
+      display: flex !important;
+      flex-wrap: nowrap;
+      align-items: center;
+      gap: 0.4rem;
+      overflow-x: auto;
+      -webkit-overflow-scrolling: touch;
+      scrollbar-width: none;
+      margin: 0 -0.75rem 0.65rem -0.75rem;
+      padding: 0 0.75rem 0.15rem 0.75rem;
+      width: calc(100% + 1.5rem);
+      max-width: calc(100% + 1.5rem);
+      box-sizing: border-box;
+    }
+    .ak07-mobile-nav::-webkit-scrollbar {
+      display: none;
+    }
+    .ak07-mobile-nav-link {
+      flex: 0 0 auto;
+      display: inline-flex;
+      align-items: center;
+      padding: 0.38rem 0.7rem;
+      border-radius: 999px;
+      border: 1px solid var(--ak07-border);
+      background: #161b24;
+      color: #e2e8f0 !important;
+      text-decoration: none !important;
+      font-size: 0.78rem;
+      font-weight: 700;
+      white-space: nowrap;
+      line-height: 1.2;
+    }
+    .ak07-mobile-nav-link:hover {
+      border-color: #3b82f6;
+      color: #bfdbfe !important;
+    }
+
+    .ak07-funds-card {
+      display: flex;
+      flex-direction: column;
+      width: 100%;
+    }
+    .ak07-funds-cell {
+      min-width: 0;
+      width: 100%;
+      padding: 0.75rem 0.9rem;
+    }
+    .ak07-funds-cell + .ak07-funds-cell {
+      border-left: none;
+      border-top: 1px solid var(--ak07-border);
+    }
+    .ak07-funds-cell .val {
+      font-size: 1.2rem;
+    }
+
+    .ak07-status-bar {
+      padding: 0.45rem 0.65rem;
+      font-size: 0.78rem;
+    }
+    .ak07-pill {
+      white-space: normal;
+      line-height: 1.25;
+    }
+
+    /* Stack metric / filter rows into 2-col (or full-width) grids */
+    div[data-testid="stHorizontalBlock"] {
+      flex-wrap: wrap !important;
+      gap: 0.4rem 0.5rem !important;
+    }
+    div[data-testid="stHorizontalBlock"] > div[data-testid="stColumn"],
+    div[data-testid="stHorizontalBlock"] > div[data-testid="column"] {
+      min-width: min(100%, 9.75rem) !important;
+      flex: 1 1 calc(50% - 0.5rem) !important;
+      width: auto !important;
+    }
+    /* Status + refresh row: always stack */
+    div[data-testid="stHorizontalBlock"]:has(.ak07-status-bar) > div[data-testid="stColumn"],
+    div[data-testid="stHorizontalBlock"]:has(.ak07-status-bar) > div[data-testid="column"] {
+      flex: 1 1 100% !important;
+      min-width: 100% !important;
+    }
+
+    .ak07-chip-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.4rem;
+    }
+    .ak07-chip {
+      flex: 1 1 calc(50% - 0.4rem);
+      min-width: 7.5rem;
+    }
+
+    div[data-testid="stMetric"] {
+      padding: 6px 8px;
+    }
+    div[data-testid="stMetricValue"] {
+      font-size: 1rem !important;
+    }
+
+    .ak07-dash-title {
+      font-size: 1.15rem !important;
+    }
+    .ak07-signal-line {
+      font-size: 0.8rem;
+      overflow-wrap: anywhere;
+      word-break: break-word;
+    }
+
+    div[data-testid="stVerticalBlockBorderWrapper"]:has(.ak07-dash-title),
+    div[data-testid="stVerticalBlockBorderWrapper"]:has(.ak07-sec-head),
+    div[data-testid="stVerticalBlockBorderWrapper"]:has(.ak07-strategy-card),
+    div[class*="st-key-ak07_dash_home"],
+    div[class*="st-key-ak07_s1"],
+    div[class*="st-key-ak07_s2"],
+    div[class*="st-key-ak07_s3"],
+    div[class*="st-key-ak07_s7"],
+    div[class*="st-key-ak07_gamma"] {
+      padding: 0.65rem 0.7rem 0.75rem 0.7rem !important;
+    }
+
+    /* Tables / charts: scroll instead of overflowing the viewport */
+    div[data-testid="stDataFrame"],
+    div[data-testid="stTable"],
+    div[data-testid="stArrowVegaLiteChart"] {
+      max-width: 100% !important;
+      overflow-x: auto !important;
+    }
+
+    .stTabs [data-baseweb="tab"] {
+      padding: 0.4rem 0.65rem;
+      font-size: 0.82rem;
+    }
+
+    /* Larger tap targets */
+    div[data-testid="stMain"] button,
+    div[data-testid="stMain"] [data-testid="stBaseButton-primary"],
+    div[data-testid="stMain"] [data-testid="stBaseButton-secondary"] {
+      min-height: 2.6rem !important;
+    }
+  }
+
+  @media (max-width: 420px) {
+    div[data-testid="stHorizontalBlock"] > div[data-testid="stColumn"],
+    div[data-testid="stHorizontalBlock"] > div[data-testid="column"] {
+      flex: 1 1 100% !important;
+      min-width: 100% !important;
+    }
+    .ak07-chip {
+      flex: 1 1 100%;
+    }
+    .ak07-topbar-chip:not(.accent) {
+      display: none;
+    }
+  }
 </style>
 """
 
 
 def inject_dark_theme() -> None:
+    """Inject cockpit CSS once per script run.
+
+    Use st.markdown (not st.html) so rules apply to the app document. st.html can
+    isolate styles and leave the unstyled logo at full PNG size, blowing up the layout.
+    """
+    if st.session_state.get("_ak07_dark_theme_injected"):
+        return
+    st.session_state["_ak07_dark_theme_injected"] = True
     st.markdown(DARK_THEME_CSS, unsafe_allow_html=True)
 
 
@@ -570,6 +1324,17 @@ def inject_login_page_style(*, background_path: Path | None = None) -> None:
     border-radius: 16px;
     box-shadow: 0 24px 64px rgba(0, 0, 0, 0.45);
     backdrop-filter: blur(8px);
+  }}
+  @media (max-width: 480px) {{
+    section.main > div.block-container {{
+      max-width: calc(100% - 1.25rem) !important;
+      margin: 0.75rem auto !important;
+      padding: 1.35rem 1rem 1.15rem !important;
+      border-radius: 14px;
+    }}
+    .stApp {{
+      background-attachment: scroll !important;
+    }}
   }}
 </style>
 """,

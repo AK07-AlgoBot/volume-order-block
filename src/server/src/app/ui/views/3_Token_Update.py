@@ -287,7 +287,8 @@ elif broker in ("groww", "kite"):
 else:
     _cred_ready = _has_key and _has_secret
 
-_page_l, _page, _page_r = st.columns([0.25, 3.5, 0.25])
+# Full-width content (no side gutter columns — those break mobile stacking)
+_page = st.container()
 with _page:
     st.markdown(
         broker_hero(

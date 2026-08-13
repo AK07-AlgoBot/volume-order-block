@@ -1012,6 +1012,19 @@ class UpstoxClient:
             "open_positions": float(open_positions),
         }
 
+    def get_available_margin(self) -> float | None:
+        """Equity segment available margin (funds available for trading)."""
+        data = self._get(f"{self.base_url}/user/get-funds-and-margin")
+        if not isinstance(data, dict):
+            return None
+        equity = data.get("equity") if isinstance(data.get("equity"), dict) else data
+        if not isinstance(equity, dict):
+            return None
+        try:
+            return float(equity.get("available_margin"))
+        except (TypeError, ValueError):
+            return None
+
     def square_off_all_open_positions(self, *, bypass_profit_guard: bool = True) -> list[dict[str, Any]]:
         """Market-exit every non-flat short-term position."""
         results: list[dict[str, Any]] = []
@@ -1164,6 +1177,9 @@ class MockUpstoxClient(UpstoxClient):
 
     def get_portfolio_day_pnl(self) -> dict[str, float] | None:
         return {"total_pnl": 0.0, "realised": 0.0, "unrealised": 0.0, "open_positions": 0.0}
+
+    def get_available_margin(self) -> float | None:
+        return 250_000.0
 
     def square_off_all_open_positions(self, *, bypass_profit_guard: bool = True) -> list[dict[str, Any]]:
         return []

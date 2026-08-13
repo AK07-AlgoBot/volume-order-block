@@ -12,8 +12,7 @@ from __future__ import annotations
 
 import os
 import sys
-import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import streamlit as st
@@ -39,7 +38,7 @@ from app.services.broker_pnl_store import (
 from app.services.upstox_engine import INDEX_CONFIGS, INDEX_OI_RISK, DEFAULT_OI_RISK
 import app.ui.auth_session as auth_session
 from app.ui.strategy_access import enabled_strategy_labels_text, tabbed_dashboard_index_codes, user_can_view_strategy
-from app.ui.cockpit_layout import render_compact_sidebar, render_top_status_bar
+from app.ui.cockpit_layout import render_compact_sidebar, render_funds_summary, render_top_status_bar
 from app.ui.nav_config import build_navigation
 from app.ui.styles import inject_dark_theme
 
@@ -71,10 +70,104 @@ def fmt(value: float | int | None, decimals: int = 2) -> str:
     return f"{value:,.{decimals}f}" if isinstance(value, float) else f"{value:,}"
 
 
-def render_smc_crt_strategy_panel(symbol_code: str) -> None:
-    """Strategy Type 2 — SMC+CRT block (below AK07 Active Position)."""
-    st.markdown("---")
-    st.markdown("#### Strategy Type 2 — SMC + CRT")
+def render_s1_oi_strategy_panel(code: str) -> None:
+    """Strategy 1 — AK07 OI levels / position for one index."""
+    cfg = INDEX_CONFIGS[code]
+    state = cache_manager.get_json(cache_manager.INDEX_STATE_KEY_TEMPLATE.format(index=code))
+    if not state:
+        st.info(f"No live state for {cfg.display} yet — is the engine running?")
+        return
+
+    spot = state.get("spot")
+    call_wall = state.get("call_wall")
+    put_floor = state.get("put_floor")
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Live Spot Price", fmt(float(spot)) if spot is not None else "—")
+    c2.metric(
+        "Institutional Call Wall \u2191",
+        fmt(call_wall, 0),
+        delta=(f"{call_wall - spot:+,.0f} pts away" if call_wall and spot else None),
+        delta_color="off",
+    )
+    c3.metric(
+        "Institutional Put Floor \u2193",
+        fmt(put_floor, 0),
+        delta=(f"{spot - put_floor:+,.0f} pts above" if put_floor and spot else None),
+        delta_color="off",
+    )
+    with c4:
+        st.markdown("**Component Bias**")
+        st.markdown(bias_badge(state.get("component_bias", "NEUTRAL")), unsafe_allow_html=True)
+        st.caption(f"Trades today: {state.get('trades_today', 0)}/{state.get('max_trades', 2)}")
+
+    st.markdown("#### Institutional Component Health")
+    components: dict[str, float | None] = state.get("components") or {}
+    if components:
+        cols = st.columns(len(components))
+        for col, (symbol, pct) in zip(cols, components.items()):
+            col.markdown(component_block(symbol, pct), unsafe_allow_html=True)
+    else:
+        st.caption("Component quotes unavailable.")
+
+    position = state.get("position")
+    st.markdown("#### Active Position")
+    if position:
+        p1, p2, p3, p4, p5, p6 = st.columns(6)
+        option = f"{position.get('option_strike', '')}{position.get('option_type', '')}"
+        p1.metric("Direction", position.get("direction", "—"), delta=option or None, delta_color="off")
+        p2.metric("Entry (spot)", fmt(float(position.get("entry_price", 0))))
+        p3.metric("Target", fmt(float(position.get("target_price", 0))))
+        p4.metric("Stop-Loss", fmt(float(position.get("sl_price", 0))))
+        lots = int(position.get("lots_remaining", 1))
+        _, partial_pts, _ = INDEX_OI_RISK.get(code, DEFAULT_OI_RISK)
+        partial_label = (
+            "1 lot booked"
+            if position.get("partial_booked")
+            else f"awaiting +{int(partial_pts)} book"
+        )
+        p5.metric(
+            "Lots Running",
+            f"{lots}/2",
+            delta=partial_label,
+            delta_color="off",
+        )
+        if spot is not None:
+            live_pnl = (
+                spot - position["entry_price"]
+                if position.get("direction") == "LONG"
+                else position["entry_price"] - spot
+            )
+            p6.metric("Live P&L (pts)", f"{live_pnl:+.2f}")
+    else:
+        st.caption("Flat — no open position.")
+
+    recent = state.get("recent_trades") or []
+    if recent:
+        with st.expander("Strategy 1 — today's trade log", expanded=False):
+            for line in reversed(recent):
+                st.markdown(f'<p class="ak07-signal-line">{line}</p>', unsafe_allow_html=True)
+
+    updated = str(state.get("updated_at", ""))[:19].replace("T", " ")
+    flags = []
+    if state.get("entries_blocked"):
+        flags.append("entries blocked")
+    elif state.get("monitoring_active"):
+        flags.append("monitoring active execution boundaries")
+    if state.get("paper_trading"):
+        flags.append("paper mode")
+    st.caption(f"Engine state updated {updated}" + (f" · {' · '.join(flags)}" if flags else ""))
+
+
+def render_smc_crt_strategy_panel(symbol_code: str, *, show_header: bool = True) -> None:
+    """Strategy Type 2 — SMC+CRT block."""
+    from app.ui.styles import strategy_card_header
+
+    if show_header:
+        st.markdown(
+            strategy_card_header("S2 · SMC + CRT", f"{symbol_code} · CRT / FVG / 1 lot options"),
+            unsafe_allow_html=True,
+        )
 
     smc = cache_manager.get_json(cache_manager.SMC_CRT_STATE_KEY_TEMPLATE.format(symbol=symbol_code))
     smc_hb = cache_manager.get_json(cache_manager.SMC_CRT_HEARTBEAT_KEY)
@@ -161,10 +254,15 @@ def render_smc_crt_strategy_panel(symbol_code: str) -> None:
     )
 
 
-def render_s7_strategy_panel(index_code: str) -> None:
+def render_s7_strategy_panel(index_code: str, *, show_header: bool = True) -> None:
     """Strategy 7 — ORB+ ADX block."""
-    st.markdown("---")
-    st.markdown("#### Strategy 7 — ORB+ ADX")
+    from app.ui.styles import strategy_card_header
+
+    if show_header:
+        st.markdown(
+            strategy_card_header("S7 · ORB+ ADX", f"{index_code} · opening range breakout"),
+            unsafe_allow_html=True,
+        )
 
     s7 = cache_manager.get_json(cache_manager.S7_STATE_KEY)
 
@@ -227,8 +325,12 @@ def render_s7_strategy_panel(index_code: str) -> None:
 
 def render_choch_strategy_panel(index_code: str) -> None:
     """Strategy 8 — CHOCH reversal block."""
-    st.markdown("---")
-    st.markdown("#### Strategy 8 — CHOCH (Change of Character)")
+    from app.ui.styles import strategy_card_header
+
+    st.markdown(
+        strategy_card_header("S8 · CHOCH", f"{index_code} · change of character"),
+        unsafe_allow_html=True,
+    )
 
     choch = cache_manager.get_json(cache_manager.CHOCH_STATE_KEY)
 
@@ -312,16 +414,26 @@ def render_choch_strategy_panel(index_code: str) -> None:
                 )
 
 
-def render_gamma_expiry_panel(index_code: str) -> None:
+def render_gamma_expiry_panel(index_code: str, *, show_header: bool = True) -> None:
     """Gamma Expiry Observer — paper hero-zero signals on expiry days only."""
-    st.markdown("---")
-    st.markdown("#### Gamma Expiry Observer (paper · observer only)")
+    from app.ui.styles import strategy_card_header
+
+    if show_header:
+        st.markdown(
+            strategy_card_header(
+                "Gamma · Expiry Observer",
+                f"{index_code} · paper · observer only",
+            ),
+            unsafe_allow_html=True,
+        )
 
     gamma = cache_manager.get_json(cache_manager.GAMMA_STATE_KEY)
     hb = cache_manager.get_json(cache_manager.GAMMA_HEARTBEAT_KEY)
 
     if not gamma and not hb:
-        st.caption("Gamma observer offline — start `gamma_expiry_engine` service.")
+        # Parent section may already show a single offline line; avoid a second ghost caption.
+        if show_header:
+            st.caption("Gamma observer offline — start `gamma_expiry_engine` service.")
         return
 
     if hb:
@@ -398,7 +510,6 @@ def render_breakout_strategy_panel(index_code: str) -> None:
     """Strategy Type 3 — BLR Breakout block (Nifty only)."""
     from app.ui.styles import checklist_pills, strategy_card_header
 
-    st.markdown("---")
     st.markdown(
         strategy_card_header(
             "S3 · BLR Breakout",
@@ -574,155 +685,131 @@ def render_breakout_strategy_panel(index_code: str) -> None:
 # ---------------------------------------------------------------------------
 # Layout: slim sidebar + top status bar (full-width main content)
 # ---------------------------------------------------------------------------
+def _render_strategy_sections() -> None:
+    """Stacked strategy cards. Kept separate so a fragment can refresh without full-page blink."""
+    from app.ui.styles import strategy_card_header
+
+    tabbed_codes = tabbed_dashboard_index_codes()
+
+    if user_can_view_strategy(STRATEGY_S3_BREAKOUT):
+        with st.container(border=True, key="ak07_s3"):
+            for s3_code in S3_BREAKOUT_INDICES:
+                render_breakout_strategy_panel(s3_code)
+
+    if user_can_view_strategy(STRATEGY_S1_OI) and tabbed_codes:
+        with st.container(border=True, key="ak07_s1"):
+            st.markdown(
+                strategy_card_header(
+                    "S1 · AK07 OI",
+                    "Institutional walls · component bias · max 2 trades/day",
+                ),
+                unsafe_allow_html=True,
+            )
+            if len(tabbed_codes) == 1:
+                render_s1_oi_strategy_panel(tabbed_codes[0])
+            else:
+                s1_tabs = st.tabs([INDEX_CONFIGS[c].display for c in tabbed_codes])
+                for tab, code in zip(s1_tabs, tabbed_codes):
+                    with tab:
+                        render_s1_oi_strategy_panel(code)
+
+    if user_can_view_strategy(STRATEGY_S2_SMC) and tabbed_codes:
+        with st.container(border=True, key="ak07_s2"):
+            if len(tabbed_codes) == 1:
+                render_smc_crt_strategy_panel(tabbed_codes[0])
+            else:
+                st.markdown(
+                    strategy_card_header("S2 · SMC + CRT", "CRT / FVG · 1 lot options"),
+                    unsafe_allow_html=True,
+                )
+                s2_tabs = st.tabs([INDEX_CONFIGS[c].display for c in tabbed_codes])
+                for tab, code in zip(s2_tabs, tabbed_codes):
+                    with tab:
+                        render_smc_crt_strategy_panel(code, show_header=False)
+
+    if user_can_view_strategy(STRATEGY_S7_ORB) and tabbed_codes:
+        with st.container(border=True, key="ak07_s7"):
+            if len(tabbed_codes) == 1:
+                render_s7_strategy_panel(tabbed_codes[0])
+            else:
+                st.markdown(
+                    strategy_card_header("S7 · ORB+ ADX", "Opening range breakout"),
+                    unsafe_allow_html=True,
+                )
+                s7_tabs = st.tabs([INDEX_CONFIGS[c].display for c in tabbed_codes])
+                for tab, code in zip(s7_tabs, tabbed_codes):
+                    with tab:
+                        render_s7_strategy_panel(code, show_header=False)
+
+    if user_can_view_strategy(STRATEGY_GAMMA) and tabbed_codes:
+        with st.container(border=True, key="ak07_gamma"):
+            from app.ui.styles import strategy_card_header as _hdr
+
+            st.markdown(
+                _hdr("Gamma · Expiry Observer", "Paper · observer only"),
+                unsafe_allow_html=True,
+            )
+            gamma = cache_manager.get_json(cache_manager.GAMMA_STATE_KEY)
+            hb = cache_manager.get_json(cache_manager.GAMMA_HEARTBEAT_KEY)
+            # One offline line for the whole section (not once per index tab — that caused blink/ghost text).
+            if not gamma and not hb:
+                st.caption("Gamma observer offline — start `gamma_expiry_engine` service.")
+            elif len(tabbed_codes) == 1:
+                render_gamma_expiry_panel(tabbed_codes[0], show_header=False)
+            else:
+                g_tabs = st.tabs([INDEX_CONFIGS[c].display for c in tabbed_codes])
+                for tab, code in zip(g_tabs, tabbed_codes):
+                    with tab:
+                        render_gamma_expiry_panel(code, show_header=False)
+
+
 def run_dashboard() -> None:
     auth_session.require_login()
     profile = auth_session.current_profile()
     render_compact_sidebar(mock_mode=MOCK_MODE, admin_mode=auth_session.is_admin())
-    auto_refresh = render_top_status_bar(
-        mock_mode=MOCK_MODE,
-        production_domain=PRODUCTION_DOMAIN,
-        refresh_seconds=REFRESH_SECONDS,
-        can_view_strategy=user_can_view_strategy,
+
+    # Available capital / today's P&L — Dashboard only (not on other pages).
+    render_funds_summary(
         username=auth_session.current_username(),
         broker=str(profile.get("broker") or "upstox"),
     )
 
     # ---------------------------------------------------------------------------
-    # Main: one tab per index
+    # Dashboard overview (title + status pills) — one card
     # ---------------------------------------------------------------------------
-    st.markdown("# AK07 Execution Cockpit")
-    meta_col, domain_col = st.columns([10, 2])
-    with meta_col:
-        st.caption(
-            f"Live levels · broker P&L · deploy status · "
+    with st.container(border=True, key="ak07_dash_home"):
+        st.markdown('<p class="ak07-dash-title">Dashboard</p>', unsafe_allow_html=True)
+        st.markdown(
+            f'<p class="ak07-dash-sub">Live levels · broker P&L · deploy status · '
             f"updated {datetime.now(timezone.utc).astimezone().strftime('%H:%M:%S')} · "
-            f"{enabled_strategy_labels_text()}"
+            f"{enabled_strategy_labels_text()}</p>",
+            unsafe_allow_html=True,
         )
-    with domain_col:
-        st.caption(PRODUCTION_DOMAIN)
+        auto_refresh = render_top_status_bar(
+            mock_mode=MOCK_MODE,
+            production_domain=PRODUCTION_DOMAIN,
+            refresh_seconds=REFRESH_SECONDS,
+            can_view_strategy=user_can_view_strategy,
+            username=auth_session.current_username(),
+            broker=str(profile.get("broker") or "upstox"),
+        )
 
-    if user_can_view_strategy(STRATEGY_S3_BREAKOUT):
-        for s3_code in S3_BREAKOUT_INDICES:
-            render_breakout_strategy_panel(s3_code)
+    # Fragment refresh avoids full-page sleep+rerun blink (ghost duplicate text under Gamma).
+    interval = timedelta(seconds=REFRESH_SECONDS) if auto_refresh else None
 
-    tabbed_codes = tabbed_dashboard_index_codes()
-    if not tabbed_codes:
-        if auto_refresh:
-            time.sleep(REFRESH_SECONDS)
-            st.rerun()
-        return
+    @st.fragment(run_every=interval)
+    def _live_strategy_panels() -> None:
+        _render_strategy_sections()
 
-    ak07_tabs = [INDEX_CONFIGS[code].display for code in tabbed_codes]
-    tabs = st.tabs(ak07_tabs)
-
-    for tab, code in zip(tabs, tabbed_codes):
-        cfg = INDEX_CONFIGS[code]
-        with tab:
-            state = cache_manager.get_json(cache_manager.INDEX_STATE_KEY_TEMPLATE.format(index=code))
-            if not state:
-                st.info(f"No live state for {cfg.display} yet — is the engine running?")
-                continue
-    
-            if user_can_view_strategy(STRATEGY_S1_OI):
-                spot = state.get("spot")
-                call_wall = state.get("call_wall")
-                put_floor = state.get("put_floor")
-    
-                c1, c2, c3, c4 = st.columns(4)
-                c1.metric("Live Spot Price", fmt(float(spot)) if spot is not None else "—")
-                c2.metric(
-                    "Institutional Call Wall \u2191",
-                    fmt(call_wall, 0),
-                    delta=(f"{call_wall - spot:+,.0f} pts away" if call_wall and spot else None),
-                    delta_color="off",
-                )
-                c3.metric(
-                    "Institutional Put Floor \u2193",
-                    fmt(put_floor, 0),
-                    delta=(f"{spot - put_floor:+,.0f} pts above" if put_floor and spot else None),
-                    delta_color="off",
-                )
-                with c4:
-                    st.markdown("**Component Bias**")
-                    st.markdown(bias_badge(state.get("component_bias", "NEUTRAL")), unsafe_allow_html=True)
-                    st.caption(f"Trades today: {state.get('trades_today', 0)}/{state.get('max_trades', 2)}")
-    
-                st.markdown("#### Institutional Component Health")
-                components: dict[str, float | None] = state.get("components") or {}
-                if components:
-                    cols = st.columns(len(components))
-                    for col, (symbol, pct) in zip(cols, components.items()):
-                        col.markdown(component_block(symbol, pct), unsafe_allow_html=True)
-                else:
-                    st.caption("Component quotes unavailable.")
-    
-                position = state.get("position")
-                st.markdown("#### Active Position")
-                if position:
-                    p1, p2, p3, p4, p5, p6 = st.columns(6)
-                    option = f"{position.get('option_strike', '')}{position.get('option_type', '')}"
-                    p1.metric("Direction", position.get("direction", "—"), delta=option or None, delta_color="off")
-                    p2.metric("Entry (spot)", fmt(float(position.get("entry_price", 0))))
-                    p3.metric("Target", fmt(float(position.get("target_price", 0))))
-                    p4.metric("Stop-Loss", fmt(float(position.get("sl_price", 0))))
-                    lots = int(position.get("lots_remaining", 1))
-                    _, partial_pts, _ = INDEX_OI_RISK.get(code, DEFAULT_OI_RISK)
-                    partial_label = (
-                        "1 lot booked"
-                        if position.get("partial_booked")
-                        else f"awaiting +{int(partial_pts)} book"
-                    )
-                    p5.metric(
-                        "Lots Running",
-                        f"{lots}/2",
-                        delta=partial_label,
-                        delta_color="off",
-                    )
-                    if spot is not None:
-                        live_pnl = (
-                            spot - position["entry_price"]
-                            if position.get("direction") == "LONG"
-                            else position["entry_price"] - spot
-                        )
-                        p6.metric("Live P&L (pts)", f"{live_pnl:+.2f}")
-                else:
-                    st.caption("Flat — no open position.")
-    
-                recent = state.get("recent_trades") or []
-                if recent:
-                    with st.expander("Strategy 1 — today's trade log", expanded=False):
-                        for line in reversed(recent):
-                            st.markdown(f'<p class="ak07-signal-line">{line}</p>', unsafe_allow_html=True)
-    
-                updated = str(state.get("updated_at", ""))[:19].replace("T", " ")
-                flags = []
-                if state.get("entries_blocked"):
-                    flags.append("entries blocked")
-                elif state.get("monitoring_active"):
-                    flags.append("monitoring active execution boundaries")
-                if state.get("paper_trading"):
-                    flags.append("paper mode")
-                st.caption(f"Engine state updated {updated}" + (f" · {' · '.join(flags)}" if flags else ""))
-    
-            if user_can_view_strategy(STRATEGY_S2_SMC):
-                render_smc_crt_strategy_panel(code)
-            if user_can_view_strategy(STRATEGY_S7_ORB):
-                render_s7_strategy_panel(code)
-            if user_can_view_strategy(STRATEGY_S8_CHOCH):
-                render_choch_strategy_panel(code)
-            if user_can_view_strategy(STRATEGY_GAMMA):
-                render_gamma_expiry_panel(code)
-    
-    if auto_refresh:
-        time.sleep(REFRESH_SECONDS)
-        st.rerun()
+    _live_strategy_panels()
 
 
 st.set_page_config(
     page_title="AK07 Execution Cockpit",
     page_icon="\U0001f3af",
     layout="wide",
-    initial_sidebar_state="expanded",
+    # auto: expanded on desktop, collapsed drawer on phones
+    initial_sidebar_state="auto",
 )
 
 inject_dark_theme()

@@ -435,6 +435,11 @@ def render_auth_sidebar() -> None:
         if st.button("Sign out", key="ak07_sign_out", use_container_width=True):
             logout()
             st.rerun()
+        st.markdown(
+            '<p style="margin:0.85rem 0 0 0;color:#64748b;font-size:0.72rem;">'
+            "© 2026 AK07 · Algo Trading</p>",
+            unsafe_allow_html=True,
+        )
 
 
 def render_login_page() -> None:
