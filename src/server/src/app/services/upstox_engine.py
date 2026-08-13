@@ -76,11 +76,14 @@ INDEX_OI_RISK: Final[dict[str, tuple[float, float, float]]] = {
 }
 DEFAULT_OI_RISK: Final[tuple[float, float, float]] = (60.0, 60.0, 120.0)
 INITIAL_LOTS: Final[int] = 2
-ITM_OFFSET_POINTS: Final[float] = 50.0  # legacy fallback when chain/greeks unavailable
+ITM_OFFSET_POINTS: Final[float] = 100.0  # legacy fallback — hundred-grid ITM
 # Spot-aligned option pick: target |delta| so premium tracks Nifty (ATM ~0.5, mild ITM ~0.55–0.65).
 OPTION_TARGET_DELTA: Final[float] = float(os.environ.get("AK07_OPTION_TARGET_DELTA", "0.60"))
 OPTION_DELTA_MIN: Final[float] = float(os.environ.get("AK07_OPTION_DELTA_MIN", "0.40"))
 OPTION_DELTA_MAX: Final[float] = float(os.environ.get("AK07_OPTION_DELTA_MAX", "0.75"))
+# S3: only 100-pt strikes (23400 not 23450) and require premium >= this LTP.
+OPTION_STRIKE_MULTIPLE: Final[int] = int(os.environ.get("AK07_OPTION_STRIKE_MULTIPLE", "100"))
+OPTION_MIN_PREMIUM: Final[float] = float(os.environ.get("AK07_OPTION_MIN_PREMIUM", "150"))
 MAX_TRADES_PER_INDEX_PER_DAY: Final[int] = 2
 SUPPORT_POCKET_POINTS: Final[float] = float(os.environ.get("AK07_SUPPORT_POCKET_PTS", "20"))
 RESISTANCE_POCKET_POINTS: Final[float] = float(os.environ.get("AK07_RESISTANCE_POCKET_PTS", "20"))
@@ -654,12 +657,13 @@ class UpstoxClient:
         SHORT → PE near ATM–1 ITM with |delta|≈0.55.
         Falls back to fixed ITM offset when chain/greeks unavailable.
         """
-        from app.services.options_greeks import pick_spot_aligned_option
+        from app.services.options_greeks import pick_spot_aligned_option, snap_strike_multiple
 
         expiry = self._nearest_expiry(instrument_key)
         rows = self.get_option_chain_for_expiry(instrument_key, expiry) if expiry else []
         code = _index_code_for_spot_key(instrument_key)
         step = INDEX_CONFIGS[code].strike_step if code and code in INDEX_CONFIGS else 50
+        mult = max(OPTION_STRIKE_MULTIPLE, 1)
         if expiry and rows:
             picked = pick_spot_aligned_option(
                 spot=spot,
@@ -670,17 +674,23 @@ class UpstoxClient:
                 target_delta=OPTION_TARGET_DELTA,
                 delta_min=OPTION_DELTA_MIN,
                 delta_max=OPTION_DELTA_MAX,
+                strike_multiple=mult,
+                min_premium=OPTION_MIN_PREMIUM,
             )
             if picked and picked.get("instrument_key"):
                 logger.info(
-                    "Option pick %s %s%d delta=%s selection=%s (spot=%.2f target_δ=%.2f)",
+                    "Option pick %s %s%d delta=%s ltp=%s selection=%s "
+                    "(spot=%.2f target_δ=%.2f mult=%d min_prem=%.0f)",
                     direction,
                     picked.get("option_type"),
                     picked.get("strike"),
                     picked.get("abs_delta") or picked.get("delta"),
+                    picked.get("ltp"),
                     picked.get("selection"),
                     spot,
                     OPTION_TARGET_DELTA,
+                    mult,
+                    OPTION_MIN_PREMIUM,
                 )
                 return {
                     "instrument_key": str(picked["instrument_key"]),
@@ -690,11 +700,15 @@ class UpstoxClient:
                     "abs_delta": picked.get("abs_delta"),
                     "selection": picked.get("selection"),
                     "expiry": picked.get("expiry") or expiry,
+                    "ltp": picked.get("ltp"),
                 }
 
-        # Legacy geometric ITM (~50 pts)
+        # Legacy geometric ITM on hundred-grid only
         leg = "call_options" if direction == "LONG" else "put_options"
-        desired = spot - ITM_OFFSET_POINTS if direction == "LONG" else spot + ITM_OFFSET_POINTS
+        atm100 = snap_strike_multiple(spot, mult)
+        desired = (
+            atm100 - mult if direction == "LONG" else atm100 + mult
+        )
         best: dict[str, Any] | None = None
         best_distance = float("inf")
         for row in rows:
@@ -702,8 +716,18 @@ class UpstoxClient:
                 strike = float(row.get("strike_price", 0))
             except (TypeError, ValueError):
                 continue
-            contract_key = str(((row.get(leg) or {}).get("instrument_key")) or "")
+            if int(strike) % mult != 0:
+                continue
+            leg_data = row.get(leg) or {}
+            contract_key = str(leg_data.get("instrument_key") or "")
             if not contract_key:
+                continue
+            md = leg_data.get("market_data") or {}
+            try:
+                ltp = float(md.get("ltp") or md.get("last_price") or 0)
+            except (TypeError, ValueError):
+                ltp = 0.0
+            if OPTION_MIN_PREMIUM > 0 and ltp + 1e-9 < OPTION_MIN_PREMIUM:
                 continue
             distance = abs(strike - desired)
             if distance < best_distance:
@@ -712,8 +736,9 @@ class UpstoxClient:
                     "instrument_key": contract_key,
                     "strike": int(strike),
                     "option_type": "CE" if direction == "LONG" else "PE",
-                    "selection": "itm_offset_fallback",
+                    "selection": "itm_offset_fallback_100",
                     "expiry": expiry,
+                    "ltp": ltp,
                 }
         return best
 

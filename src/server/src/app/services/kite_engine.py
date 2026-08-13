@@ -312,14 +312,18 @@ class KiteClient:
         force_strike: int | None = None,
     ) -> dict[str, Any] | None:
         """Mild-ITM CE (LONG) or PE (SHORT). ``force_strike`` locks S3 to the shared Upstox pick."""
-        from app.services.options_greeks import preferred_itm_strikes
+        from app.services.options_greeks import preferred_itm_strikes, snap_strike_multiple
 
         code = index_code.upper()
         opt = "CE" if direction == "LONG" else "PE"
         cfg = INDEX_CONFIGS.get(code)
         step = cfg.strike_step if cfg else 50
-        atm = int(round(spot / step) * step)
-        preferred = preferred_itm_strikes(spot, step, direction)
+        # S3: hundred-grid only (23400 not 23450), matching Upstox shared pick.
+        strike_multiple = int(os.environ.get("AK07_OPTION_STRIKE_MULTIPLE", "100"))
+        atm = snap_strike_multiple(spot, strike_multiple)
+        preferred = preferred_itm_strikes(
+            spot, step, direction, strike_multiple=strike_multiple
+        )
 
         rows = _load_index_fno_rows(code, option_types=frozenset({opt}))
         by_expiry: dict[str, list[dict[str, str]]] = {}
@@ -357,9 +361,11 @@ class KiteClient:
                     best = by_strike[strike]
                     break
             if not best:
-                if not by_strike:
+                hundred = [s for s in by_strike if s % max(strike_multiple, 1) == 0]
+                pool_keys = hundred or list(by_strike.keys())
+                if not pool_keys:
                     return None
-                strike_i = min(by_strike.keys(), key=lambda s: abs(s - atm))
+                strike_i = min(pool_keys, key=lambda s: abs(s - atm))
                 best = by_strike[strike_i]
 
         strike_i = int(float(best.get("strike_price") or 0))

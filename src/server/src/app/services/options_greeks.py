@@ -258,15 +258,31 @@ def analyze_option_chain(
     )
 
 
-def preferred_itm_strikes(spot: float, strike_step: int, direction: str) -> list[int]:
-    """Strike preference for S3: 1-step ITM first so premium tracks spot better than ATM."""
+def snap_strike_multiple(spot: float, multiple: int) -> int:
+    """Round spot to nearest strike on ``multiple`` (e.g. 100 → 23400 not 23450)."""
+    mult = max(int(multiple), 1)
+    return int(round(float(spot) / mult) * mult)
+
+
+def preferred_itm_strikes(
+    spot: float,
+    strike_step: int,
+    direction: str,
+    *,
+    strike_multiple: int | None = None,
+) -> list[int]:
+    """Strike preference for S3: mild ITM first on the allowed multiple grid.
+
+    Default ``strike_multiple`` follows ``strike_step``. S3 passes 100 so Nifty
+    skips 50-pt strikes (23450) and uses 23400 / 23500 …
+    """
     step = max(int(strike_step), 1)
-    atm = int(round(spot / step) * step)
+    mult = max(int(strike_multiple if strike_multiple is not None else step), 1)
+    atm = snap_strike_multiple(spot, mult)
     if direction == "LONG":
-        # CE: lower strike = ITM
-        return [atm - step, atm, atm - 2 * step, atm + step]
-    # PE: higher strike = ITM
-    return [atm + step, atm, atm + 2 * step, atm - step]
+        # CE: lower strike = ITM (include deeper ITM for min-premium walk)
+        return [atm - mult, atm, atm - 2 * mult, atm - 3 * mult, atm - 4 * mult, atm + mult]
+    return [atm + mult, atm, atm + 2 * mult, atm + 3 * mult, atm + 4 * mult, atm - mult]
 
 
 def pick_spot_aligned_option(
@@ -279,15 +295,18 @@ def pick_spot_aligned_option(
     target_delta: float = 0.60,
     delta_min: float = 0.40,
     delta_max: float = 0.75,
-    band_points: float = 250.0,
+    band_points: float = 400.0,
+    strike_multiple: int = 100,
+    min_premium: float = 150.0,
     now: datetime | None = None,
 ) -> dict[str, Any] | None:
     """Pick mild-ITM CE (LONG) or PE (SHORT) whose |delta| best tracks spot.
 
     Prefers strikes that:
-      • sit 1-step ITM → ATM (premium moves with Nifty)
-      • have |delta| near target (default 0.60, clamped to [delta_min, delta_max])
-      • have usable LTP and preferably OI liquidity
+      • sit on ``strike_multiple`` grid only (default 100 — no 23450-style strikes)
+      • have LTP >= ``min_premium`` (default 150); walks deeper ITM if needed
+      • sit mild ITM → ATM when premium allows
+      • have |delta| near target and usable OI liquidity
     """
     if spot <= 0 or not chain_rows:
         return None
@@ -295,7 +314,10 @@ def pick_spot_aligned_option(
     opt = "CE" if direction == "LONG" else "PE"
     leg_key = "call_options" if direction == "LONG" else "put_options"
     t = years_to_expiry(expiry, now)
-    atm = int(round(spot / strike_step) * strike_step)
+    mult = max(int(strike_multiple or strike_step), 1)
+    atm = snap_strike_multiple(spot, mult)
+    # Allow deeper ITM when hunting for min premium (up to ~8 × 100 pts).
+    max_itm_depth = 8 * mult
     candidates: list[dict[str, Any]] = []
 
     for row in chain_rows:
@@ -303,16 +325,18 @@ def pick_spot_aligned_option(
             strike = int(float(row.get("strike_price", 0)))
         except (TypeError, ValueError):
             continue
+        if strike <= 0 or strike % mult != 0:
+            continue
         if abs(strike - spot) > band_points:
             continue
-        # Prefer ATM / ITM — skip deep OTM that barely tracks spot.
-        if direction == "LONG" and strike > atm + strike_step:
+        # Skip OTM beyond 1 grid step; allow deeper ITM for premium floor.
+        if direction == "LONG" and strike > atm + mult:
             continue
-        if direction == "SHORT" and strike < atm - strike_step:
+        if direction == "SHORT" and strike < atm - mult:
             continue
-        if direction == "LONG" and strike < atm - 2 * strike_step:
-            continue  # deep ITM — expensive, lower gamma for +15 premium target
-        if direction == "SHORT" and strike > atm + 2 * strike_step:
+        if direction == "LONG" and strike < atm - max_itm_depth:
+            continue
+        if direction == "SHORT" and strike > atm + max_itm_depth:
             continue
 
         leg = row.get(leg_key) or {}
@@ -320,6 +344,8 @@ def pick_spot_aligned_option(
         if not instrument_key:
             continue
         ltp = _ltp_from_leg(leg)
+        if min_premium > 0 and ltp + 1e-9 < min_premium:
+            continue
         oi = _oi_from_leg(leg)
 
         broker_delta = None
@@ -340,21 +366,23 @@ def pick_spot_aligned_option(
             delta = bs_delta(spot, strike, t, iv, option_type=opt)
 
         abs_delta = abs(delta)
-        if abs_delta < delta_min or abs_delta > delta_max:
-            if abs(strike - atm) > strike_step:
+        # When walking deep ITM for premium, relax delta band — premium floor wins.
+        deep_itm = abs(strike - atm) > 2 * mult
+        if not deep_itm and (abs_delta < delta_min or abs_delta > delta_max):
+            if abs(strike - atm) > mult:
                 continue
 
         itm_bonus = 0.0
         if direction == "LONG" and strike <= spot:
-            # Prefer 1-step ITM over pure ATM so premium tracks Nifty.
-            itm_bonus = 0.12 if strike == atm - strike_step else 0.05 if strike == atm else 0.04
+            itm_bonus = 0.12 if strike == atm - mult else 0.05 if strike == atm else 0.04
         if direction == "SHORT" and strike >= spot:
-            itm_bonus = 0.12 if strike == atm + strike_step else 0.05 if strike == atm else 0.04
+            itm_bonus = 0.12 if strike == atm + mult else 0.05 if strike == atm else 0.04
 
-        atm_dist = abs(strike - atm) / max(strike_step, 1)
+        atm_dist = abs(strike - atm) / max(mult, 1)
         delta_err = abs(abs_delta - target_delta)
         liq_bonus = min(oi / 50_000.0, 0.05) if oi > 0 else 0.0
-        score = delta_err + 0.15 * atm_dist - itm_bonus - liq_bonus
+        # Prefer closest ITM that clears min premium (don't over-pay deep ITM).
+        score = delta_err + 0.20 * atm_dist - itm_bonus - liq_bonus
         candidates.append(
             {
                 "instrument_key": instrument_key,
@@ -370,27 +398,45 @@ def pick_spot_aligned_option(
         )
 
     if not candidates:
+        # Last resort: nearest hundred-grid ITM with any LTP >= min_premium (ignore delta).
+        fallback: list[dict[str, Any]] = []
         for row in chain_rows:
             try:
                 strike = int(float(row.get("strike_price", 0)))
             except (TypeError, ValueError):
                 continue
-            if strike != atm:
+            if strike <= 0 or strike % mult != 0:
+                continue
+            if direction == "LONG" and strike > atm:
+                continue
+            if direction == "SHORT" and strike < atm:
                 continue
             leg = row.get(leg_key) or {}
             instrument_key = str(leg.get("instrument_key") or "")
-            if instrument_key:
-                return {
+            if not instrument_key:
+                continue
+            ltp = _ltp_from_leg(leg)
+            if min_premium > 0 and ltp + 1e-9 < min_premium:
+                continue
+            fallback.append(
+                {
                     "instrument_key": instrument_key,
                     "strike": strike,
                     "option_type": opt,
                     "delta": None,
                     "abs_delta": None,
-                    "selection": "atm_fallback",
+                    "ltp": ltp,
+                    "selection": "hundred_itm_min_premium",
                     "expiry": expiry,
+                    "score": abs(strike - atm),
                 }
-        return None
+            )
+        if not fallback:
+            return None
+        best_fb = min(fallback, key=lambda c: float(c["score"]))
+        best_fb.pop("score", None)
+        return best_fb
 
     best = min(candidates, key=lambda c: float(c["score"]))
-    best["selection"] = "delta_aligned"
+    best["selection"] = "delta_aligned_100_minprem" if min_premium > 0 else "delta_aligned"
     return best
