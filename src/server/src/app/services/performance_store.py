@@ -197,6 +197,8 @@ def s3_trade_log_rows(trades: list[dict[str, Any]]) -> list[dict[str, Any]]:
                     beyond = max(0.0, float(moved) - 25.0)
             except (TypeError, ValueError):
                 beyond = None
+        result = row.get("result") or classify_result(float(row.get("pnl_points") or 0))
+        reason = str(row.get("exit_reason") or "").strip()
         out.append(
             {
                 "Exit at": str(row.get("exit_at") or "")[:19],
@@ -210,10 +212,27 @@ def s3_trade_log_rows(trades: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "Points moved": moved,
                 "Beyond target": beyond,
                 "Actual pts": row.get("pnl_points"),
-                "Result": row.get("result") or classify_result(float(row.get("pnl_points") or 0)),
+                "Result": result,
+                "Exit reason": reason or "—",
             }
         )
     return out
+
+
+def trade_period_summary(trades: list[dict[str, Any]]) -> dict[str, Any]:
+    """Compact Total / Win / Loss / PnL for order-history chips."""
+    wins = sum(1 for t in trades if float(t.get("pnl_points") or 0) > 0.01)
+    losses = sum(1 for t in trades if float(t.get("pnl_points") or 0) < -0.01)
+    total = len(trades)
+    profit = round(sum(float(t.get("pnl_points") or 0) for t in trades), 2)
+    return {
+        "trades": total,
+        "wins": wins,
+        "losses": losses,
+        "breakeven": max(0, total - wins - losses),
+        "win_pct": round(wins / total * 100, 1) if total else 0.0,
+        "pnl_points": profit,
+    }
 
 
 def amend_completed_trade(

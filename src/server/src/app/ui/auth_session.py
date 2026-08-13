@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import secrets
 from typing import Any
 
 import requests
@@ -12,6 +13,7 @@ import streamlit.components.v1 as components
 
 from app.config.settings import get_settings
 from app.constants import ADMIN_ROLE
+from app.services import cache_manager
 from app.services.browser_session import create_session, delete_session, load_session
 from app.services.user_profiles_store import ensure_profile
 from app.services.users_store import authenticate
@@ -28,6 +30,11 @@ COOKIE_USER = "ak07_username"
 COOKIE_ROLE = "ak07_role"
 LS_BOOTSTRAP_FLAG = "_ak07_ls_bootstrap_done"
 LOGOUT_FLAG = "_ak07_logged_out"
+UPSTOX_PENDING_CODE = "upstox_oauth_pending_code"
+UPSTOX_PENDING_REDIRECT = "upstox_oauth_pending_redirect"
+UPSTOX_FLASH = "upstox_oauth_flash"
+UPSTOX_STATE_KEY = "ak07:upstox_oauth_state:{state}"
+UPSTOX_STATE_TTL = 600
 
 
 def api_base_url() -> str:
@@ -298,6 +305,125 @@ def try_kite_resume_from_query() -> bool:
     return True
 
 
+def create_upstox_oauth_state(*, redirect_uri: str) -> str:
+    """Store a short-lived resume so Upstox redirect can restore AK07 session via `state`."""
+    if not is_logged_in():
+        return ""
+    state = secrets.token_urlsafe(24)
+    cache_manager.set_json(
+        UPSTOX_STATE_KEY.format(state=state),
+        {
+            "username": current_username(),
+            "role": current_role(),
+            "token": str(st.session_state.get(SESSION_TOKEN) or ""),
+            "redirect_uri": (redirect_uri or "").strip() or f"{cockpit_origin()}/",
+        },
+        ttl_seconds=UPSTOX_STATE_TTL,
+    )
+    return state
+
+
+def try_resume_upstox_oauth_state() -> bool:
+    """Restore AK07 session from Upstox OAuth `state` (survives cookie host mismatch)."""
+    if is_logged_in() or st.session_state.get(LOGOUT_FLAG):
+        return False
+    state = (st.query_params.get("state") or "").strip()
+    if not state:
+        return False
+    key = UPSTOX_STATE_KEY.format(state=state)
+    payload = cache_manager.get_json(key)
+    cache_manager.delete_key(key)
+    if not isinstance(payload, dict):
+        return False
+    token = str(payload.get("token") or "").strip()
+    username = str(payload.get("username") or "").strip()
+    role = str(payload.get("role") or "user").strip() or "user"
+    if not token or not username:
+        return False
+    establish_session(token, username, role, persist_browser=True)
+    redirect_uri = str(payload.get("redirect_uri") or "").strip()
+    if redirect_uri:
+        st.session_state[UPSTOX_PENDING_REDIRECT] = redirect_uri
+    return True
+
+
+def capture_upstox_oauth_code_from_query() -> bool:
+    """Stash Upstox ?code= before login so it survives AK07 sign-in."""
+    try_resume_upstox_oauth_state()
+    code = (st.query_params.get("code") or "").strip()
+    if not code:
+        return False
+    # Avoid treating unrelated query params as Upstox OAuth.
+    if (st.query_params.get("kite") or st.query_params.get("request_token") or "").strip():
+        return False
+    st.session_state[UPSTOX_PENDING_CODE] = code
+    if not st.session_state.get(UPSTOX_PENDING_REDIRECT):
+        # Must match the redirect_uri registered with Upstox for this login.
+        stored = (st.session_state.get("upstox_redirect_uri") or "").strip()
+        st.session_state[UPSTOX_PENDING_REDIRECT] = stored or f"{cockpit_origin()}/"
+    return True
+
+
+def try_complete_upstox_oauth() -> bool:
+    """If logged in with a pending Upstox code, exchange it and save the token."""
+    if not is_logged_in():
+        return False
+    code = (st.session_state.get(UPSTOX_PENDING_CODE) or "").strip()
+    if not code:
+        code = (st.query_params.get("code") or "").strip()
+    if not code:
+        return False
+
+    redirect_uri = (
+        (st.session_state.get(UPSTOX_PENDING_REDIRECT) or "").strip()
+        or (st.session_state.get("upstox_redirect_uri") or "").strip()
+        or f"{cockpit_origin()}/"
+    )
+    st.session_state.pop(UPSTOX_PENDING_CODE, None)
+    st.session_state.pop(UPSTOX_PENDING_REDIRECT, None)
+    try:
+        # Drop code from the URL so refresh does not re-use a spent code.
+        params = {k: v for k, v in st.query_params.items() if k != "code"}
+        st.query_params.clear()
+        for k, v in params.items():
+            st.query_params[k] = v
+    except Exception:
+        pass
+
+    try:
+        r = api_request(
+            "POST",
+            "/api/brokers/upstox/oauth/exchange",
+            json={"code": code, "redirect_uri": redirect_uri},
+            timeout=45,
+        )
+    except Exception as exc:
+        st.session_state[UPSTOX_FLASH] = ("error", f"Upstox connect failed: {exc}")
+        return True
+
+    if r.status_code == 200:
+        msg = (r.json() or {}).get("message") or "Upstox session connected."
+        st.session_state[UPSTOX_FLASH] = ("ok", msg)
+    else:
+        try:
+            detail = r.json().get("detail", r.text)
+        except Exception:
+            detail = r.text
+        st.session_state[UPSTOX_FLASH] = ("error", f"Upstox connect failed: {detail}")
+    return True
+
+
+def consume_upstox_oauth_flash() -> None:
+    flash = st.session_state.pop(UPSTOX_FLASH, None)
+    if not flash:
+        return
+    kind, msg = flash
+    if kind == "ok":
+        st.success(msg)
+    else:
+        st.error(msg)
+
+
 def render_auth_sidebar() -> None:
     """Signed-in user + sign out — call once from nav_config when building logged-in nav."""
     if not is_logged_in():
@@ -312,7 +438,10 @@ def render_auth_sidebar() -> None:
 
 
 def render_login_page() -> None:
+    capture_upstox_oauth_code_from_query()
     if is_logged_in():
+        if try_complete_upstox_oauth():
+            st.rerun()
         st.rerun()
 
     from app.ui.styles import inject_login_page_style, login_background_path
@@ -320,6 +449,11 @@ def render_login_page() -> None:
     inject_login_page_style(background_path=login_background_path())
     st.markdown("# AK07 Login")
     st.caption("Sign in to view your assigned strategies and broker settings.")
+    if st.session_state.get(UPSTOX_PENDING_CODE):
+        st.info(
+            "Upstox authorized — sign in once to finish connecting "
+            "(only needed if the browser session was lost)."
+        )
     with st.form("ak07_login_form"):
         username = st.text_input("Username", autocomplete="username")
         password = st.text_input("Password", type="password", autocomplete="current-password")
@@ -327,6 +461,7 @@ def render_login_page() -> None:
     if submitted:
         ok, msg = login(username, password)
         if ok:
+            try_complete_upstox_oauth()
             st.rerun()
         else:
             st.error(msg)

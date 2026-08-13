@@ -248,6 +248,9 @@ async def post_broker_credentials(
     if body.base_url.strip():
         current["base_url"] = body.base_url.strip()
         updated = True
+    if b == "upstox" and body.redirect_uri.strip():
+        current["redirect_uri"] = body.redirect_uri.strip()
+        updated = True
     _persist_broker_creds(b, safe, current)
 
     restart_result = None

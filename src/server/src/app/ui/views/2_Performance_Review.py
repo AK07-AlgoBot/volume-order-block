@@ -1,10 +1,10 @@
-"""AK07 Performance Review — charts and strategy summary table."""
+"""AK07 Performance Review — simple order history for users; analytics for admin."""
 
 from __future__ import annotations
 
 import os
 import sys
-from datetime import date, datetime, timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -23,7 +23,7 @@ from app.ui.strategy_access import (
     performance_start_floor,
     user_can_view_trade,
 )
-from app.ui.styles import inject_dark_theme
+from app.ui.styles import format_exit_reason_label, inject_dark_theme, summary_chip_row
 
 # Entitlement id → performance_store strategy label used in completed trades.
 _PERF_STRATEGY_BY_ENTITLEMENT = {
@@ -43,8 +43,10 @@ if MOCK_MODE:
 
 inject_dark_theme()
 require_login()
+admin = is_admin()
 
-st.markdown("# AK07 Performance Review")
+st.markdown("# Performance")
+st.caption("Your closed trades for the selected period — summary chips + order history.")
 
 f1, f2, f3 = st.columns([2, 2, 3])
 with f1:
@@ -52,26 +54,26 @@ with f1:
     range_choice = st.selectbox(
         "Date range",
         ["Today", "Last 7 days", "Last 30 days", "Last 90 days", "All available"],
-        index=2,
+        index=0 if not admin else 2,
         label_visibility="collapsed",
+        key="perf_range",
     )
 with f2:
     st.caption("Mode")
     paper_filter = st.selectbox(
         "Mode",
         ["All", "Paper only", "Live only"],
-        index=0,
+        index=2 if not MOCK_MODE else 0,
         label_visibility="collapsed",
+        key="perf_mode",
     )
 with f3:
     if MOCK_MODE:
-        st.caption("MOCK DATA — sample trades · sidebar « only for page nav")
-    elif is_admin():
-        st.caption(f"All users · {enabled_strategy_labels_text()} · sidebar « for nav")
+        st.caption("MOCK DATA — sample trades")
+    elif admin:
+        st.caption(f"Admin · all users · {enabled_strategy_labels_text()}")
     else:
-        st.caption(
-            f"Your trades only · from onboarding day · {enabled_strategy_labels_text()}"
-        )
+        st.caption(f"Your trades · from onboarding · {enabled_strategy_labels_text()}")
 
 today = datetime.now(IST).date()
 if range_choice == "Today":
@@ -91,7 +93,6 @@ if floor is not None and start_date < floor:
 
 trades = performance_store.load_trades(start_date=start_date, end_date=today)
 trades = [t for t in trades if user_can_view_trade(t)]
-# Strategy 8 retired — exclude from summaries / charts (historical rows remain in Redis).
 trades = [
     t
     for t in trades
@@ -106,269 +107,193 @@ elif paper_filter == "Live only":
     trades = [t for t in trades if not t.get("paper_trading")]
 
 allowed_perf_strategies: list[str] | None = None
-if not is_admin():
+if not admin:
     allowed_perf_strategies = [
         _PERF_STRATEGY_BY_ENTITLEMENT[sid]
         for sid in enabled_strategy_ids()
         if sid in _PERF_STRATEGY_BY_ENTITLEMENT
     ]
 
-summary_rows = performance_store.summarize_by_strategy(
-    trades,
-    allowed_strategies=allowed_perf_strategies,
+summary = performance_store.trade_period_summary(trades)
+st.markdown(
+    summary_chip_row(
+        total=summary["trades"],
+        wins=summary["wins"],
+        losses=summary["losses"],
+        pnl_points=summary["pnl_points"],
+    ),
+    unsafe_allow_html=True,
 )
-index_rows = performance_store.summarize_by_index(trades)
-matrix_rows = performance_store.summarize_by_strategy_and_index(trades)
-summary_df = pd.DataFrame(summary_rows)
-index_df = pd.DataFrame(index_rows) if index_rows else pd.DataFrame()
-matrix_df = pd.DataFrame(matrix_rows) if matrix_rows else pd.DataFrame()
-daily_series = performance_store.daily_pnl_series(trades)
-daily_df = pd.DataFrame(daily_series) if daily_series else pd.DataFrame()
-
-# --- Section 1: graphs ---
-st.markdown("## Performance charts")
+st.caption(
+    f"Win rate {summary['win_pct']}% · {start_date.isoformat()} → {today.isoformat()} · "
+    f"{len(trades)} closed trade(s)"
+)
 
 if not trades:
     st.info(
-        "No completed trades in the selected range for your account yet. "
-        "New exits appear here after your broker fills close — "
-        "shared historical system trades are hidden from non-admin users."
+        "No completed trades in this range yet.\n\n"
+        "1. Finish **Token Update** for your broker\n"
+        "2. Let a strategy exit\n"
+        "3. Refresh this page — chips and the order table fill in"
     )
-    with st.expander("Why is this empty?", expanded=True):
-        st.markdown(
-            f"""
-**Data sources checked**
-
+    if admin:
+        with st.expander("Why is this empty?", expanded=False):
+            st.markdown(
+                f"""
 | Source | Status |
 |--------|--------|
 | Archive folder | `{load_status['archive_dir']}` |
 | Folder exists | **{'yes' if load_status['archive_dir_exists'] else 'no'}** |
-| Archive files (total) | **{load_status['archive_files_total']}** |
 | Archive files in range | **{load_status['archive_files_in_range']}** |
-| Legacy archive folder | `{load_status.get('legacy_archive_dir', '—')}` |
 | Redis days with trades | **{load_status['redis_days_with_trades']}** |
 | Latest archive | `{load_status['latest_archive'] or 'none'}` |
-
-**Notes**
-- Strategy 1 writes `performance_review_YYYY-MM-DD.json` at **15:30 IST** (only if the engine ran that day).
-- Archives are stored under **`src/server/data/archive`** on the Docker volume — cockpit must mount the same volume as the engine.
-- Strategy 2 / 3 record exits to Redis when trades close (after latest deploy).
-- If you had old archives inside the container image path, redeploy once — new archives land on the persistent volume.
-            """
-        )
-else:
-    m1, m2, m3, m4 = st.columns(4)
-    total_row = summary_rows[-1] if summary_rows else {}
-    m1.metric("Total trades", int(total_row.get("Trades", 0)))
-    m2.metric("Win rate", f"{total_row.get('Win %', 0)}%")
-    m3.metric("Wins / Losses", f"{total_row.get('Wins', 0)} / {total_row.get('Losses', 0)}")
-    m4.metric("Total profit (pts)", f"{total_row.get('Profit (pts)', 0):+.2f}")
-
-    g1, g2 = st.columns(2)
-
-    with g1:
-        st.markdown("#### Cumulative P&L (points)")
-        if not daily_df.empty:
-            chart_df = daily_df.set_index("date")[["cumulative_pnl"]]
-            st.line_chart(chart_df, height=280)
-        else:
-            st.caption("No daily series to plot.")
-
-    with g2:
-        st.markdown("#### Daily P&L (points)")
-        if not daily_df.empty:
-            chart_df = daily_df.set_index("date")[["daily_pnl"]]
-            st.bar_chart(chart_df, height=280)
-        else:
-            st.caption("No daily series to plot.")
-
-    g3, g4 = st.columns(2)
-
-    with g3:
-        st.markdown("#### Profit by strategy (points)")
-        strat_df = summary_df[summary_df["Strategy"] != "TOTAL"].copy()
-        if not strat_df.empty and strat_df["Trades"].sum() > 0:
-            profit_chart = strat_df.set_index("Strategy")[["Profit (pts)"]]
-            st.bar_chart(profit_chart, height=280)
-        else:
-            st.caption("No strategy breakdown yet.")
-
-    with g4:
-        st.markdown("#### Win rate by strategy (%)")
-        if not strat_df.empty and strat_df["Trades"].sum() > 0:
-            win_chart = strat_df.set_index("Strategy")[["Win %"]]
-            st.bar_chart(win_chart, height=280)
-        else:
-            st.caption("No win-rate breakdown yet.")
-
-    if not index_df.empty:
-        st.markdown("#### Profit by index (points)")
-        idx_chart_df = index_df[index_df["Index"] != "TOTAL"].copy()
-        if not idx_chart_df.empty and idx_chart_df["Trades"].sum() > 0:
-            st.bar_chart(idx_chart_df.set_index("Index")[["Profit (pts)"]], height=240)
-
-    with st.expander("Trade outcome mix", expanded=False):
-        if trades:
-            outcomes = pd.Series([t.get("result", "BREAKEVEN") for t in trades]).value_counts()
-            st.bar_chart(outcomes, height=220)
-
-st.markdown("---")
-
-# --- Section 2: summary table ---
-st.markdown("## Strategy summary")
-
-display_df = summary_df.copy()
-if not display_df.empty:
-    display_df["Win %"] = display_df["Win %"].map(lambda v: f"{v:.1f}%")
-    display_df["Profit (pts)"] = display_df["Profit (pts)"].map(lambda v: f"{v:+.2f}")
-
-st.dataframe(
-    display_df,
-    use_container_width=True,
-    hide_index=True,
-)
-
-st.markdown("## Index summary")
-
-if index_df.empty:
-    st.caption("No index-level trades in the selected range.")
-else:
-    display_index_df = index_df.copy()
-    display_index_df["Win %"] = display_index_df["Win %"].map(lambda v: f"{v:.1f}%")
-    display_index_df["Profit (pts)"] = display_index_df["Profit (pts)"].map(lambda v: f"{v:+.2f}")
-    st.dataframe(display_index_df, use_container_width=True, hide_index=True)
-
-st.markdown("## Strategy × index matrix")
-
-if matrix_df.empty:
-    st.caption("No strategy/index combinations in the selected range.")
-else:
-    pivot_profit = matrix_df.pivot_table(
-        index="Strategy",
-        columns="Index",
-        values="Profit (pts)",
-        aggfunc="sum",
-        fill_value=0.0,
-    )
-    pivot_trades = matrix_df.pivot_table(
-        index="Strategy",
-        columns="Index",
-        values="Trades",
-        aggfunc="sum",
-        fill_value=0,
-    )
-    st.markdown("#### Profit (points)")
-    st.dataframe(
-        pivot_profit.map(lambda v: f"{v:+.2f}"),
-        use_container_width=True,
-    )
-    st.markdown("#### Trade count")
-    st.dataframe(pivot_trades.astype(int), use_container_width=True)
-
-    with st.expander("Detailed strategy × index rows", expanded=False):
-        detail_df = matrix_df.copy()
-        detail_df["Win %"] = detail_df["Win %"].map(lambda v: f"{v:.1f}%")
-        detail_df["Profit (pts)"] = detail_df["Profit (pts)"].map(lambda v: f"{v:+.2f}")
-        st.dataframe(detail_df, use_container_width=True, hide_index=True)
-
-st.caption(
-    f"Range: {start_date.isoformat()} → {today.isoformat()} · "
-    f"{len(trades)} closed trade(s) · updated {datetime.now().strftime('%H:%M:%S')} local"
-)
-
-with st.expander("Raw trade log", expanded=False):
-    if trades:
-        raw_df = pd.DataFrame(trades)
-        cols = [
-            c
-            for c in (
-                "exit_at",
-                "strategy",
-                "symbol",
-                "direction",
-                "entry_price",
-                "exit_price",
-                "pnl_points",
-                "result",
-                "exit_reason",
-                "paper_trading",
+                """
             )
-            if c in raw_df.columns
-        ]
-        st.dataframe(raw_df[cols], use_container_width=True, hide_index=True)
-    else:
-        st.caption("No trades to list.")
-
-st.markdown("## Loss review")
-
-if hasattr(performance_store, "analyze_losses"):
-    loss_report = performance_store.analyze_losses(trades)
 else:
-    loss_report = {
-        "total_trades": len(trades),
-        "wins": sum(1 for t in trades if float(t.get("pnl_points") or 0) > 0.01),
-        "losses": sum(1 for t in trades if float(t.get("pnl_points") or 0) < -0.01),
-        "loss_rows": [],
-        "by_bucket": {},
-        "by_strategy": [],
-        "filter_note": "Rebuild cockpit image — loss analysis module not deployed yet.",
-    }
-if not is_admin():
-    loss_report["filter_note"] = (
-        f"Your account · {enabled_strategy_labels_text()} · "
-        "only your attributed closed trades are counted."
+    # Optional single daily chart (not both cumulative + daily)
+    daily_series = performance_store.daily_pnl_series(trades)
+    daily_df = pd.DataFrame(daily_series) if daily_series else pd.DataFrame()
+    if not daily_df.empty and len(daily_df) > 1:
+        with st.expander("Daily P&L (points)", expanded=False):
+            st.bar_chart(daily_df.set_index("date")[["daily_pnl"]], height=220)
+
+# --- Order history (primary surface) ---
+st.markdown("### Order history")
+st.caption("Closed fills with result and exit reason.")
+
+def _is_s3(t: dict) -> bool:
+    return (
+        str(t.get("strategy_id") or "") == "breakout"
+        or str(t.get("strategy") or "") == performance_store.STRATEGY_BREAKOUT
     )
-l1, l2, l3, l4 = st.columns(4)
-l1.metric("Total trades", loss_report["total_trades"])
-l2.metric("Wins", loss_report["wins"])
-l3.metric("Losses", loss_report["losses"])
-l4.metric(
-    "Win rate",
-    f"{(loss_report['wins'] / loss_report['total_trades'] * 100):.1f}%"
-    if loss_report["total_trades"]
-    else "—",
+
+
+s3_trades = [t for t in trades if _is_s3(t)]
+other_trades = [t for t in trades if not _is_s3(t)]
+
+show_s3 = bool(s3_trades) or (
+    allowed_perf_strategies is None
+    or performance_store.STRATEGY_BREAKOUT in (allowed_perf_strategies or [])
 )
 
-st.caption(loss_report["filter_note"])
-
-if not is_admin():
-    st.caption("Showing only strategies assigned to your account.")
-
-if loss_report["losses"]:
-    st.markdown("### Why losses happened")
-    bucket_df = pd.DataFrame(
-        [{"Cause": k, "Count": v} for k, v in sorted(loss_report["by_bucket"].items(), key=lambda x: -x[1])]
-    )
-    st.dataframe(bucket_df, use_container_width=True, hide_index=True)
-
-    strat_loss_df = pd.DataFrame(loss_report["by_strategy"])
-    if not strat_loss_df.empty:
-        st.markdown("### Losses by strategy")
-        st.dataframe(strat_loss_df, use_container_width=True, hide_index=True)
-
-    loss_df = pd.DataFrame(loss_report["loss_rows"])
-    st.markdown("### Every losing trade")
-    st.dataframe(loss_df, use_container_width=True, hide_index=True)
-
-    if is_admin():
-        st.markdown(
-            """
-**Common causes (even with day-review filter on):**
-- **Stop-loss hit** — filter picks direction, not outcome; structural S3 SL can be wider than fixed TP.
-- **14:55 square-off** — open trade closed at market before TP.
-- **S1 / S6 exempt** — can take either side; not gated by S3 day review.
-- **Bad levels** — if Green/Red differ from TradingView, entries trigger at wrong prices (see S3 open source: prefer *candle* not *LTP*).
-- **Old engine build** — e.g. S1 at 60pt SL instead of 30pt; redeploy `engine` after config changes.
-            """
-        )
+if show_s3:
+    st.markdown("#### S3 · BLR Breakout")
+    if s3_trades:
+        s3_table = performance_store.s3_trade_log_rows(s3_trades)
+        for row in s3_table:
+            row["Exit reason"] = format_exit_reason_label(str(row.get("Exit reason") or ""))
+        st.dataframe(s3_table, use_container_width=True, hide_index=True)
     else:
-        st.markdown(
-            """
-**Notes for your assigned strategies:**
-- **Stop-loss hit** — direction can be right but premium still stops out.
-- **Square-off** — open trade closed before target at session end.
-- New exits appear here after your broker fill closes.
-            """
+        st.info("No S3 closes in this range yet.")
+
+if other_trades:
+    st.markdown("#### Other strategies")
+    other_rows = []
+    for t in sorted(other_trades, key=lambda r: str(r.get("exit_at") or ""), reverse=True):
+        other_rows.append(
+            {
+                "Exit at": str(t.get("exit_at") or "")[:19],
+                "Strategy": t.get("strategy") or t.get("strategy_id") or "—",
+                "Symbol": t.get("symbol") or "—",
+                "Direction": t.get("direction") or "",
+                "Entry": t.get("entry_price"),
+                "Exit": t.get("exit_price"),
+                "Actual pts": t.get("pnl_points"),
+                "Result": t.get("result")
+                or performance_store.classify_result(float(t.get("pnl_points") or 0)),
+                "Exit reason": format_exit_reason_label(str(t.get("exit_reason") or "")),
+            }
         )
-else:
-    st.info("No losing trades in the selected range.")
+    st.dataframe(other_rows, use_container_width=True, hide_index=True)
+elif not show_s3 and not trades:
+    pass
+elif not show_s3 and trades and not other_trades:
+    st.caption("No order rows to display.")
+
+# --- Admin-only analytics (collapsed) ---
+if admin and trades:
+    st.markdown("---")
+    with st.expander("Admin analytics", expanded=False):
+        summary_rows = performance_store.summarize_by_strategy(
+            trades,
+            allowed_strategies=None,
+        )
+        index_rows = performance_store.summarize_by_index(trades)
+        matrix_rows = performance_store.summarize_by_strategy_and_index(trades)
+        summary_df = pd.DataFrame(summary_rows)
+        index_df = pd.DataFrame(index_rows) if index_rows else pd.DataFrame()
+        matrix_df = pd.DataFrame(matrix_rows) if matrix_rows else pd.DataFrame()
+
+        st.markdown("##### Strategy summary")
+        display_df = summary_df.copy()
+        if not display_df.empty:
+            display_df["Win %"] = display_df["Win %"].map(lambda v: f"{v:.1f}%")
+            display_df["Profit (pts)"] = display_df["Profit (pts)"].map(lambda v: f"{v:+.2f}")
+        st.dataframe(display_df, use_container_width=True, hide_index=True)
+
+        strat_df = summary_df[summary_df["Strategy"] != "TOTAL"].copy() if not summary_df.empty else pd.DataFrame()
+        c1, c2 = st.columns(2)
+        with c1:
+            st.markdown("##### Profit by strategy")
+            if not strat_df.empty and strat_df["Trades"].sum() > 0:
+                st.bar_chart(strat_df.set_index("Strategy")[["Profit (pts)"]], height=240)
+            else:
+                st.caption("No strategy breakdown.")
+        with c2:
+            st.markdown("##### Win rate by strategy")
+            if not strat_df.empty and strat_df["Trades"].sum() > 0:
+                st.bar_chart(strat_df.set_index("Strategy")[["Win %"]], height=240)
+            else:
+                st.caption("No win-rate breakdown.")
+
+        st.markdown("##### Index summary")
+        if index_df.empty:
+            st.caption("No index-level trades.")
+        else:
+            display_index_df = index_df.copy()
+            display_index_df["Win %"] = display_index_df["Win %"].map(lambda v: f"{v:.1f}%")
+            display_index_df["Profit (pts)"] = display_index_df["Profit (pts)"].map(
+                lambda v: f"{v:+.2f}"
+            )
+            st.dataframe(display_index_df, use_container_width=True, hide_index=True)
+
+        st.markdown("##### Strategy × index")
+        if matrix_df.empty:
+            st.caption("No matrix rows.")
+        else:
+            pivot_profit = matrix_df.pivot_table(
+                index="Strategy",
+                columns="Index",
+                values="Profit (pts)",
+                aggfunc="sum",
+                fill_value=0.0,
+            )
+            st.dataframe(
+                pivot_profit.map(lambda v: f"{v:+.2f}"),
+                use_container_width=True,
+            )
+
+        if hasattr(performance_store, "analyze_losses"):
+            loss_report = performance_store.analyze_losses(trades)
+            st.markdown("##### Loss review")
+            st.caption(
+                f"Wins {loss_report['wins']} · Losses {loss_report['losses']} · "
+                f"{loss_report.get('filter_note') or ''}"
+            )
+            if loss_report["losses"]:
+                bucket_df = pd.DataFrame(
+                    [
+                        {"Cause": k, "Count": v}
+                        for k, v in sorted(
+                            loss_report["by_bucket"].items(), key=lambda x: -x[1]
+                        )
+                    ]
+                )
+                st.dataframe(bucket_df, use_container_width=True, hide_index=True)
+                st.dataframe(
+                    pd.DataFrame(loss_report["loss_rows"]),
+                    use_container_width=True,
+                    hide_index=True,
+                )
+            else:
+                st.info("No losing trades in this range.")

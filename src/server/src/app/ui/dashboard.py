@@ -396,9 +396,16 @@ def render_gamma_expiry_panel(index_code: str) -> None:
 
 def render_breakout_strategy_panel(index_code: str) -> None:
     """Strategy Type 3 — BLR Breakout block (Nifty only)."""
+    from app.ui.styles import checklist_pills, strategy_card_header
+
     st.markdown("---")
-    st.markdown("#### Strategy Type 3 — BLR Breakout")
-    st.caption("Nifty 50 futures only — not shown on BankNifty or Sensex tabs.")
+    st.markdown(
+        strategy_card_header(
+            "S3 · BLR Breakout",
+            "Nifty options · shared strike fan-out · trail after +10 · max 3 trades/day",
+        ),
+        unsafe_allow_html=True,
+    )
 
     bo = cache_manager.get_json(cache_manager.BREAKOUT_STATE_KEY_TEMPLATE.format(index=index_code))
     bo_hb = cache_manager.get_json(cache_manager.BREAKOUT_HEARTBEAT_KEY)
@@ -417,18 +424,35 @@ def render_breakout_strategy_panel(index_code: str) -> None:
         )
 
     if not bo and not bo_hb:
-        st.caption("Breakout engine offline — start `breakout_engine` service or MOCK mode.")
+        st.info(
+            "Breakout engine offline.\n\n"
+            "1. Start `breakout_engine` (or enable MOCK)\n"
+            "2. Complete **Token Update** for your broker\n"
+            "3. Wait for session open / Day Review"
+        )
         return
 
     if bo_hb:
         end = bo_hb.get("session_end_ist", "15:30")
         mode = "PAPER" if bo_hb.get("paper_trading") else "LIVE"
-        st.caption(
-            f"Breakout heartbeat {str(bo_hb.get('at', ''))[:19]} · session until {end} IST · {mode}"
+        engine_ok = True
+        st.markdown(
+            checklist_pills(
+                [
+                    ("Engine online", "ok" if engine_ok else "bad"),
+                    (f"Session → {end} IST", "ok"),
+                    (mode, "warn" if mode == "PAPER" else "ok"),
+                ]
+            ),
+            unsafe_allow_html=True,
         )
 
     if not bo:
-        st.info(f"No breakout state for {index_code} yet.")
+        st.info(
+            f"No live breakout state for {index_code} yet.\n\n"
+            "Levels appear after the 9:15 open freezes. "
+            "Meanwhile keep Token Update connected."
+        )
         return
 
     b1, b2, b3, b4, b5 = st.columns(5)
@@ -449,9 +473,10 @@ def render_breakout_strategy_panel(index_code: str) -> None:
     pnl_total = pnl_snap.get("total_pnl_inr")
     pnl_realised = pnl_snap.get("realised_inr")
     pnl_updated = str(pnl_snap.get("updated_at") or "")[:19].replace("T", " ")
-    d1, d2 = st.columns(2)
+    d1, d2, d3 = st.columns(3)
     d1.metric(broker_pnl_label(user_broker), format_pnl_inr(float(pnl_total) if pnl_total is not None else None))
     d2.metric("Realised today", format_pnl_inr(float(pnl_realised) if pnl_realised is not None else None))
+    d3.metric("Trades today", f"{bo.get('trades_today', 0)}/{bo.get('max_trades', 3)}")
 
     meta = []
     if bo.get("session_open") is not None:
@@ -482,7 +507,7 @@ def render_breakout_strategy_panel(index_code: str) -> None:
     setup = str(bo.get("setup_label") or "—")
     st.markdown(f'<p class="ak07-muted-line">{setup}</p>', unsafe_allow_html=True)
 
-    st.markdown("##### Strategy Type 3 — Active Position")
+    st.markdown("##### Deployed position")
     bo_pos = bo.get("position")
     if bo_pos:
         p1, p2, p3, p4, p5, p6 = st.columns(6)
@@ -524,7 +549,12 @@ def render_breakout_strategy_panel(index_code: str) -> None:
                     )
         st.caption(str(bo_pos.get("entry_reason", "")))
     else:
-        st.caption(f"Flat — no breakout position (1 lot · Nifty futures · max {bo.get('max_trades', 3)}/day).")
+        st.info(
+            "**No deployed S3 position** — flat right now.\n\n"
+            f"When a breakout fires you will see strike, SL/TP, live P&L, and broker legs here "
+            f"(max {bo.get('max_trades', 3)} trades/day). "
+            "Closed trades land under **Performance Review**."
+        )
 
     signals = bo.get("signals") or []
     if signals:
@@ -560,12 +590,13 @@ def run_dashboard() -> None:
     # ---------------------------------------------------------------------------
     # Main: one tab per index
     # ---------------------------------------------------------------------------
-    st.markdown("# AK07 Multi-Index Execution Cockpit")
+    st.markdown("# AK07 Execution Cockpit")
     meta_col, domain_col = st.columns([10, 2])
     with meta_col:
         st.caption(
-            f"Updated {datetime.now(timezone.utc).astimezone().strftime('%H:%M:%S')} local · "
-            f"{enabled_strategy_labels_text()} · collapse sidebar « for full width"
+            f"Live levels · broker P&L · deploy status · "
+            f"updated {datetime.now(timezone.utc).astimezone().strftime('%H:%M:%S')} · "
+            f"{enabled_strategy_labels_text()}"
         )
     with domain_col:
         st.caption(PRODUCTION_DOMAIN)

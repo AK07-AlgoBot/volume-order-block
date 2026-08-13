@@ -16,6 +16,7 @@ class BrokerCredentialsBody(BaseModel):
     api_key: str = ""
     api_secret: str = ""
     base_url: str = ""
+    redirect_uri: str = ""
 
 
 class GrowwTokenRefreshBody(BaseModel):

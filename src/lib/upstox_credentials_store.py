@@ -117,6 +117,9 @@ def persist_credentials_for_user(username: str, data: dict[str, str]) -> dict[st
         "api_secret": str(data.get("api_secret", "")).strip(),
         "base_url": str(data.get("base_url") or "").strip() or DEFAULT_BASE_URL,
     }
+    redirect_uri = str(data.get("redirect_uri") or "").strip()
+    if redirect_uri:
+        out["redirect_uri"] = redirect_uri
     path = credentials_file_for_user(username)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(out, indent=2) + "\n", encoding="utf-8")

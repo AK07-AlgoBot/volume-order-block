@@ -14,24 +14,39 @@ def _bootstrap_auth() -> None:
     """Restore session from cookies / resume token before building navigation."""
     from app.ui import auth_session as auth
 
+    # Resume AK07 session from Upstox `state`, then stash ?code= for token exchange.
+    auth.capture_upstox_oauth_code_from_query()
+
     if auth.is_logged_in() or st.session_state.get(auth.LOGOUT_FLAG):
+        if auth.is_logged_in() and auth.try_complete_upstox_oauth():
+            st.rerun()
         return
     if auth._try_restore_auth():
+        if auth.try_complete_upstox_oauth():
+            st.rerun()
         st.rerun()
     auth._try_localstorage_bootstrap_once()
+    # After localStorage cookie copy + reload, capture may restore session next run.
 
 
 def build_navigation(*, dashboard_runner) -> st.navigation:
     """Return st.navigation for the current user role."""
     _bootstrap_auth()
 
-    from app.ui.auth_session import is_admin, is_logged_in, render_auth_sidebar, render_login_page
+    from app.ui.auth_session import (
+        consume_upstox_oauth_flash,
+        is_admin,
+        is_logged_in,
+        render_auth_sidebar,
+        render_login_page,
+    )
 
     if not is_logged_in():
         return st.navigation(
             [st.Page(render_login_page, title="Sign in", default=True, icon="🔐")],
         )
 
+    consume_upstox_oauth_flash()
     render_auth_sidebar()
 
     core = [

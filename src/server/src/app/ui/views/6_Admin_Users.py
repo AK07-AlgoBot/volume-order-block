@@ -11,7 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
 from app.constants import ALL_STRATEGIES, STRATEGY_LABELS
 from app.ui.auth_session import api_request, is_admin, require_login
-from app.ui.styles import inject_dark_theme
+from app.ui.styles import format_exit_reason_label, inject_dark_theme, summary_chip_row
 
 inject_dark_theme()
 require_login()
@@ -134,24 +134,50 @@ else:
     st.info("No broker connection results.")
 
 st.markdown("---")
-st.markdown("## S3 trade log")
+st.markdown("## S3 order history")
 st.caption(
-    "Strategy 3 closed trades — Nifty spot, strike, entry/SL/target premium, "
-    "points moved after entry, actual points captured, and WIN/LOSS."
+    "Closed Strategy 3 trades — entry/exit premium, points, result, and exit reason. "
+    "Use period chips like a trading order book."
 )
-s3_days = st.selectbox("Lookback", [7, 14, 30, 60], index=1, key="admin_s3_days")
+
+period_labels = {"Today": 1, "7 Days": 7, "30 Days": 30, "60 Days": 60}
+period = st.radio(
+    "Period",
+    list(period_labels.keys()),
+    index=1,
+    horizontal=True,
+    key="admin_s3_period",
+    label_visibility="collapsed",
+)
+s3_days = period_labels[period]
 try:
     s3_response = api_request("GET", f"/api/admin/s3-trades?days={s3_days}")
     if s3_response.status_code == 200:
         s3_payload = s3_response.json()
-        s3_rows = s3_payload.get("rows") or []
+        s3_rows = list(s3_payload.get("rows") or [])
+        wins = sum(1 for r in s3_rows if str(r.get("Result") or "").upper() == "WIN")
+        losses = sum(1 for r in s3_rows if str(r.get("Result") or "").upper() == "LOSS")
+        pnl = round(sum(float(r.get("Actual pts") or 0) for r in s3_rows), 2)
+        st.markdown(
+            summary_chip_row(total=len(s3_rows), wins=wins, losses=losses, pnl_points=pnl),
+            unsafe_allow_html=True,
+        )
         if s3_rows:
-            st.dataframe(s3_rows, use_container_width=True, hide_index=True)
+            display_rows = []
+            for r in s3_rows:
+                row = dict(r)
+                row["Exit reason"] = format_exit_reason_label(str(row.get("Exit reason") or ""))
+                display_rows.append(row)
+            st.dataframe(display_rows, use_container_width=True, hide_index=True)
             st.caption(
-                f"{len(s3_rows)} trade(s) · {s3_payload.get('start_date')} → {s3_payload.get('end_date')}"
+                f"{period} · {s3_payload.get('start_date')} → {s3_payload.get('end_date')}"
             )
         else:
-            st.info("No S3 trades in this lookback yet. New exits will appear here after the next rebuild.")
+            st.info(
+                "No S3 closes in this period yet.\n\n"
+                "**Next steps:** keep Token Update connected → wait for an S3 exit → "
+                "refresh this page. Partial kills and trail exits show under Exit reason."
+            )
     else:
         st.error(s3_response.text or f"S3 trade log API error {s3_response.status_code}")
 except Exception as exc:

@@ -18,6 +18,7 @@ from app.routes import (
     settings_credentials,
     settings_upstox,
     upstox_notifier,
+    upstox_oauth,
 )
 
 app = FastAPI(title="AK07 Dashboard API", version="2.0.0")
@@ -41,6 +42,7 @@ app.add_middleware(
 app.include_router(auth.router)
 app.include_router(admin_users.router)
 app.include_router(kite_oauth.router)
+app.include_router(upstox_oauth.router)
 app.include_router(groww_token.router)
 app.include_router(settings_upstox.router)
 app.include_router(settings_credentials.router)
