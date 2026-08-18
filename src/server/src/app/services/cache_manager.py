@@ -42,6 +42,7 @@ BREAKOUT_OPEN_TICK_KEY_TEMPLATE: Final[str] = "ak07:breakout_open_tick:{day}:{in
 BREAKOUT_SESSION_KEY_TEMPLATE: Final[str] = "ak07:breakout_session:{day}:{index}"
 BREAKOUT_HEARTBEAT_KEY: Final[str] = "ak07:breakout_heartbeat"
 S7_STATE_KEY: Final[str] = "ak07:s7_state"
+S29_STATE_KEY: Final[str] = "ak07:s29_state"
 CHOCH_STATE_KEY: Final[str] = "ak07:choch_state"
 CHOCH_SESSION_KEY_TEMPLATE: Final[str] = "ak07:choch_session:{day}"
 GAMMA_STATE_KEY: Final[str] = "ak07:gamma_state"

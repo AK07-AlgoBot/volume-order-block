@@ -91,6 +91,7 @@ from app.services.breakout_engine import (
     SESSION_START as BLR_SESSION_START,
 )
 from app.services.engine_intraday import entries_globally_blocked, profit_target_engaged, session_vwap
+from app.constants import S7_ORB_INDICES
 from app.services.upstox_engine import (
     INDEX_CONFIGS,
     ITM_OFFSET_POINTS,
@@ -547,7 +548,8 @@ def detect_s7_signal(
 # ── market client ─────────────────────────────────────────────────────────────
 
 class S7MarketClient:
-    def __init__(self) -> None:
+    def __init__(self, *, paper_trading: bool | None = None) -> None:
+        self._paper = PAPER_TRADING if paper_trading is None else bool(paper_trading)
         self._upstox: UpstoxClient | None = None if MOCK_MODE else build_upstox_client()
         self._mock: dict[str, float] = {"NIFTY": 23_100.0, "BANKNIFTY": 51_200.0, "SENSEX": 76_400.0}
 
@@ -617,12 +619,12 @@ class S7MarketClient:
         return {"instrument_key": "", "strike": strike, "option_type": "CE" if direction == "LONG" else "PE"}
 
     def place_entry(self, instrument_key: str, quantity: int) -> bool:
-        if PAPER_TRADING or not instrument_key:
+        if self._paper or not instrument_key:
             return True
         return bool(self._upstox and self._upstox.place_market_order(instrument_key, quantity, "BUY"))
 
     def place_exit(self, instrument_key: str, quantity: int) -> bool:
-        if PAPER_TRADING or not instrument_key:
+        if self._paper or not instrument_key:
             return True
         return bool(self._upstox and self._upstox.place_market_order(instrument_key, quantity, "SELL"))
 
@@ -632,14 +634,32 @@ class S7MarketClient:
 class S7Engine:
     """Production VMB engine.  Runs perpetually via run(); tick() for unit tests."""
 
-    def __init__(self) -> None:
-        self.client = S7MarketClient()
-        self.states = {code: S7State(config=cfg) for code, cfg in INDEX_CONFIGS.items()}
+    def __init__(
+        self,
+        *,
+        index_codes: tuple[str, ...] | None = None,
+        paper_trading: bool | None = None,
+        strategy_label: str | None = None,
+        strategy_id: str = "s7_orb",
+        cache_key: str | None = None,
+        short_name: str = "S7",
+    ) -> None:
+        codes = index_codes if index_codes is not None else S7_ORB_INDICES
+        self.paper_trading = PAPER_TRADING if paper_trading is None else bool(paper_trading)
+        self.strategy_label = strategy_label or STRATEGY_LABEL
+        self.strategy_id = strategy_id
+        self.cache_key = cache_key or cache_manager.S7_STATE_KEY
+        self.short_name = short_name
+        self.client = S7MarketClient(paper_trading=self.paper_trading)
+        missing = [c for c in codes if c not in INDEX_CONFIGS]
+        if missing:
+            raise ValueError(f"{short_name} unknown index codes: {missing}")
+        self.states = {code: S7State(config=INDEX_CONFIGS[code]) for code in codes}
         self._daily_loss_paused: str = ""
         logger.info(
-            "S7 VMB engine started | paper=%s mock=%s | "
+            "%s VMB engine started | indices=%s paper=%s mock=%s | "
             "capital=%.0f risk_pct=%.1f%% daily_limit=%.1f%% max_lots=%d",
-            PAPER_TRADING, MOCK_MODE,
+            short_name, ",".join(codes), self.paper_trading, MOCK_MODE,
             CAPITAL_INR, RISK_PCT * 100, DAILY_LOSS_LIMIT_PCT * 100, MAX_LOTS,
         )
 
@@ -761,7 +781,7 @@ class S7Engine:
                 sl_price=sl,
                 note=reason,
                 timestamp=ts,
-                strategy="S7 ORB+",
+                strategy=self.short_name + " ORB+",
                 candles=candles,
             )
             return
@@ -880,8 +900,8 @@ class S7Engine:
         state.setup_label = f"Flat — {reason} ({pnl_pts:+.2f} pts)"
         state.signal_log.append(f"Exit {reason} @ {exit_price:.2f} ({pnl_pts:+.2f})")
         performance_store.record_completed_trade(
-            strategy=STRATEGY_LABEL,
-            strategy_id="s7_vmb",
+            strategy=self.strategy_label,
+            strategy_id=self.strategy_id,
             symbol=state.config.code,
             direction=pos.direction,
             entry_price=pos.entry_price,
@@ -889,7 +909,7 @@ class S7Engine:
             pnl_points=pnl_pts,
             exit_reason=reason,
             entry_at=pos.opened_at,
-            paper_trading=PAPER_TRADING,
+            paper_trading=self.paper_trading,
         )
         logger.info("[%s] S7 exit %s @ %.2f | %+.2f pts | INR %+.0f", state.config.code, reason, exit_price, pnl_pts, pnl_inr)
         telegram_notifier.notify_trade_exit(
@@ -913,7 +933,8 @@ class S7Engine:
     def _publish_state(self, now: datetime) -> None:
         payload: dict[str, Any] = {
             "timestamp": now.isoformat(),
-            "strategy": STRATEGY_LABEL,
+            "strategy": self.strategy_label,
+            "paper_trading": self.paper_trading,
             "total_daily_pnl_inr": round(sum(s.daily_pnl_inr for s in self.states.values()), 2),
             "indices": {},
         }
@@ -936,7 +957,7 @@ class S7Engine:
                     "lots": s.position.lots,
                 }
             payload["indices"][code] = idx
-        cache_manager.set_json(cache_manager.S7_STATE_KEY, payload, ttl_seconds=120)
+        cache_manager.set_json(self.cache_key, payload, ttl_seconds=120)
 
 
 def main() -> None:

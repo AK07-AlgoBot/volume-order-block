@@ -21,12 +21,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from app.constants import (
     S3_BREAKOUT_INDICES,
+    S7_ORB_INDICES,
+    S29_ORB_INDICES,
     STRATEGY_GAMMA,
     STRATEGY_S1_OI,
     STRATEGY_S2_SMC,
     STRATEGY_S3_BREAKOUT,
     STRATEGY_S7_ORB,
     STRATEGY_S8_CHOCH,
+    STRATEGY_S29_ORB,
 )
 from app.services import cache_manager
 from app.services.broker_pnl_store import (
@@ -254,37 +257,46 @@ def render_smc_crt_strategy_panel(symbol_code: str, *, show_header: bool = True)
     )
 
 
-def render_s7_strategy_panel(index_code: str, *, show_header: bool = True) -> None:
-    """Strategy 7 — ORB+ ADX block."""
+def render_s7_strategy_panel(
+    index_code: str,
+    *,
+    show_header: bool = True,
+    cache_key: str | None = None,
+    title: str = "S7 · ORB+ ADX",
+    paper: bool = False,
+    offline_hint: str = "S7 engine offline — is the `s7_engine` service running?",
+) -> None:
+    """Strategy 7 / 29 ORB+ ADX block."""
     from app.ui.styles import strategy_card_header
+
+    key = cache_key or cache_manager.S7_STATE_KEY
+    subtitle = f"{index_code} · opening range breakout"
+    if paper:
+        subtitle += " · paper"
 
     if show_header:
         st.markdown(
-            strategy_card_header("S7 · ORB+ ADX", f"{index_code} · opening range breakout"),
+            strategy_card_header(title, subtitle),
             unsafe_allow_html=True,
         )
 
-    s7 = cache_manager.get_json(cache_manager.S7_STATE_KEY)
+    s7 = cache_manager.get_json(key)
 
     if not s7:
-        st.caption("S7 engine offline — is the `engine` service running?")
+        st.caption(offline_hint)
         return
 
     updated = str(s7.get("timestamp", ""))[:19].replace("T", " ")
-    upstox = cache_manager.get_json(cache_manager.UPSTOX_DAILY_PNL_KEY) or {}
-    upstox_total = upstox.get("total_pnl_inr")
-    if upstox_total is not None:
-        pnl_str = f"₹{float(upstox_total):+,.0f} (Upstox)"
-    else:
-        total_pnl = s7.get("total_daily_pnl_inr")
-        pnl_str = f"₹{total_pnl:+,.0f}" if total_pnl is not None else "—"
-    st.caption(f"S7 state updated {updated} · day P&L {pnl_str}")
+    mode = "PAPER" if paper or s7.get("paper_trading") else "LIVE"
+    total_pnl = s7.get("total_daily_pnl_inr")
+    pnl_str = f"₹{total_pnl:+,.0f}" if total_pnl is not None else "—"
+    st.caption(f"{title.split('·')[0].strip()} state updated {updated} · {mode} · day P&L {pnl_str}")
 
     indices: dict = s7.get("indices") or {}
     idx = indices.get(index_code)
 
     if not idx:
-        st.info(f"No S7 state for {index_code} yet — waiting for market open.")
+        st.info(f"No ORB state for {index_code} yet — waiting for market open.")
         return
 
     c1, c2, c3, c4, c5 = st.columns(5)
@@ -297,7 +309,7 @@ def render_s7_strategy_panel(index_code: str, *, show_header: bool = True) -> No
     setup = str(idx.get("setup_label") or "—")
     st.markdown(f'<p class="ak07-muted-line">{setup}</p>', unsafe_allow_html=True)
 
-    st.markdown("##### Strategy 7 — Active Position")
+    st.markdown(f"##### {title.split('·')[0].strip()} — Active Position")
     pos = idx.get("position")
     if pos:
         p1, p2, p3, p4, p5 = st.columns(5)
@@ -318,7 +330,7 @@ def render_s7_strategy_panel(index_code: str, *, show_header: bool = True) -> No
 
     signals = idx.get("signals") or []
     if signals:
-        with st.expander("Recent S7 signals", expanded=False):
+        with st.expander("Recent ORB signals", expanded=False):
             for line in reversed(signals):
                 st.markdown(f'<p class="ak07-signal-line">{line}</p>', unsafe_allow_html=True)
 
@@ -727,19 +739,31 @@ def _render_strategy_sections() -> None:
                     with tab:
                         render_smc_crt_strategy_panel(code, show_header=False)
 
-    if user_can_view_strategy(STRATEGY_S7_ORB) and tabbed_codes:
+    if user_can_view_strategy(STRATEGY_S7_ORB):
+        s7_codes = [c for c in S7_ORB_INDICES if c in INDEX_CONFIGS]
         with st.container(border=True, key="ak07_s7"):
-            if len(tabbed_codes) == 1:
-                render_s7_strategy_panel(tabbed_codes[0])
-            else:
+            if len(s7_codes) == 1:
+                render_s7_strategy_panel(s7_codes[0])
+            elif s7_codes:
                 st.markdown(
-                    strategy_card_header("S7 · ORB+ ADX", "Opening range breakout"),
+                    strategy_card_header("S7 · ORB+ ADX", "Opening range breakout · BankNifty / Sensex"),
                     unsafe_allow_html=True,
                 )
-                s7_tabs = st.tabs([INDEX_CONFIGS[c].display for c in tabbed_codes])
-                for tab, code in zip(s7_tabs, tabbed_codes):
+                s7_tabs = st.tabs([INDEX_CONFIGS[c].display for c in s7_codes])
+                for tab, code in zip(s7_tabs, s7_codes):
                     with tab:
                         render_s7_strategy_panel(code, show_header=False)
+
+    if user_can_view_strategy(STRATEGY_S29_ORB):
+        with st.container(border=True, key="ak07_s29"):
+            for s29_code in S29_ORB_INDICES:
+                render_s7_strategy_panel(
+                    s29_code,
+                    title="S29 · Nifty ORB+",
+                    paper=True,
+                    cache_key=cache_manager.S29_STATE_KEY,
+                    offline_hint="S29 engine offline — is the `s29_engine` service running?",
+                )
 
     if user_can_view_strategy(STRATEGY_GAMMA) and tabbed_codes:
         with st.container(border=True, key="ak07_gamma"):

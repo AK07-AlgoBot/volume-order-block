@@ -35,6 +35,7 @@ SERVICES = {
     "All services":           None,
     "engine  (S1)":           "engine",
     "s7_engine  (S7 ORB+)":   "s7_engine",
+    "s29_engine  (S29 Nifty ORB paper)": "s29_engine",
     "choch_engine  (S8 CHOCH)": "choch_engine",
     "smc_crt_engine  (S2)":   "smc_crt_engine",
     "breakout_engine  (S3)":  "breakout_engine",

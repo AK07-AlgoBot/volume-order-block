@@ -35,6 +35,7 @@ STRATEGY_GREEKS: Final[str] = "Strategy 5 — Greeks"
 STRATEGY_SR_REVERSAL: Final[str] = "Strategy 6 — S/R Reversal"
 STRATEGY_S7_ORB: Final[str] = "Strategy 7 — ORB+"
 STRATEGY_CHOCH: Final[str] = "Strategy 8 — CHOCH"
+STRATEGY_S29_ORB: Final[str] = "Strategy 29 — Nifty ORB+"
 STRATEGY_GAMMA: Final[str] = "Gamma Expiry Observer"
 INDEX_ORDER: Final[tuple[str, ...]] = ("NIFTY", "BANKNIFTY", "SENSEX")
 STRATEGY_ORDER: Final[tuple[str, ...]] = (
@@ -45,6 +46,7 @@ STRATEGY_ORDER: Final[tuple[str, ...]] = (
     STRATEGY_GREEKS,
     STRATEGY_SR_REVERSAL,
     STRATEGY_S7_ORB,
+    STRATEGY_S29_ORB,
     STRATEGY_GAMMA,
 )
 # Kept for historical trade rows only — not shown in empty strategy summaries.

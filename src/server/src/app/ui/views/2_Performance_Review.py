@@ -31,6 +31,7 @@ _PERF_STRATEGY_BY_ENTITLEMENT = {
     "s2_smc": performance_store.STRATEGY_SMC_CRT,
     "s3_breakout": performance_store.STRATEGY_BREAKOUT,
     "s7_orb": performance_store.STRATEGY_S7_ORB,
+    "s29_orb": performance_store.STRATEGY_S29_ORB,
     "gamma": performance_store.STRATEGY_GAMMA,
 }
 
