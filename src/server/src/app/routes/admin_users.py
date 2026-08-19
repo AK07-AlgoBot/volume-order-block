@@ -28,15 +28,17 @@ router = APIRouter(prefix="/api/admin", tags=["admin"])
 
 
 def _profile_public(username: str, role: str, prof: dict) -> UserProfilePublic:
-    from app.services.user_profiles_store import normalize_lots
+    from app.services.user_profiles_store import lots_for_strategy, normalize_strategy_lots
 
+    fallback = lots_for_strategy(prof, "s3_breakout")
     return UserProfilePublic(
         username=username,
         role=role,
         enabled_strategies=prof.get("enabled_strategies") or [],
         broker=str(prof.get("broker") or "upstox"),
         paper_trading=bool(prof.get("paper_trading")),
-        lots=normalize_lots(prof.get("lots"), default=1),
+        lots=fallback,
+        strategy_lots=normalize_strategy_lots(prof.get("strategy_lots"), default=fallback),
         egress_ip=str(prof.get("egress_ip") or "").strip(),
     )
 
@@ -141,6 +143,7 @@ async def admin_create_user(body: CreateUserBody, admin: UserClaims = Depends(re
             broker=body.broker,
             paper_trading=body.paper_trading,
             lots=body.lots,
+            strategy_lots=body.strategy_lots or None,
             egress_ip=body.egress_ip,
         )
     except ValueError as exc:

@@ -50,12 +50,32 @@ def _now_iso() -> str:
 
 
 def normalize_lots(value: Any, *, default: int = 1) -> int:
-    """S3 quantity allocation in lots (1–20)."""
+    """Quantity allocation in lots (1–20)."""
     try:
         n = int(value)
     except (TypeError, ValueError):
         return default
     return max(1, min(n, 20))
+
+
+def normalize_strategy_lots(raw: Any, *, default: int = 1) -> dict[str, int]:
+    """Per-strategy lots; missing keys fall back to ``default`` (legacy global lots)."""
+    out: dict[str, int] = {sid: default for sid in ALL_STRATEGIES}
+    if isinstance(raw, dict):
+        for key, val in raw.items():
+            sid = _LEGACY_STRATEGY_MAP.get(str(key), str(key))
+            if sid in ALL_STRATEGIES:
+                out[sid] = normalize_lots(val, default=default)
+    return out
+
+
+def lots_for_strategy(profile: dict[str, Any], strategy_id: str, *, default: int = 1) -> int:
+    """Lots for one strategy; falls back to the profile-wide ``lots`` field."""
+    sid = _LEGACY_STRATEGY_MAP.get(str(strategy_id), str(strategy_id))
+    sl = profile.get("strategy_lots")
+    if isinstance(sl, dict) and sid in sl:
+        return normalize_lots(sl.get(sid), default=default)
+    return normalize_lots(profile.get("lots"), default=default)
 
 
 def profile_path(username: str) -> Path:
@@ -74,6 +94,7 @@ def _default_profile(username: str, role: str = USER_ROLE) -> dict[str, Any]:
         "telegram_notifications": role == ADMIN_ROLE,
         "egress_ip": "",
         "lots": 1,
+        "strategy_lots": {sid: 1 for sid in ALL_STRATEGIES},
         "created_at": _now_iso(),
     }
 
@@ -100,8 +121,9 @@ def read_profile(username: str, *, role: str = USER_ROLE) -> dict[str, Any]:
         base["telegram_notifications"] = bool(raw.get("telegram_notifications"))
     egress_ip = str(raw.get("egress_ip") or "").strip()
     base["egress_ip"] = egress_ip
-    if "lots" in raw:
-        base["lots"] = normalize_lots(raw.get("lots"))
+    fallback_lots = normalize_lots(raw.get("lots"), default=1) if "lots" in raw else 1
+    base["lots"] = fallback_lots
+    base["strategy_lots"] = normalize_strategy_lots(raw.get("strategy_lots"), default=fallback_lots)
     created_at = str(raw.get("created_at") or "").strip()
     if created_at:
         base["created_at"] = created_at
@@ -128,8 +150,19 @@ def write_profile(username: str, data: dict[str, Any]) -> dict[str, Any]:
         current["telegram_notifications"] = bool(data["telegram_notifications"])
     if "egress_ip" in data:
         current["egress_ip"] = str(data.get("egress_ip") or "").strip()
+    fallback_lots = int(current.get("lots") or 1)
     if "lots" in data:
-        current["lots"] = normalize_lots(data.get("lots"), default=int(current.get("lots") or 1))
+        fallback_lots = normalize_lots(data.get("lots"), default=fallback_lots)
+        current["lots"] = fallback_lots
+    if "strategy_lots" in data:
+        current["strategy_lots"] = normalize_strategy_lots(
+            data.get("strategy_lots"), default=fallback_lots
+        )
+        current["lots"] = current["strategy_lots"].get(STRATEGY_S3_BREAKOUT, fallback_lots)
+    elif "lots" in data:
+        current["strategy_lots"] = normalize_strategy_lots(
+            current.get("strategy_lots"), default=fallback_lots
+        )
     if "created_at" in data and str(data.get("created_at") or "").strip():
         current["created_at"] = str(data["created_at"]).strip()
     elif not str(current.get("created_at") or "").strip():

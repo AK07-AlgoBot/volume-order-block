@@ -56,6 +56,7 @@ class UserProfilePublic(BaseModel):
     broker: str
     paper_trading: bool
     lots: int = 1
+    strategy_lots: dict[str, int] = Field(default_factory=dict)
     egress_ip: str = ""
 
 
@@ -67,6 +68,7 @@ class CreateUserBody(BaseModel):
     broker: Literal["upstox", "kite", "groww"] = "upstox"
     paper_trading: bool = True
     lots: int = Field(default=1, ge=1, le=20)
+    strategy_lots: dict[str, int] = Field(default_factory=dict)
     egress_ip: str = ""
 
 
@@ -75,6 +77,7 @@ class UpdateUserProfileBody(BaseModel):
     broker: Literal["upstox", "kite", "groww"] | None = None
     paper_trading: bool | None = None
     lots: int | None = Field(default=None, ge=1, le=20)
+    strategy_lots: dict[str, int] | None = None
     egress_ip: str | None = None
 
 

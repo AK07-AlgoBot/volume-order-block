@@ -9,7 +9,7 @@ import streamlit as st
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
-from app.constants import ALL_STRATEGIES, STRATEGY_LABELS
+from app.constants import ALL_STRATEGIES, STRATEGY_LABELS, STRATEGY_PILL_SHORT, STRATEGY_S3_BREAKOUT
 from app.ui.auth_session import api_request, is_admin, require_login
 from app.ui.styles import format_exit_reason_label, inject_dark_theme, summary_chip_row
 
@@ -19,6 +19,41 @@ require_login()
 if not is_admin():
     st.error("Admin access required.")
     st.stop()
+
+
+def _strategy_lots_map(prof: dict) -> dict[str, int]:
+    fallback = int(prof.get("lots") or 1)
+    raw = prof.get("strategy_lots") or {}
+    if not isinstance(raw, dict):
+        raw = {}
+    return {sid: int(raw.get(sid) or fallback) for sid in ALL_STRATEGIES}
+
+
+def _lots_header(prof: dict, strategies: list) -> str:
+    sl = _strategy_lots_map(prof)
+    ids = [s for s in strategies if s in sl] or list(ALL_STRATEGIES)
+    return " · ".join(f"{STRATEGY_PILL_SHORT.get(sid, sid)}×{sl[sid]}" for sid in ids)
+
+
+def _render_strategy_lot_inputs(key_prefix: str, prof: dict | None = None) -> dict[str, int]:
+    sl = _strategy_lots_map(prof or {})
+    st.markdown("**Lots per strategy**")
+    st.caption("F&O lots on live entries for this user. S3, S29, and GoCharting use these allotments.")
+    out: dict[str, int] = {}
+    cols = st.columns(3)
+    for i, sid in enumerate(ALL_STRATEGIES):
+        with cols[i % 3]:
+            out[sid] = int(
+                st.number_input(
+                    STRATEGY_PILL_SHORT.get(sid, sid),
+                    min_value=1,
+                    max_value=20,
+                    value=max(1, min(20, int(sl.get(sid) or 1))),
+                    step=1,
+                    key=f"{key_prefix}_{sid}",
+                )
+            )
+    return out
 
 st.markdown("# Admin")
 st.caption(
@@ -210,11 +245,11 @@ else:
         if hasattr(prof, "model_dump"):
             prof = prof.model_dump()
         strategies = prof.get("enabled_strategies") or []
-        lots = int(prof.get("lots") or 1)
+        lots_txt = _lots_header(prof, strategies if role != "admin" else list(ALL_STRATEGIES))
         egress = str(prof.get("egress_ip") or "").strip() or "primary"
         header = (
             f"{u} · {role} · broker {prof.get('broker', 'upstox')} · "
-            f"paper {prof.get('paper_trading')} · lots {lots} · egress {egress}"
+            f"paper {prof.get('paper_trading')} · {lots_txt} · egress {egress}"
         )
         with st.expander(header, expanded=False):
             if role == "admin":
@@ -237,15 +272,6 @@ else:
                         ),
                         key=f"edit_broker_{u}",
                     )
-                    edit_lots = st.number_input(
-                        "Lots (quantity allocation)",
-                        min_value=1,
-                        max_value=20,
-                        value=lots,
-                        step=1,
-                        key=f"edit_lots_{u}",
-                        help="Number of F&O lots per S3 entry for this user.",
-                    )
                 with ec2:
                     edit_paper = st.checkbox(
                         "Paper trading",
@@ -266,16 +292,18 @@ else:
                     edit_strats = st.multiselect(
                         "Enabled strategies",
                         options=list(strategy_options.keys()),
-                        default=default_strats or [ALL_STRATEGIES[2]],
+                        default=default_strats or [STRATEGY_S3_BREAKOUT],
                         format_func=lambda x: strategy_options.get(x, x),
                         key=f"edit_strats_{u}",
                     )
+                edit_strategy_lots = _render_strategy_lot_inputs(f"edit_lots_{u}", prof)
                 save_edit = st.form_submit_button("Save configuration", type="primary")
             if save_edit:
                 body = {
                     "broker": edit_broker,
                     "paper_trading": edit_paper,
-                    "lots": int(edit_lots),
+                    "lots": int(edit_strategy_lots.get(STRATEGY_S3_BREAKOUT) or 1),
+                    "strategy_lots": edit_strategy_lots,
                     "egress_ip": edit_egress.strip(),
                 }
                 if role != "admin":
@@ -299,14 +327,6 @@ with st.form("create_user_form"):
     with c1:
         new_username = st.text_input("Username", max_chars=32)
         new_password = st.text_input("Temporary password", type="password")
-        new_lots = st.number_input(
-            "Lots (quantity allocation)",
-            min_value=1,
-            max_value=20,
-            value=1,
-            step=1,
-            help="Number of F&O lots per S3 entry for this user.",
-        )
     with c2:
         new_role = st.selectbox("Role", ["user", "admin"], index=0)
         new_broker = st.selectbox("Default broker", ["upstox", "kite", "groww"], index=0)
@@ -319,9 +339,10 @@ with st.form("create_user_form"):
     picked = st.multiselect(
         "Enabled strategies",
         options=list(strategy_options.keys()),
-        default=[ALL_STRATEGIES[2]],
+        default=[STRATEGY_S3_BREAKOUT],
         format_func=lambda x: strategy_options.get(x, x),
     )
+    new_strategy_lots = _render_strategy_lot_inputs("new_lots")
     submit = st.form_submit_button("Create user", type="primary")
 
 if submit:
@@ -335,7 +356,8 @@ if submit:
             "enabled_strategies": picked,
             "broker": new_broker,
             "paper_trading": new_paper,
-            "lots": int(new_lots),
+            "lots": int(new_strategy_lots.get(STRATEGY_S3_BREAKOUT) or 1),
+            "strategy_lots": new_strategy_lots,
             "egress_ip": new_egress.strip(),
         }
         r = api_request("POST", "/api/admin/users", json=body)

@@ -131,6 +131,7 @@ def create_user(
     broker: str = "upstox",
     paper_trading: bool = True,
     lots: int = 1,
+    strategy_lots: dict[str, int] | None = None,
     egress_ip: str = "",
 ) -> dict[str, Any]:
     un = _sanitize_username(username)
@@ -164,6 +165,8 @@ def create_user(
         "lots": lots,
         "egress_ip": egress_ip,
     }
+    if strategy_lots:
+        profile_data["strategy_lots"] = strategy_lots
     if enabled_strategies is not None:
         profile_data["enabled_strategies"] = enabled_strategies
     profile = write_profile(un, profile_data)

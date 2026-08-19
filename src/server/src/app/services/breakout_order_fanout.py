@@ -33,9 +33,10 @@ def list_live_traders(strategy_id: str) -> list[S3Trader]:
 
     Pass ``FANOUT_ALL_LIVE`` (``"*"``) to skip the entitlement filter.
     """
-    from app.services.user_profiles_store import normalize_lots, read_profile
+    from app.services.user_profiles_store import lots_for_strategy, read_profile
     from app.services.users_store import list_users
 
+    lot_sid = STRATEGY_GC_OF if strategy_id == FANOUT_ALL_LIVE else strategy_id
     traders: list[S3Trader] = []
     for row in list_users():
         username = str(row.get("username") or "")
@@ -53,7 +54,7 @@ def list_live_traders(strategy_id: str) -> list[S3Trader]:
             S3Trader(
                 username=username,
                 broker=broker,
-                lots=normalize_lots(profile.get("lots"), default=1),
+                lots=lots_for_strategy(profile, lot_sid),
             )
         )
     return traders
