@@ -90,6 +90,13 @@ from app.services.breakout_engine import (
     day_review_from_first_close,
     SESSION_START as BLR_SESSION_START,
 )
+from app.services.breakout_order_fanout import (
+    catchup_s29_legs,
+    legs_summary,
+    place_s29_entries,
+    place_s29_exits,
+    position_legs,
+)
 from app.services.engine_intraday import entries_globally_blocked, profit_target_engaged, session_vwap
 from app.constants import S7_ORB_INDICES
 from app.services.upstox_engine import (
@@ -377,6 +384,7 @@ class S7Position:
     lots: int = 1
     lot_size: int = 65
     trail_sl: float = 0.0  # ratcheting trail stop
+    order_legs: list[dict[str, Any]] = field(default_factory=list)
 
     @property
     def quantity(self) -> int:
@@ -398,6 +406,7 @@ class S7State:
     last_candle_ts: str = ""
     signal_log: list[str] = field(default_factory=list)
     setup_label: str = "Pre-session"
+    last_fanout_catchup_mono: float = 0.0
 
 
 # ── signal detection ──────────────────────────────────────────────────────────
@@ -728,6 +737,7 @@ class S7Engine:
 
         # Manage open position
         if state.position:
+            self._catchup_fanout(state, now)
             self._manage_position(state, candles, now)
             return
 
@@ -763,9 +773,7 @@ class S7Engine:
 
         entry = float(candles[-1]["close"])
         lots = lot_size_from_risk(atr_val, state.config.lot_size)
-        contract = self.client.resolve_option(state.config, entry, direction)
-        if contract is None:
-            return
+        contract = self.client.resolve_option(state.config, entry, direction) or {}
 
         ts = now.strftime("%Y-%m-%d %H:%M:%S IST")
         if profit_target_engaged():
@@ -774,7 +782,7 @@ class S7Engine:
             state.setup_label = f"S7 SIGNAL {direction} @ {entry:.2f}"
             logger.info("[%s] SIGNAL ONLY (target hit): %s", state.config.code, reason)
             telegram_notifier.notify_trade_signal_instruction(
-                index_name=f"{state.config.display} VMB ({contract['strike']}{contract['option_type']} x{lots})",
+                index_name=f"{state.config.display} VMB ({contract.get('strike')}{contract.get('option_type')} x{lots})",
                 trade_type=direction,
                 entry_price=entry,
                 target_price=tp1,
@@ -786,9 +794,25 @@ class S7Engine:
             )
             return
 
-        if not self.client.place_entry(str(contract.get("instrument_key") or ""), lots * state.config.lot_size):
-            logger.error("[%s] S7 entry order failed", state.config.code)
+        global_paper = self.paper_trading or MOCK_MODE
+        legs = place_s29_entries(
+            index_code=state.config.code,
+            direction=direction,
+            lot_size=state.config.lot_size,
+            lots=lots,
+            upstox_market_client=self.client._upstox,
+            global_paper=global_paper,
+            spot=entry,
+        )
+        if not legs:
+            logger.error("[%s] %s entry aborted — no broker orders placed", state.config.code, self.short_name)
             return
+
+        primary = next((leg for leg in legs if leg.get("broker") == "upstox"), legs[0])
+        strike = int(primary.get("option_strike") or contract.get("strike") or 0)
+        option_type = str(primary.get("option_type") or contract.get("option_type") or "")
+        instrument_key = str(primary.get("instrument_key") or contract.get("instrument_key") or "")
+        fanout_note = legs_summary(legs)
 
         state.position = S7Position(
             direction=direction,
@@ -798,19 +822,20 @@ class S7Engine:
             atr_at_entry=atr_val,
             opened_at=now.isoformat(),
             entry_reason=reason,
-            instrument_key=str(contract.get("instrument_key") or ""),
-            option_strike=int(contract["strike"]),
-            option_type=str(contract["option_type"]),
+            instrument_key=instrument_key,
+            option_strike=strike,
+            option_type=option_type,
             lots=lots,
             lot_size=state.config.lot_size,
             trail_sl=sl,
+            order_legs=legs,
         )
         state.trades_today += 1
-        state.signal_log.append(reason)
+        state.signal_log.append(f"{reason} [{fanout_note}]")
         state.setup_label = f"S7 {direction} @ {entry:.2f}"
-        logger.info("[%s] %s", state.config.code, reason)
+        logger.info("[%s] %s [%s]", state.config.code, reason, fanout_note)
         telegram_notifier.notify_trade_execution(
-            index_name=f"{state.config.display} VMB ({contract['strike']}{contract['option_type']} x{lots})",
+            index_name=f"{state.config.display} VMB ({strike}{option_type} x{lots})",
             trade_type=direction,
             entry_price=entry,
             target_price=tp1,
@@ -819,6 +844,41 @@ class S7Engine:
             timestamp=now.strftime("%Y-%m-%d %H:%M:%S IST"),
             candles=candles,
         )
+
+    def _catchup_fanout(self, state: S7State, now: datetime) -> None:
+        """Retry S29 entry for live users who missed the first fan-out."""
+        del now
+        pos = state.position
+        if pos is None or self.paper_trading or MOCK_MODE:
+            return
+        now_mono = time.monotonic()
+        if now_mono - state.last_fanout_catchup_mono < 60.0:
+            return
+        state.last_fanout_catchup_mono = now_mono
+        existing = list(pos.order_legs or [])
+        covered = {
+            str(leg.get("username") or "").strip()
+            for leg in existing
+            if isinstance(leg, dict) and leg.get("username")
+        }
+        new_legs = catchup_s29_legs(
+            index_code=state.config.code,
+            direction=pos.direction,
+            lot_size=state.config.lot_size,
+            lots=pos.lots,
+            existing_legs=existing,
+            upstox_market_client=self.client._upstox,
+            global_paper=False,
+            spot=state.spot or pos.entry_price,
+            exclude_usernames=frozenset(n for n in covered if n),
+        )
+        if not new_legs:
+            return
+        pos.order_legs = existing + new_legs
+        note = legs_summary(new_legs)
+        msg = f"{state.config.display} S29 catch-up entry [{note}]"
+        state.signal_log.append(msg)
+        logger.info(msg)
 
     def _build_or(self, state: S7State, candles: list[dict[str, float]], now: datetime) -> None:
         day = now.date()
@@ -891,7 +951,10 @@ class S7Engine:
         pos = state.position
         if pos is None:
             return
-        if pos.instrument_key:
+        global_paper = self.paper_trading or MOCK_MODE
+        if position_legs(pos):
+            place_s29_exits(position_legs(pos), pos.direction, global_paper=global_paper)
+        elif pos.instrument_key and not global_paper:
             self.client.place_exit(pos.instrument_key, pos.quantity)
         pnl_pts = (exit_price - pos.entry_price) if pos.direction == "LONG" else (pos.entry_price - exit_price)
         pnl_inr = pnl_pts * pos.quantity
@@ -955,15 +1018,16 @@ class S7Engine:
                     "sl": s.position.sl_price,
                     "tp1": s.position.tp1_price,
                     "lots": s.position.lots,
+                    "legs": legs_summary(s.position.order_legs),
                 }
             payload["indices"][code] = idx
         cache_manager.set_json(self.cache_key, payload, ttl_seconds=120)
 
 
 def main() -> None:
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
-    engine = S7Engine()
-    engine.run()
+    raise SystemExit(
+        "S7 ORB+ is retired. Live Nifty ORB+ runs via s29_nifty_orb_engine.py"
+    )
 
 
 if __name__ == "__main__":

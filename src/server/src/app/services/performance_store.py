@@ -36,6 +36,7 @@ STRATEGY_SR_REVERSAL: Final[str] = "Strategy 6 — S/R Reversal"
 STRATEGY_S7_ORB: Final[str] = "Strategy 7 — ORB+"
 STRATEGY_CHOCH: Final[str] = "Strategy 8 — CHOCH"
 STRATEGY_S29_ORB: Final[str] = "Strategy 29 — Nifty ORB+"
+STRATEGY_GC_OF: Final[str] = "GoCharting — Orderflow"
 STRATEGY_GAMMA: Final[str] = "Gamma Expiry Observer"
 INDEX_ORDER: Final[tuple[str, ...]] = ("NIFTY", "BANKNIFTY", "SENSEX")
 STRATEGY_ORDER: Final[tuple[str, ...]] = (
@@ -47,10 +48,11 @@ STRATEGY_ORDER: Final[tuple[str, ...]] = (
     STRATEGY_SR_REVERSAL,
     STRATEGY_S7_ORB,
     STRATEGY_S29_ORB,
+    STRATEGY_GC_OF,
     STRATEGY_GAMMA,
 )
 # Kept for historical trade rows only — not shown in empty strategy summaries.
-RETIRED_STRATEGY_LABELS: Final[frozenset[str]] = frozenset({STRATEGY_CHOCH})
+RETIRED_STRATEGY_LABELS: Final[frozenset[str]] = frozenset({STRATEGY_CHOCH, STRATEGY_S7_ORB})
 
 
 def classify_result(pnl_points: float) -> str:

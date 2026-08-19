@@ -1,0 +1,35 @@
+{
+  "protocol": "AK07-OF-v1",
+  "source": "gocharting-webhook",
+  "fields": {
+    "prefix": "AK07",
+    "strategy": "DD|FD|OB|STACK",
+    "side": "BUY|SELL",
+    "ticker": "futures symbol (NIFTY vs BANKNIFTY)",
+    "interval": "5",
+    "notes": "GoCharting is signal-only. SL, ITM option, and futures trail use AK07 Upstox."
+  },
+  "example_plain_text": "AK07|DD|BUY|NSE:NIFTY-I|5",
+  "live_webhook": "https://ak07.in/api/gocharting/alert?token=<AK07_GC_WEBHOOK_SECRET>",
+  "oms_behavior": {
+    "max_trades_per_day": 2,
+    "sl_model": "upstox_last_closed_5m_candle_extreme_plus_5",
+    "trail": "after_1R_then_1_to_1_on_upstox_futures_ltp",
+    "option_max_loss_inr": null,
+    "force_exit_ist": "14:55",
+    "no_new_entry_after_ist": "14:45",
+    "fanout": "all_live_non_paper_users"
+  },
+  "stacked_option_buy": {
+    "status": "manual_phase1",
+    "reason": "Lipi orderflow.* has bar-level delta/COT only; price-level imbalance stacks are not exposed as script arrays yet.",
+    "operator_checklist": [
+      "Watch ATM option footprint",
+      "3+ consecutive buy imbalances at 1:3",
+      "Sell side near zero",
+      "First candle of move, lower half of bar",
+      "Large size, no adjacent imbalances",
+      "SL = candle low; partial exit day H/L"
+    ]
+  }
+}

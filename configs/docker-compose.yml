@@ -117,6 +117,8 @@ services:
       - ak07
 
   s7_engine:
+    # Retired — BankNifty/Sensex ORB+. Start only with: --profile s7
+    profiles: ["s7"]
     build:
       context: ..
       dockerfile: configs/docker/Dockerfile.api
@@ -152,7 +154,28 @@ services:
       PYTHONUNBUFFERED: "1"
       PYTHONPATH: /app/src/server/src
       REDIS_HOST: redis
-      AK07_PAPER_TRADING: "1"
+    volumes:
+      - ak07_server_data:/app/src/server/data
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks:
+      - ak07
+
+  gc_engine:
+    build:
+      context: ..
+      dockerfile: configs/docker/Dockerfile.api
+    restart: unless-stopped
+    mem_limit: 512m
+    memswap_limit: 512m
+    command: ["python", "-u", "src/server/src/app/services/gocharting_oms.py"]
+    env_file:
+      - ../.env
+    environment:
+      PYTHONUNBUFFERED: "1"
+      PYTHONPATH: /app/src/server/src
+      REDIS_HOST: redis
     volumes:
       - ak07_server_data:/app/src/server/data
     depends_on:
@@ -291,9 +314,9 @@ services:
         condition: service_started
       breakout_engine:
         condition: service_started
-      s7_engine:
-        condition: service_started
       s29_engine:
+        condition: service_started
+      gc_engine:
         condition: service_started
       profit_target_engine:
         condition: service_started

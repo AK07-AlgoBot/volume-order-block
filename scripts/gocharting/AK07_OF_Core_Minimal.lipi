@@ -1,0 +1,95 @@
+indicator("AK07 OF Core Minimal", overlay = true)
+
+nearZeroAbs = input(15.0, title = "Near-zero abs delta")
+similarPct = input(12.0, title = "Similarity pct")
+bigVolMult = input(1.8, title = "Big vol mult")
+volSmaLen = input(20, title = "Vol SMA len")
+maruBodyPct = input(85.0, title = "Maru body pct")
+maruWickPct = input(8.0, title = "Maru wick pct")
+locTolPts = input(25.0, title = "Loc tol pts")
+enableDD = input(true, title = "Enable DD")
+enableFD = input(true, title = "Enable FD")
+requireLocDD = input(true, title = "DD require loc")
+maxTradesDay = input(2, title = "Max signals day")
+
+d = orderflow.delta
+maxD = orderflow.maxdelta
+minD = orderflow.mindelta
+cotH = orderflow.cothigh
+cotL = orderflow.cotlow
+
+bull = close > open
+bear = close < open
+rng = math.max(high - low, syminfo.mintick)
+bodyPct = 100.0 * math.abs(close - open) / rng
+upWickPct = 100.0 * (high - math.max(open, close)) / rng
+dnWickPct = 100.0 * (math.min(open, close) - low) / rng
+maruBull = bull and bodyPct >= maruBodyPct and upWickPct <= maruWickPct and dnWickPct <= maruWickPct
+maruBear = bear and bodyPct >= maruBodyPct and upWickPct <= maruWickPct and dnWickPct <= maruWickPct
+volSma = talib.sma(volume, volSmaLen)
+bigOrder = volume >= volSma * bigVolMult
+
+f_similar3(a, b, c, pct) =>
+    m = (math.abs(a) + math.abs(b) + math.abs(c)) / 3.0
+    m <= syminfo.mintick ? false : math.abs(a - b) <= m * pct / 100.0 and math.abs(a - c) <= m * pct / 100.0 and math.abs(b - c) <= m * pct / 100.0
+
+inSess = (hour == 9 and minute >= 15) or (hour > 9 and hour < 15) or (hour == 15 and minute <= 30)
+newDay = ta.change(time("D")) != 0
+
+var float dayHi = na
+var float dayLo = na
+if newDay or na(dayHi)
+    dayHi := high
+    dayLo := low
+else
+    dayHi := math.max(dayHi, high)
+    dayLo := math.min(dayLo, low)
+
+plot(dayHi, title = "Day High", color = color.teal)
+plot(dayLo, title = "Day Low", color = color.orange)
+
+atDayHi = math.abs(high - dayHi) <= locTolPts
+atDayLo = math.abs(low - dayLo) <= locTolPts
+goodLocLong = atDayLo
+goodLocShort = atDayHi
+
+var int daySignals = 0
+if newDay
+    daySignals := 0
+canSignal = daySignals < maxTradesDay
+
+ddBuyRaw = enableDD and inSess and bull and d < 0 and minD < 0 and math.abs(maxD) <= nearZeroAbs
+ddSellRaw = enableDD and inSess and bear and d > 0 and maxD > 0 and math.abs(minD) <= nearZeroAbs
+ddBuy = ddBuyRaw and canSignal and (not requireLocDD or goodLocLong)
+ddSell = ddSellRaw and canSignal and (not requireLocDD or goodLocShort)
+
+priorNotMaruLong = not (close[1] > open[1] and (100.0 * math.abs(close[1] - open[1]) / math.max(high[1] - low[1], syminfo.mintick)) >= maruBodyPct * 0.9)
+priorNotMaruShort = not (close[1] < open[1] and (100.0 * math.abs(close[1] - open[1]) / math.max(high[1] - low[1], syminfo.mintick)) >= maruBodyPct * 0.9)
+fdBuy = enableFD and inSess and canSignal and maruBull and bigOrder and f_similar3(d, maxD, cotL, similarPct) and not atDayHi and not atDayLo and priorNotMaruLong
+fdSell = enableFD and inSess and canSignal and maruBear and bigOrder and f_similar3(d, minD, cotH, similarPct) and not atDayHi and not atDayLo and priorNotMaruShort
+
+anySig = ddBuy or ddSell or fdBuy or fdSell
+if anySig
+    daySignals := daySignals + 1
+
+plotshape(ddBuy, title = "DD Buy", style = shape.triangleup, location = location.belowbar, color = color.lime, size = size.small, text = "DD")
+plotshape(ddSell, title = "DD Sell", style = shape.triangledown, location = location.abovebar, color = color.red, size = size.small, text = "DD")
+plotshape(fdBuy, title = "FD Buy", style = shape.diamond, location = location.belowbar, color = color.aqua, size = size.tiny, text = "FD")
+plotshape(fdSell, title = "FD Sell", style = shape.diamond, location = location.abovebar, color = color.fuchsia, size = size.tiny, text = "FD")
+
+bgcolor(ddBuy or fdBuy ? color.new(color.green, 85) : ddSell or fdSell ? color.new(color.red, 85) : na)
+
+var int totalDD = 0
+var int totalFD = 0
+if ddBuy or ddSell
+    totalDD := totalDD + 1
+if fdBuy or fdSell
+    totalFD := totalFD + 1
+
+plot(totalDD, title = "Cum DD count", display = display.data_window)
+plot(totalFD, title = "Cum FD count", display = display.data_window)
+
+alertcondition(ddBuy, title = "AK07 DD Buy", message = "AK07|DD|BUY|{{ticker}}|{{interval}}|sl={{low}}")
+alertcondition(ddSell, title = "AK07 DD Sell", message = "AK07|DD|SELL|{{ticker}}|{{interval}}|sl={{high}}")
+alertcondition(fdBuy, title = "AK07 FD Buy", message = "AK07|FD|BUY|{{ticker}}|{{interval}}|sl={{low}}")
+alertcondition(fdSell, title = "AK07 FD Sell", message = "AK07|FD|SELL|{{ticker}}|{{interval}}|sl={{high}}")

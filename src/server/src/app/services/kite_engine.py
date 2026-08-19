@@ -282,6 +282,60 @@ class KiteClient:
         except (TypeError, ValueError):
             return None
 
+    def get_available_margin(self) -> float | None:
+        """Equity net available funds (Kite /user/margins)."""
+        data = self._get("/user/margins")
+        if not isinstance(data, dict):
+            return None
+        equity = data.get("equity") if isinstance(data.get("equity"), dict) else None
+        if not isinstance(equity, dict):
+            return None
+        try:
+            if equity.get("net") is not None:
+                return float(equity["net"])
+            avail = equity.get("available") if isinstance(equity.get("available"), dict) else {}
+            for key in ("live_balance", "cash"):
+                if avail.get(key) is not None:
+                    return float(avail[key])
+        except (TypeError, ValueError):
+            return None
+        return None
+
+    def get_portfolio_day_pnl(self) -> dict[str, float] | None:
+        """Sum P&L from net portfolio positions."""
+        data = self._get("/portfolio/positions")
+        if not isinstance(data, dict):
+            return None
+        total = 0.0
+        realised = 0.0
+        unrealised = 0.0
+        open_positions = 0
+        rows = data.get("net") if isinstance(data.get("net"), list) else []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            try:
+                qty = int(row.get("quantity") or 0)
+            except (TypeError, ValueError):
+                qty = 0
+            try:
+                pnl = float(row.get("pnl") or 0.0)
+                r = float(row.get("realised") or 0.0)
+                u = float(row.get("unrealised") or 0.0)
+            except (TypeError, ValueError):
+                continue
+            total += pnl
+            realised += r
+            unrealised += u
+            if qty != 0:
+                open_positions += 1
+        return {
+            "total_pnl": total,
+            "realised": realised,
+            "unrealised": unrealised,
+            "open_positions": float(open_positions),
+        }
+
     def get_index_future_contract(self, index_code: str) -> dict[str, Any] | None:
         code = index_code.upper()
         rows = _load_index_fno_rows(code, option_types=None)

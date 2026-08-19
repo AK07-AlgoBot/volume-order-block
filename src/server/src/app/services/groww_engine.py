@@ -332,6 +332,30 @@ class GrowwClient:
             "open_positions": float(open_positions),
         }
 
+    def get_available_margin(self) -> float | None:
+        """Clear cash / FNO option-buy balance from Groww margins API."""
+        data = self._get("/v1/margins/detail/user")
+        if not isinstance(data, dict):
+            return None
+        try:
+            if data.get("clear_cash") is not None:
+                return float(data["clear_cash"])
+            fno = data.get("fno_margin_details") if isinstance(data.get("fno_margin_details"), dict) else {}
+            for key in ("option_buy_balance_available", "future_balance_available"):
+                if fno.get(key) is not None:
+                    return float(fno[key])
+            equity = (
+                data.get("equity_margin_details")
+                if isinstance(data.get("equity_margin_details"), dict)
+                else {}
+            )
+            for key in ("cnc_balance_available", "mis_balance_available"):
+                if equity.get(key) is not None:
+                    return float(equity[key])
+        except (TypeError, ValueError):
+            return None
+        return None
+
     def get_index_future_contract(self, index_code: str) -> dict[str, Any] | None:
         """Nearest-expiry index future for Groww order placement."""
         code = index_code.upper()

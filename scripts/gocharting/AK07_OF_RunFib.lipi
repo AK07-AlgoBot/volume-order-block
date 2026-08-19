@@ -1,0 +1,27 @@
+indicator("AK07 Run Fib", overlay = true)
+
+// Video Fib: 0.6-0.7 of a continuous same-color 5m run.
+// Last 3 same-color bars only (no for-loop; extra loops hang Lipi).
+// Overlay only. Apply on 5m NIFTY-I / BANKNIFTY-I. Do not replace All 4.
+
+bull = close > open
+bear = close < open
+tick = 0.05
+useCurUp = bull and close[1] > open[1] and close[2] > open[2]
+useCurDn = bear and close[1] < open[1] and close[2] < open[2]
+usePriUp = not useCurUp and not useCurDn and close[1] > open[1] and close[2] > open[2] and close[3] > open[3]
+usePriDn = not useCurUp and not useCurDn and not usePriUp and close[1] < open[1] and close[2] < open[2] and close[3] < open[3]
+runUp = useCurUp or usePriUp
+runOk = useCurUp or useCurDn or usePriUp or usePriDn
+curHi = math.max(high, math.max(high[1], high[2]))
+curLo = math.min(low, math.min(low[1], low[2]))
+priHi = math.max(high[1], math.max(high[2], high[3]))
+priLo = math.min(low[1], math.min(low[2], low[3]))
+runHi = useCurUp or useCurDn ? curHi : priHi
+runLo = useCurUp or useCurDn ? curLo : priLo
+runRng = math.max(runHi - runLo, tick)
+runFib6 = runOk ? (runUp ? runHi - 0.6 * runRng : runLo + 0.6 * runRng) : na
+runFib7 = runOk ? (runUp ? runHi - 0.7 * runRng : runLo + 0.7 * runRng) : na
+
+plot(runFib6, title="Run Fib 0.6", color=color.teal)
+plot(runFib7, title="Run Fib 0.7", color=color.blue)

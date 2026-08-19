@@ -13,6 +13,7 @@ from app.config.settings import get_settings
 from app.routes import (
     admin_users,
     auth,
+    gocharting_webhook,
     groww_token,
     kite_oauth,
     settings_credentials,
@@ -47,6 +48,7 @@ app.include_router(groww_token.router)
 app.include_router(settings_upstox.router)
 app.include_router(settings_credentials.router)
 app.include_router(upstox_notifier.router)
+app.include_router(gocharting_webhook.router)
 
 
 @app.get("/api/health")

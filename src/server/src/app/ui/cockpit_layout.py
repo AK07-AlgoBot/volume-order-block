@@ -18,8 +18,9 @@ from app.constants import (
     STRATEGY_S1_OI,
     STRATEGY_S2_SMC,
     STRATEGY_S3_BREAKOUT,
-    STRATEGY_S7_ORB,
     STRATEGY_S8_CHOCH,
+    STRATEGY_S29_ORB,
+    STRATEGY_GC_OF,
 )
 from app.services import cache_manager
 from app.services.broker_pnl_store import (
@@ -113,7 +114,7 @@ def _format_inr_plain(value: float | None) -> str:
 
 
 def render_funds_summary(*, username: str = "", broker: str = "upstox") -> None:
-    """Available capital + today's P&L card (reference-style summary)."""
+    """Available capital + today's P&L card (per logged-in user's broker)."""
     broker_key = (broker or "upstox").strip().lower()
     capital: float | None = None
     day_pnl: float | None = None
@@ -125,16 +126,31 @@ def render_funds_summary(*, username: str = "", broker: str = "upstox") -> None:
         capital = cached.get("capital")
         day_pnl = cached.get("day_pnl")
     else:
-        if broker_key == "groww" and username:
-            snap = refresh_groww_pnl_if_stale(username)
-            day_pnl = snap.get("total_pnl_inr")
-            if day_pnl is not None:
-                day_pnl = float(day_pnl)
-        else:
-            snap = get_user_broker_pnl(username, broker_key)
-            if snap.get("total_pnl_inr") is not None:
-                day_pnl = float(snap["total_pnl_inr"])
-            try:
+        try:
+            if broker_key == "groww" and username:
+                from app.services.groww_engine import GrowwClient
+
+                snap = refresh_groww_pnl_if_stale(username)
+                if snap.get("total_pnl_inr") is not None:
+                    day_pnl = float(snap["total_pnl_inr"])
+                client = GrowwClient(username)
+                capital = client.get_available_margin()
+                if day_pnl is None:
+                    pnl = client.get_fno_day_pnl()
+                    if pnl is not None:
+                        day_pnl = float(pnl.get("total_pnl") or 0.0)
+            elif broker_key == "kite" and username:
+                from app.services.kite_engine import build_kite_client
+
+                client = build_kite_client(username)
+                capital = client.get_available_margin()
+                pnl = client.get_portfolio_day_pnl()
+                if pnl is not None:
+                    day_pnl = float(pnl.get("total_pnl") or 0.0)
+            else:
+                snap = get_user_broker_pnl(username, broker_key)
+                if snap.get("total_pnl_inr") is not None:
+                    day_pnl = float(snap["total_pnl_inr"])
                 from app.services.upstox_engine import build_upstox_client
 
                 client = build_upstox_client(username or "AK07")
@@ -143,8 +159,8 @@ def render_funds_summary(*, username: str = "", broker: str = "upstox") -> None:
                     pnl = client.get_portfolio_day_pnl()
                     if pnl is not None:
                         day_pnl = float(pnl.get("total_pnl") or 0.0)
-            except Exception:
-                capital = None
+        except Exception:
+            pass
         st.session_state[cache_key] = {
             "at": now_m,
             "capital": capital,
@@ -223,7 +239,8 @@ def render_top_status_bar(
     smc_hb = cache_manager.get_json(cache_manager.SMC_CRT_HEARTBEAT_KEY)
     bo_hb = cache_manager.get_json(cache_manager.BREAKOUT_HEARTBEAT_KEY)
     gamma_hb = cache_manager.get_json(cache_manager.GAMMA_HEARTBEAT_KEY)
-    s7_state = cache_manager.get_json(cache_manager.S7_STATE_KEY)
+    s29_state = cache_manager.get_json(cache_manager.S29_STATE_KEY)
+    gc_state = cache_manager.get_json(cache_manager.GC_STATE_KEY)
     choch_state = cache_manager.get_json(cache_manager.CHOCH_STATE_KEY)
     system_bias = cache_manager.get_system_bias()
 
@@ -233,7 +250,14 @@ def render_top_status_bar(
     bo_detail = f"→{bo_hb.get('session_end_ist', '15:30')}" if bo_hb else "offline"
     gamma_detail = "expiry" if (gamma_hb or {}).get("expiry_today") else "idle"
     gamma_detail = gamma_detail if gamma_hb else "offline"
-    s7_detail = "live" if s7_state else "offline"
+    if s29_state:
+        s29_detail = "paper" if s29_state.get("paper_trading") else "live"
+    else:
+        s29_detail = "offline"
+    if gc_state:
+        gc_detail = "paper" if gc_state.get("paper_trading") else "live"
+    else:
+        gc_detail = "offline"
     choch_detail = "live" if choch_state else "offline"
 
     upstox_pnl = cache_manager.get_json(cache_manager.UPSTOX_DAILY_PNL_KEY) or {}
@@ -259,8 +283,10 @@ def render_top_status_bar(
         pill_specs.append((STRATEGY_PILL_SHORT[STRATEGY_S2_SMC], STRATEGY_S2_SMC, bool(smc_hb), smc_detail))
     if can_view(STRATEGY_S3_BREAKOUT):
         pill_specs.append((STRATEGY_PILL_SHORT[STRATEGY_S3_BREAKOUT], STRATEGY_S3_BREAKOUT, bool(bo_hb), bo_detail))
-    if can_view(STRATEGY_S7_ORB):
-        pill_specs.append((STRATEGY_PILL_SHORT[STRATEGY_S7_ORB], STRATEGY_S7_ORB, bool(s7_state), s7_detail))
+    if can_view(STRATEGY_S29_ORB):
+        pill_specs.append((STRATEGY_PILL_SHORT[STRATEGY_S29_ORB], STRATEGY_S29_ORB, bool(s29_state), s29_detail))
+    if can_view(STRATEGY_GC_OF):
+        pill_specs.append((STRATEGY_PILL_SHORT[STRATEGY_GC_OF], STRATEGY_GC_OF, bool(gc_state), gc_detail))
     if can_view(STRATEGY_S8_CHOCH):
         pill_specs.append((STRATEGY_PILL_SHORT[STRATEGY_S8_CHOCH], STRATEGY_S8_CHOCH, bool(choch_state), choch_detail))
     if can_view(STRATEGY_GAMMA):

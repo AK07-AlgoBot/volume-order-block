@@ -1,0 +1,45 @@
+# GoCharting setup (AK07 Orderflow) — live OMS
+
+GoCharting only sends BUY / SELL (plus ticker so OMS knows NIFTY vs BANKNIFTY).
+Option pick, futures LTP, SL, 1R trail, and 14:55 square-off all use AK07 Upstox data.
+
+## What you need
+1. GoCharting Premium with NSE futures footprint (5m NIFTY-I and BANKNIFTY-I).
+2. Lipi scripts in this folder pasted into Script Editor (All 4 is the live overlay).
+3. Webhook URL on each alert (OMS endpoint below).
+
+## Live webhook
+OMS path: `POST https://ak07.in/api/gocharting/alert?token=<AK07_GC_WEBHOOK_SECRET>`
+
+1. On the server, put a long random value in `.env` as `AK07_GC_WEBHOOK_SECRET` (do not commit it).
+2. Rebuild `api` + `gc_engine` after that change.
+3. In GoCharting: Alert → Delivery Methods → webhook URL with the token.
+4. Probe: `curl -s "https://ak07.in/api/gocharting/alert?token=SECRET"` should return `{"ok":true,...}`.
+
+Message body is the Lipi `alertcondition` string (plain text), e.g.
+`AK07|DD|BUY|{{ticker}}|{{interval}}`
+
+BUY → long ITM CE. SELL → long ITM PE. Strike is the S3 ITM pick from Upstox (shared across brokers). Fan-out is every live (non-paper) broker account (`AK07_GC_FANOUT_ALL_LIVE=1`).
+
+## Install scripts
+1. Open GoCharting → Script Editor.
+2. Paste `AK07_OF_DD_FD.lipi` (All 4) → Save → Apply on 5m NIFTY-I / BANKNIFTY-I.
+3. Optional overlays: Delta Swing, Run Fib, Sweep Trap, OIS Executor (thin).
+4. Create an alert on each `AK07 …` condition. Leave the script message as-is; paste the webhook URL.
+5. Do not click 1D / 5D / 15D / 1M — stay on 5m.
+
+## OMS risk (server / Upstox, not Lipi)
+- Max 2 trades/day, one open position at a time.
+- First winning trade (option P&L > 0) locks the engine for the rest of the day. A loser still allows a second attempt.
+- SL = last closed Upstox 5m futures candle extreme ±5 pts (BUY: low−5, SELL: high+5). Webhook `sl=` is fallback only.
+- After 1R, trail 1:1 on Upstox futures LTP. No option max-loss cap and no premium target.
+- Force square-off 14:55 IST. No new entries after 14:45. Kill switch / daily profit target block new entries.
+- Paper users are skipped.
+
+## Tuning (match 1–2 trades / tight SL)
+- `nearZeroAbs`: start 10–20 (lots); tighten if too many DD signals.
+- `similarPct`: 10–15 for Full Delta.
+- `maxTradesDay`: 2 in Lipi; OMS also caps at 2.
+
+## Stacked option buy
+Not auto in Lipi yet (no price-level stack API). Use checklist in `AK07_webhook_payload.example.json`.

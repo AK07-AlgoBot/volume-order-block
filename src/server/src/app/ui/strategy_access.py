@@ -7,7 +7,6 @@ from typing import Any
 
 from app.constants import (
     ALL_STRATEGIES,
-    S7_ORB_INDICES,
     STRATEGY_GAMMA,
     STRATEGY_LABELS,
     STRATEGY_S1_OI,
@@ -16,6 +15,7 @@ from app.constants import (
     STRATEGY_S7_ORB,
     STRATEGY_S8_CHOCH,
     STRATEGY_S29_ORB,
+    STRATEGY_GC_OF,
 )
 from app.services.user_profiles_store import strategy_enabled
 
@@ -27,10 +27,11 @@ _TRADE_STRATEGY_ID_MAP: dict[str, str] = {
     "s2_smc": STRATEGY_S2_SMC,
     "breakout": STRATEGY_S3_BREAKOUT,
     "s3_breakout": STRATEGY_S3_BREAKOUT,
-    "s7_orb": STRATEGY_S7_ORB,
+    "s7_orb": STRATEGY_S7_ORB,  # historical rows only
     "s7_vmb": STRATEGY_S7_ORB,
     "s8_choch": STRATEGY_S8_CHOCH,
     "s29_orb": STRATEGY_S29_ORB,
+    "gc_of": STRATEGY_GC_OF,
     "gamma": STRATEGY_GAMMA,
 }
 
@@ -111,8 +112,6 @@ def tabbed_dashboard_index_codes() -> list[str]:
         from app.services.smc_crt_engine import SMC_CRT_INSTRUMENTS
 
         codes.update(SMC_CRT_INSTRUMENTS.keys())
-    if user_can_view_strategy(STRATEGY_S7_ORB):
-        codes.update(S7_ORB_INDICES)
     if user_can_view_strategy(STRATEGY_S8_CHOCH):
         from app.services.choch_engine import CHOCH_INSTRUMENTS
 

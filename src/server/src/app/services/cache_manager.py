@@ -43,6 +43,8 @@ BREAKOUT_SESSION_KEY_TEMPLATE: Final[str] = "ak07:breakout_session:{day}:{index}
 BREAKOUT_HEARTBEAT_KEY: Final[str] = "ak07:breakout_heartbeat"
 S7_STATE_KEY: Final[str] = "ak07:s7_state"
 S29_STATE_KEY: Final[str] = "ak07:s29_state"
+GC_STATE_KEY: Final[str] = "ak07:gc_state"
+GC_ALERT_QUEUE_KEY: Final[str] = "ak07:gc_alerts"
 CHOCH_STATE_KEY: Final[str] = "ak07:choch_state"
 CHOCH_SESSION_KEY_TEMPLATE: Final[str] = "ak07:choch_session:{day}"
 GAMMA_STATE_KEY: Final[str] = "ak07:gamma_state"
@@ -198,6 +200,34 @@ def get_json(key: str) -> Any | None:
         return json.loads(raw)
     except Exception:  # noqa: BLE001
         logger.exception("Unexpected failure while reading key %s", key)
+        return None
+
+
+def rpush_json(key: str, value: Any) -> bool:
+    """Append a JSON-able value to a Redis list (fail-safe)."""
+    try:
+        client = _get_client()
+        if client is None:
+            return False
+        client.rpush(key, json.dumps(value, ensure_ascii=False))
+        return True
+    except Exception:  # noqa: BLE001
+        logger.exception("Unexpected failure while rpush key %s", key)
+        return False
+
+
+def lpop_json(key: str) -> Any | None:
+    """Pop the oldest JSON value from a Redis list, or None."""
+    try:
+        client = _get_client()
+        if client is None:
+            return None
+        raw = client.lpop(key)
+        if raw is None:
+            return None
+        return json.loads(raw)
+    except Exception:  # noqa: BLE001
+        logger.exception("Unexpected failure while lpop key %s", key)
         return None
 
 

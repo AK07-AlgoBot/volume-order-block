@@ -1,0 +1,63 @@
+indicator("AK07 Sweep Trap", overlay = true)
+
+// Round 3 - do not replace All 4, Delta Swing, or Run Fib.
+// Buy:  5m green, wick takes out today's prior low, close back above it, DD delta
+// Sell: 5m red,   wick takes out today's prior high, close back below it, DD delta
+// Apply on 5m NIFTY-I / BANKNIFTY-I. Save as AK07 Sweep Trap.
+
+zeroAbs = input(50.0, title = "Treat max/min delta as zero if abs <=")
+minPrior = input(2, title = "Min prior same-day bars")
+needDD = input(false, title = "Require delta divergence")
+inSessOnly = input(true, title = "Session 09:15-15:15 only")
+
+d = orderflow.delta
+maxD = orderflow.maxdelta
+minD = orderflow.mindelta
+
+bull = close > open
+bear = close < open
+tick = 0.05
+
+inSess = (hour == 9 and minute >= 15) or (hour > 9 and hour < 15) or (hour == 15 and minute <= 15)
+sessOk = not inSessOnly or inSess
+
+priHi = high[1]
+priLo = low[1]
+nToday = 0.0
+for i = 1 to 75 {
+    if dayofweek[i] != dayofweek {
+        break
+    }
+    nToday := nToday + 1.0
+    if high[i] > priHi {
+        priHi := high[i]
+    }
+    if low[i] < priLo {
+        priLo := low[i]
+    }
+}
+
+haveDay = nToday >= minPrior
+sweptLo = haveDay and low < priLo and close > priLo
+sweptHi = haveDay and high > priHi and close < priHi
+
+maxIsZero = math.abs(maxD) <= zeroAbs
+minIsZero = math.abs(minD) <= zeroAbs
+buyRaw = bull and d < 0 and minD < 0 and maxIsZero
+sellRaw = bear and d > 0 and maxD > 0 and minIsZero
+ddOkBuy = not needDD or buyRaw
+ddOkSell = not needDD or sellRaw
+
+buyTr = sessOk and sweptLo and bull and ddOkBuy
+sellTr = sessOk and sweptHi and bear and ddOkSell
+
+plotshape(buyTr, title="TR Buy", shape=shape.triangleup, location=location.belowbar, color=color.lime, size=size.large, text="BUY TR")
+plotshape(sellTr, title="TR Sell", shape=shape.triangledown, location=location.abovebar, color=color.red, size=size.large, text="SELL TR")
+
+plot(haveDay ? priLo : na, title="Prior day low", color=color.green)
+plot(haveDay ? priHi : na, title="Prior day high", color=color.red)
+
+bgcolor(buyTr ? color.new(color.green, 0.55) : sellTr ? color.new(color.red, 0.55) : na)
+
+alertcondition(buyTr, title = "AK07 TR Buy", message = "AK07|SWEEP|BUY|{{ticker}}|{{interval}}|sl={{low}}")
+alertcondition(sellTr, title = "AK07 TR Sell", message = "AK07|SWEEP|SELL|{{ticker}}|{{interval}}|sl={{high}}")

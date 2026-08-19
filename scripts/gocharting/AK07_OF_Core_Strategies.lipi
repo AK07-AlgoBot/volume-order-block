@@ -1,0 +1,198 @@
+// =============================================================================
+// AK07 Orderflow Core Strategies (GoCharting Lipi)
+// Chart: Footprint / Imbalance | TF: 5m (primary) | Symbols: NIFTY/BANKNIFTY FUT
+//
+ // Requires GoCharting Premium orderflow feed (true delta/COT — not OHLC proxy).
+// Paste into GoCharting Script Editor → Save → Apply on footprint chart.
+// Then: Alert → webhook https://ak07.in/api/gocharting/alert?token=<AK07_GC_WEBHOOK_SECRET>
+//
+ // Strategies:
+//   1) Delta Divergence (primary, most frequent)
+//   2) Full Delta (sudden marubozu + delta≈max/min≈COT)
+// Locations: Day H/L, Fib 0.6–0.7 continuous runs, dips, edges
+// Risk model (matches observed OFE style): 1–2 trades/day, tight SL, large R:R
+// =============================================================================
+
+indicator("AK07 OF Core Strategies", overlay = true)
+
+// ---------------- Inputs ----------------
+nearZeroAbs = input(15.0, title = "Near-zero |max/min delta|")
+similarPct = input(12.0, title = "Full-delta similarity %")
+bigVolMult = input(1.8, title = "Big order vs volume SMA")
+volSmaLen = input(20, title = "Volume SMA length")
+maruBodyPct = input(85.0, title = "Marubozu body % of range")
+maruWickPct = input(8.0, title = "Max wick % each side")
+locTolPts = input(25.0, title = "Location touch tolerance (pts)")
+fibMinBars = input(3, title = "Min continuous same-color bars for Fib")
+enableDD = input(true, title = "Enable Delta Divergence")
+enableFD = input(true, title = "Enable Full Delta")
+requireLocDD = input(true, title = "DD require location")
+banExactDay = input(true, title = "Ban exact day H/L bounce (no dip/fib)")
+maxTradesDay = input(2, title = "Max signals/day (visual gate)")
+showDbg = input(true, title = "Show delta table")
+
+// ---------------- Orderflow (native) ----------------
+d = orderflow.delta
+maxD = orderflow.maxdelta
+minD = orderflow.mindelta
+cotH = orderflow.cothigh
+cotL = orderflow.cotlow
+buyV = orderflow.buyvolume
+sellV = orderflow.sellvolume
+
+bull = close > open
+bear = close < open
+rng = math.max(high - low, syminfo.mintick)
+bodyPct = 100.0 * math.abs(close - open) / rng
+upWickPct = 100.0 * (high - math.max(open, close)) / rng
+dnWickPct = 100.0 * (math.min(open, close) - low) / rng
+maruBull = bull and bodyPct >= maruBodyPct and upWickPct <= maruWickPct and dnWickPct <= maruWickPct
+maruBear = bear and bodyPct >= maruBodyPct and upWickPct <= maruWickPct and dnWickPct <= maruWickPct
+
+volSma = talib.sma(volume, volSmaLen)
+bigOrder = volume >= volSma * bigVolMult
+
+f_similar3(a, b, c, pct) =>
+    m = (math.abs(a) + math.abs(b) + math.abs(c)) / 3.0
+    m <= syminfo.mintick ? false : math.abs(a - b) <= m * pct / 100.0 and math.abs(a - c) <= m * pct / 100.0 and math.abs(b - c) <= m * pct / 100.0
+
+// ---------------- Session / day H-L ----------------
+inSess = (hour == 9 and minute >= 15) or (hour > 9 and hour < 15) or (hour == 15 and minute <= 30)
+newDay = dayofweek != dayofweek[1] or (hour == 9 and minute == 15 and minute[1] != 15)
+
+var float dayHi = na
+var float dayLo = na
+if newDay or na(dayHi) {
+    dayHi := high
+    dayLo := low
+} else {
+    dayHi := math.max(dayHi, high)
+    dayLo := math.min(dayLo, low)
+}
+
+plot(dayHi, title = "Day High", color = color.teal)
+plot(dayLo, title = "Day Low", color = color.orange)
+
+atDayHi = math.abs(high - dayHi) <= locTolPts
+atDayLo = math.abs(low - dayLo) <= locTolPts
+
+// ---------------- Continuous Fib 0.6 / 0.7 ----------------
+f_countRun(up) =>
+    cnt = 0
+    for i = 0 to 40 {
+        ok = up ? close[i] > open[i] : close[i] < open[i]
+        if not ok {
+            break
+        }
+        cnt := cnt + 1
+    }
+    cnt
+
+upRun = f_countRun(true)
+dnRun = f_countRun(false)
+
+var float fib6 = na
+var float fib7 = na
+if upRun >= fibMinBars and upRun >= dnRun {
+    lo = low
+    hi = high
+    for i = 0 to upRun - 1 {
+        lo := math.min(lo, low[i])
+        hi := math.max(hi, high[i])
+    }
+    fib6 := hi - 0.6 * (hi - lo)
+    fib7 := hi - 0.7 * (hi - lo)
+} else if dnRun >= fibMinBars {
+    lo2 = low
+    hi2 = high
+    for i = 0 to dnRun - 1 {
+        lo2 := math.min(lo2, low[i])
+        hi2 := math.max(hi2, high[i])
+    }
+    fib6 := lo2 + 0.6 * (hi2 - lo2)
+    fib7 := lo2 + 0.7 * (hi2 - lo2)
+}
+
+inFib67 = not na(fib6) and not na(fib7) and low <= math.max(fib6, fib7) + locTolPts and high >= math.min(fib6, fib7) - locTolPts
+
+// ---------------- Dip (simple pullback after day extreme) ----------------
+var float dipRef = na
+var int dipSide = 0
+if high >= dayHi and close < high and low < low[1] {
+    dipRef := low
+    dipSide := 1
+}
+if low <= dayLo and close > low and high > high[1] {
+    dipRef := high
+    dipSide := -1
+}
+nearDip = not na(dipRef) and math.abs((dipSide == 1 ? low : high) - dipRef) <= locTolPts
+atEdge = atDayHi or atDayLo
+goodLocLong = inFib67 or nearDip or atDayLo
+goodLocShort = inFib67 or nearDip or atDayHi
+
+// ---------------- Daily trade gate ----------------
+var int daySignals = 0
+if newDay {
+    daySignals := 0
+}
+canSignal = daySignals < maxTradesDay
+
+// ---------------- 1) Delta Divergence ----------------
+ddBuyRaw = enableDD and inSess and bull and d < 0 and minD < 0 and math.abs(maxD) <= nearZeroAbs
+ddSellRaw = enableDD and inSess and bear and d > 0 and maxD > 0 and math.abs(minD) <= nearZeroAbs
+ddBuy = ddBuyRaw and canSignal and (not requireLocDD or goodLocLong) and not (banExactDay and atDayLo and not nearDip and not inFib67)
+ddSell = ddSellRaw and canSignal and (not requireLocDD or goodLocShort) and not (banExactDay and atDayHi and not nearDip and not inFib67)
+
+// ---------------- 2) Full Delta ----------------
+// First candle = not continuing a prior marubozu of same colour
+priorNotMaruLong = not (close[1] > open[1] and (100.0 * math.abs(close[1] - open[1]) / math.max(high[1] - low[1], syminfo.mintick)) >= maruBodyPct * 0.9)
+priorNotMaruShort = not (close[1] < open[1] and (100.0 * math.abs(close[1] - open[1]) / math.max(high[1] - low[1], syminfo.mintick)) >= maruBodyPct * 0.9)
+
+fdBuy = enableFD and inSess and canSignal and maruBull and bigOrder and f_similar3(d, maxD, cotL, similarPct) and not atDayHi and not atDayLo and priorNotMaruLong
+fdSell = enableFD and inSess and canSignal and maruBear and bigOrder and f_similar3(d, minD, cotH, similarPct) and not atDayHi and not atDayLo and priorNotMaruShort
+
+anySig = ddBuy or ddSell or fdBuy or fdSell
+if anySig {
+    daySignals := daySignals + 1
+}
+
+// ---------------- Visuals ----------------
+plotshape(ddBuy, title = "DD Buy", style = shape.triangleup, location = location.belowbar, color = color.lime, size = size.small, text = "DD")
+plotshape(ddSell, title = "DD Sell", style = shape.triangledown, location = location.abovebar, color = color.red, size = size.small, text = "DD")
+plotshape(fdBuy, title = "FD Buy", style = shape.diamond, location = location.belowbar, color = color.aqua, size = size.tiny, text = "FD")
+plotshape(fdSell, title = "FD Sell", style = shape.diamond, location = location.abovebar, color = color.fuchsia, size = size.tiny, text = "FD")
+
+bgcolor(ddBuy or fdBuy ? color.new(color.green, 0.85) : ddSell or fdSell ? color.new(color.red, 0.85) : na)
+
+// SL visual = signal candle extreme (tight SL model)
+plot(ddBuy or fdBuy ? low : na, title = "Long SL", color = color.green, style = plotStyle.circles)
+plot(ddSell or fdSell ? high : na, title = "Short SL", color = color.red, style = plotStyle.circles)
+
+// ---------------- Debug table ----------------
+if showDbg {
+    var table t = table.new(position.top_right, 2, 8)
+    table.cell(t, 0, 0, "metric")
+    table.cell(t, 1, 0, "value")
+    table.cell(t, 0, 1, "delta")
+    table.cell(t, 1, 1, str.tostring(d, "#.##"))
+    table.cell(t, 0, 2, "maxD")
+    table.cell(t, 1, 2, str.tostring(maxD, "#.##"))
+    table.cell(t, 0, 3, "minD")
+    table.cell(t, 1, 3, str.tostring(minD, "#.##"))
+    table.cell(t, 0, 4, "cotH")
+    table.cell(t, 1, 4, str.tostring(cotH, "#.##"))
+    table.cell(t, 0, 5, "cotL")
+    table.cell(t, 1, 5, str.tostring(cotL, "#.##"))
+    table.cell(t, 0, 6, "buyV/sellV")
+    table.cell(t, 1, 6, str.tostring(buyV, "#") + "/" + str.tostring(sellV, "#"))
+    table.cell(t, 0, 7, "daySig")
+    table.cell(t, 1, 7, str.tostring(daySignals) + "/" + str.tostring(maxTradesDay))
+}
+
+// ---------------- Alerts (webhook-ready messages) ----------------
+alertcondition(ddBuy, title = "AK07 DD Buy", message = "AK07|DD|BUY|{{ticker}}|{{interval}}|sl={{low}}|delta={{plot_0}}")
+alertcondition(ddSell, title = "AK07 DD Sell", message = "AK07|DD|SELL|{{ticker}}|{{interval}}|sl={{high}}")
+alertcondition(fdBuy, title = "AK07 FD Buy", message = "AK07|FD|BUY|{{ticker}}|{{interval}}|sl={{low}}")
+alertcondition(fdSell, title = "AK07 FD Sell", message = "AK07|FD|SELL|{{ticker}}|{{interval}}|sl={{high}}")
+alertcondition(anySig, title = "AK07 Any OF Signal", message = "AK07|OF|SIGNAL|{{ticker}}|{{interval}}")

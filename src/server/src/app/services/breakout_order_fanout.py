@@ -7,7 +7,7 @@ import os
 from dataclasses import dataclass
 from typing import Any, Final
 
-from app.constants import STRATEGY_S3_BREAKOUT
+from app.constants import STRATEGY_GC_OF, STRATEGY_S29_ORB, STRATEGY_S3_BREAKOUT
 from app.services.groww_engine import GrowwClient
 from app.services.kite_engine import KiteClient
 from app.services.upstox_engine import UpstoxClient, build_upstox_client
@@ -17,6 +17,9 @@ logger = logging.getLogger("ak07.breakout_fanout")
 # futures = index FUT (legacy). options = BUY ITM CE/PE, exit with SELL (lower brokerage).
 S3_EXEC_INSTRUMENT: Final[str] = (os.environ.get("BREAKOUT_EXEC_INSTRUMENT") or "options").strip().lower()
 
+# Fan-out to every live (non-paper) user, ignoring strategy entitlements.
+FANOUT_ALL_LIVE: Final[str] = "*"
+
 
 @dataclass(frozen=True)
 class S3Trader:
@@ -25,7 +28,11 @@ class S3Trader:
     lots: int = 1
 
 
-def list_live_s3_traders() -> list[S3Trader]:
+def list_live_traders(strategy_id: str) -> list[S3Trader]:
+    """Live (non-paper) users who have this strategy enabled.
+
+    Pass ``FANOUT_ALL_LIVE`` (``"*"``) to skip the entitlement filter.
+    """
     from app.services.user_profiles_store import normalize_lots, read_profile
     from app.services.users_store import list_users
 
@@ -36,7 +43,8 @@ def list_live_s3_traders() -> list[S3Trader]:
         if not username:
             continue
         profile = read_profile(username, role=role)
-        if STRATEGY_S3_BREAKOUT not in (profile.get("enabled_strategies") or []):
+        enabled = profile.get("enabled_strategies") or []
+        if strategy_id != FANOUT_ALL_LIVE and strategy_id not in enabled:
             continue
         if profile.get("paper_trading"):
             continue
@@ -49,6 +57,10 @@ def list_live_s3_traders() -> list[S3Trader]:
             )
         )
     return traders
+
+
+def list_live_s3_traders() -> list[S3Trader]:
+    return list_live_traders(STRATEGY_S3_BREAKOUT)
 
 
 def s3_uses_options() -> bool:
@@ -77,15 +89,18 @@ def place_s3_entries(
     global_paper: bool,
     only_usernames: frozenset[str] | None = None,
     spot: float | None = None,
+    strategy_id: str = STRATEGY_S3_BREAKOUT,
+    log_tag: str = "S3",
+    force_options: bool | None = None,
 ) -> list[dict[str, Any]]:
-    """Place entry on every live S3 trader's broker. Returns successful legs."""
-    options = s3_uses_options()
+    """Place entry on every live trader's broker for this strategy. Returns successful legs."""
+    options = s3_uses_options() if force_options is None else bool(force_options)
     if options and (spot is None or spot <= 0):
-        logger.error("S3 options entry aborted — spot required to pick ITM strike")
+        logger.error("%s options entry aborted — spot required to pick ITM strike", log_tag)
         return []
 
     if global_paper:
-        traders = list_live_s3_traders()
+        traders = list_live_traders(strategy_id)
         if only_usernames:
             traders = [t for t in traders if t.username in only_usernames]
         label = f"{index_code} OPT" if options else f"{index_code} FUT"
@@ -123,13 +138,14 @@ def place_s3_entries(
                 shared_strike = int(shared_upstox_contract.get("strike") or 0) or None
                 shared_opt = str(shared_upstox_contract.get("option_type") or "") or None
                 logger.info(
-                    "S3 shared option strike %s%s (selection=%s) — all brokers must use this",
+                    "%s shared option strike %s%s (selection=%s) — all brokers must use this",
+                    log_tag,
                     shared_strike,
                     shared_opt,
                     shared_upstox_contract.get("selection"),
                 )
 
-    for trader in list_live_s3_traders():
+    for trader in list_live_traders(strategy_id):
         if only_usernames and trader.username not in only_usernames:
             continue
         trader_lots = max(1, int(trader.lots or lots or 1))
@@ -137,7 +153,7 @@ def place_s3_entries(
         if trader.broker == "groww":
             groww = GrowwClient(trader.username)
             if not groww.has_token():
-                logger.error("[%s] S3 entry skipped — no Groww token", trader.username)
+                logger.error("[%s] %s entry skipped — no Groww token", trader.username, log_tag)
                 continue
             if options:
                 contract = groww.get_itm_option_contract(
@@ -147,7 +163,7 @@ def place_s3_entries(
                 contract = groww.get_index_future_contract(index_code)
             if not contract:
                 kind = "option" if options else "future"
-                logger.error("[%s] S3 entry skipped — no Groww %s %s", trader.username, index_code, kind)
+                logger.error("[%s] %s entry skipped — no Groww %s %s", trader.username, log_tag, index_code, kind)
                 continue
             qty = int(contract.get("lot_size") or lot_size) * trader_lots
             sym = str(contract["trading_symbol"])
@@ -172,7 +188,7 @@ def place_s3_entries(
                 exchange=str(contract.get("exchange") or "NSE"),
             )
             if not order_id:
-                logger.error("[%s] Groww S3 entry order failed", trader.username)
+                logger.error("[%s] Groww %s entry order failed", trader.username, log_tag)
                 continue
             premium = groww.get_fno_ltp(sym)
             legs.append(
@@ -194,8 +210,9 @@ def place_s3_entries(
                 }
             )
             logger.info(
-                "[%s] S3 Groww entry %s %d x %s (%s)%s",
+                "[%s] %s Groww entry %s %d x %s (%s)%s",
                 trader.username,
+                log_tag,
                 side,
                 qty,
                 contract["trading_symbol"],
@@ -207,7 +224,7 @@ def place_s3_entries(
         if trader.broker == "kite":
             kite = KiteClient(trader.username)
             if not kite.has_token():
-                logger.error("[%s] S3 entry skipped — no Kite token", trader.username)
+                logger.error("[%s] %s entry skipped — no Kite token", trader.username, log_tag)
                 continue
             if options:
                 contract = kite.get_itm_option_contract(
@@ -217,7 +234,7 @@ def place_s3_entries(
                 contract = kite.get_index_future_contract(index_code)
             if not contract:
                 kind = "option" if options else "future"
-                logger.error("[%s] S3 entry skipped — no Kite %s %s", trader.username, index_code, kind)
+                logger.error("[%s] %s entry skipped — no Kite %s %s", trader.username, log_tag, index_code, kind)
                 continue
             qty = int(contract.get("lot_size") or lot_size) * trader_lots
             sym = str(contract["tradingsymbol"])
@@ -238,7 +255,7 @@ def place_s3_entries(
                 continue
             order_id = kite.place_market_order(exchange, sym, qty, side)
             if not order_id:
-                logger.error("[%s] Kite S3 entry order failed", trader.username)
+                logger.error("[%s] Kite %s entry order failed", trader.username, log_tag)
                 continue
             premium = kite.get_fno_ltp(exchange, sym)
             legs.append(
@@ -260,8 +277,9 @@ def place_s3_entries(
                 }
             )
             logger.info(
-                "[%s] S3 Kite entry %s %d x %s:%s (%s)%s",
+                "[%s] %s Kite entry %s %d x %s:%s (%s)%s",
                 trader.username,
+                log_tag,
                 side,
                 qty,
                 exchange,
@@ -278,18 +296,18 @@ def place_s3_entries(
 
                 cfg = INDEX_CONFIGS.get(index_code.upper())
                 if not cfg:
-                    logger.error("[%s] S3 entry skipped — unknown index %s", trader.username, index_code)
+                    logger.error("[%s] %s entry skipped — unknown index %s", trader.username, log_tag, index_code)
                     continue
                 client = upstox_market_client or upstox
                 contract = shared_upstox_contract or client.get_itm_option_contract(
                     cfg.spot_instrument_key, float(spot), direction
                 )
                 if not contract or not contract.get("instrument_key"):
-                    logger.error("[%s] S3 entry skipped — no Upstox %s ITM option", trader.username, index_code)
+                    logger.error("[%s] %s entry skipped — no Upstox %s ITM option", trader.username, log_tag, index_code)
                     continue
                 ok = upstox.place_market_order(str(contract["instrument_key"]), quantity, "BUY")
                 if not ok:
-                    logger.error("[%s] Upstox S3 option entry failed", trader.username)
+                    logger.error("[%s] Upstox %s option entry failed", trader.username, log_tag)
                     continue
                 premium = upstox.get_ltp(str(contract["instrument_key"]))
                 label = f"{contract['strike']}{contract['option_type']}"
@@ -312,8 +330,9 @@ def place_s3_entries(
                     }
                 )
                 logger.info(
-                    "[%s] S3 Upstox entry BUY %d x %s δ=%s%s",
+                    "[%s] %s Upstox entry BUY %d x %s δ=%s%s",
                     trader.username,
+                    log_tag,
                     quantity,
                     label,
                     contract.get("abs_delta") or contract.get("delta"),
@@ -323,11 +342,11 @@ def place_s3_entries(
 
             contract = upstox.get_index_future_contract(index_code)
             if not contract or not contract.get("instrument_key"):
-                logger.error("[%s] S3 entry skipped — no Upstox %s future", trader.username, index_code)
+                logger.error("[%s] %s entry skipped — no Upstox %s future", trader.username, log_tag, index_code)
                 continue
             ok = upstox.place_market_order(str(contract["instrument_key"]), quantity, side)
             if not ok:
-                logger.error("[%s] Upstox S3 entry order failed", trader.username)
+                logger.error("[%s] Upstox %s entry order failed", trader.username, log_tag)
                 continue
             legs.append(
                 {
@@ -342,15 +361,16 @@ def place_s3_entries(
                 }
             )
             logger.info(
-                "[%s] S3 Upstox entry %s %d x %s",
+                "[%s] %s Upstox entry %s %d x %s",
                 trader.username,
+                log_tag,
                 side,
                 quantity,
                 contract.get("trading_symbol") or contract["instrument_key"],
             )
             continue
 
-        logger.error("[%s] S3 entry skipped — unsupported broker %s", trader.username, trader.broker)
+        logger.error("[%s] %s entry skipped — unsupported broker %s", trader.username, log_tag, trader.broker)
 
     return legs
 
@@ -418,6 +438,8 @@ def missing_s3_traders(
     lot_size: int = 65,
     lots: int = 1,
     exclude_usernames: frozenset[str] | set[str] | None = None,
+    strategy_id: str = STRATEGY_S3_BREAKOUT,
+    force_options: bool | None = None,
 ) -> list[S3Trader]:
     """Live traders who did not get an entry leg yet.
 
@@ -433,12 +455,13 @@ def missing_s3_traders(
     # Case-insensitive cover check
     covered_l = {c.lower() for c in covered if c}
     if assume_upstox_filled and not covered:
-        for trader in list_live_s3_traders():
+        for trader in list_live_traders(strategy_id):
             if trader.broker == "upstox":
                 covered.add(trader.username)
                 covered_l.add(trader.username.lower())
-    if index_code and direction and not s3_uses_options():
-        for trader in list_live_s3_traders():
+    options = s3_uses_options() if force_options is None else bool(force_options)
+    if index_code and direction and not options:
+        for trader in list_live_traders(strategy_id):
             if trader.username in covered or trader.username.lower() in covered_l:
                 continue
             trader_lots = max(1, int(trader.lots or lots or 1))
@@ -479,7 +502,7 @@ def missing_s3_traders(
                 covered_l.add(trader.username.lower())
     return [
         t
-        for t in list_live_s3_traders()
+        for t in list_live_traders(strategy_id)
         if t.username not in covered and t.username.lower() not in covered_l
     ]
 
@@ -495,6 +518,9 @@ def catchup_s3_legs(
     global_paper: bool,
     spot: float | None = None,
     exclude_usernames: frozenset[str] | set[str] | None = None,
+    strategy_id: str = STRATEGY_S3_BREAKOUT,
+    log_tag: str = "S3",
+    force_options: bool | None = None,
 ) -> list[dict[str, Any]]:
     """Place entries for live traders missing from an open position's legs."""
     missing = missing_s3_traders(
@@ -505,11 +531,13 @@ def catchup_s3_legs(
         lot_size=lot_size,
         lots=lots,
         exclude_usernames=exclude_usernames,
+        strategy_id=strategy_id,
+        force_options=force_options,
     )
     if not missing:
         return []
     names = frozenset(t.username for t in missing)
-    logger.info("S3 catch-up entry for missing traders: %s", ", ".join(sorted(names)))
+    logger.info("%s catch-up entry for missing traders: %s", log_tag, ", ".join(sorted(names)))
     return place_s3_entries(
         index_code=index_code,
         direction=direction,
@@ -519,6 +547,9 @@ def catchup_s3_legs(
         global_paper=global_paper,
         only_usernames=names,
         spot=spot,
+        strategy_id=strategy_id,
+        log_tag=log_tag,
+        force_options=force_options,
     )
 
 
@@ -527,6 +558,7 @@ def place_s3_exits(
     direction: str,
     *,
     global_paper: bool,
+    log_tag: str = "S3",
 ) -> bool:
     """Exit all legs placed at entry. Returns True if every leg succeeded."""
     if global_paper or not legs:
@@ -584,12 +616,13 @@ def place_s3_exits(
             exit_qty = min(qty, abs(net)) if net != 0 else qty
             order_id = groww.place_market_order(trading_symbol, exit_qty, side)
             if not order_id:
-                logger.error("[%s] Groww S3 exit order failed", username)
+                logger.error("[%s] Groww %s exit order failed", username, log_tag)
                 all_ok = False
             else:
                 logger.info(
-                    "[%s] S3 Groww exit %s %d x %s (%s)",
+                    "[%s] %s Groww exit %s %d x %s (%s)",
                     username,
+                    log_tag,
                     side,
                     exit_qty,
                     trading_symbol,
@@ -644,12 +677,13 @@ def place_s3_exits(
                 bypass_profit_guard=True,
             )
             if not order_id:
-                logger.error("[%s] Kite S3 exit order failed", username)
+                logger.error("[%s] Kite %s exit order failed", username, log_tag)
                 all_ok = False
             else:
                 logger.info(
-                    "[%s] S3 Kite exit %s %d x %s:%s (%s)",
+                    "[%s] %s Kite exit %s %d x %s:%s (%s)",
                     username,
+                    log_tag,
                     side,
                     exit_qty,
                     exchange,
@@ -667,13 +701,13 @@ def place_s3_exits(
                 continue
             ok = upstox.place_market_order(instrument_key, qty, side, bypass_profit_guard=True)
             if not ok:
-                logger.error("[%s] Upstox S3 exit order failed", username)
+                logger.error("[%s] Upstox %s exit order failed", username, log_tag)
                 all_ok = False
             else:
-                logger.info("[%s] S3 Upstox exit %s %d x %s", username, side, qty, instrument_key)
+                logger.info("[%s] %s Upstox exit %s %d x %s", username, log_tag, side, qty, instrument_key)
             continue
 
-        logger.warning("[%s] S3 exit skipped — broker %s not wired", username, broker)
+        logger.warning("[%s] %s exit skipped — broker %s not wired", username, log_tag, broker)
         all_ok = False
 
     return all_ok
@@ -694,3 +728,138 @@ def legs_summary(legs: list[dict[str, Any]]) -> str:
 def position_legs(pos: Any) -> list[dict[str, Any]]:
     legs = getattr(pos, "order_legs", None)
     return legs if isinstance(legs, list) else []
+
+
+def place_s29_entries(
+    *,
+    index_code: str,
+    direction: str,
+    lot_size: int,
+    lots: int,
+    upstox_market_client: UpstoxClient | None,
+    global_paper: bool,
+    only_usernames: frozenset[str] | None = None,
+    spot: float | None = None,
+) -> list[dict[str, Any]]:
+    """S29 Nifty ORB+ — same per-user broker fan-out as S3, options only."""
+    return place_s3_entries(
+        index_code=index_code,
+        direction=direction,
+        lot_size=lot_size,
+        lots=lots,
+        upstox_market_client=upstox_market_client,
+        global_paper=global_paper,
+        only_usernames=only_usernames,
+        spot=spot,
+        strategy_id=STRATEGY_S29_ORB,
+        log_tag="S29",
+        force_options=True,
+    )
+
+
+def place_s29_exits(
+    legs: list[dict[str, Any]],
+    direction: str,
+    *,
+    global_paper: bool,
+) -> bool:
+    return place_s3_exits(legs, direction, global_paper=global_paper, log_tag="S29")
+
+
+def catchup_s29_legs(
+    *,
+    index_code: str,
+    direction: str,
+    lot_size: int,
+    lots: int,
+    existing_legs: list[dict[str, Any]],
+    upstox_market_client: UpstoxClient | None,
+    global_paper: bool,
+    spot: float | None = None,
+    exclude_usernames: frozenset[str] | set[str] | None = None,
+) -> list[dict[str, Any]]:
+    return catchup_s3_legs(
+        index_code=index_code,
+        direction=direction,
+        lot_size=lot_size,
+        lots=lots,
+        existing_legs=existing_legs,
+        upstox_market_client=upstox_market_client,
+        global_paper=global_paper,
+        spot=spot,
+        exclude_usernames=exclude_usernames,
+        strategy_id=STRATEGY_S29_ORB,
+        log_tag="S29",
+        force_options=True,
+    )
+
+
+def _gc_fanout_strategy_id() -> str:
+    raw = (os.environ.get("AK07_GC_FANOUT_ALL_LIVE") or "1").strip().lower()
+    if raw in ("0", "false", "no", "off"):
+        return STRATEGY_GC_OF
+    return FANOUT_ALL_LIVE
+
+
+def place_gc_entries(
+    *,
+    index_code: str,
+    direction: str,
+    lot_size: int,
+    lots: int,
+    upstox_market_client: UpstoxClient | None,
+    global_paper: bool,
+    only_usernames: frozenset[str] | None = None,
+    spot: float | None = None,
+) -> list[dict[str, Any]]:
+    """GoCharting orderflow — S3 ITM CE/PE fan-out to live users."""
+    return place_s3_entries(
+        index_code=index_code,
+        direction=direction,
+        lot_size=lot_size,
+        lots=lots,
+        upstox_market_client=upstox_market_client,
+        global_paper=global_paper,
+        only_usernames=only_usernames,
+        spot=spot,
+        strategy_id=_gc_fanout_strategy_id(),
+        log_tag="GC",
+        force_options=True,
+    )
+
+
+def place_gc_exits(
+    legs: list[dict[str, Any]],
+    direction: str,
+    *,
+    global_paper: bool,
+) -> bool:
+    return place_s3_exits(legs, direction, global_paper=global_paper, log_tag="GC")
+
+
+def catchup_gc_legs(
+    *,
+    index_code: str,
+    direction: str,
+    lot_size: int,
+    lots: int,
+    existing_legs: list[dict[str, Any]],
+    upstox_market_client: UpstoxClient | None,
+    global_paper: bool,
+    spot: float | None = None,
+    exclude_usernames: frozenset[str] | set[str] | None = None,
+) -> list[dict[str, Any]]:
+    return catchup_s3_legs(
+        index_code=index_code,
+        direction=direction,
+        lot_size=lot_size,
+        lots=lots,
+        existing_legs=existing_legs,
+        upstox_market_client=upstox_market_client,
+        global_paper=global_paper,
+        spot=spot,
+        exclude_usernames=exclude_usernames,
+        strategy_id=_gc_fanout_strategy_id(),
+        log_tag="GC",
+        force_options=True,
+    )

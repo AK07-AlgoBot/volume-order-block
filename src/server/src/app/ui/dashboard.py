@@ -21,15 +21,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from app.constants import (
     S3_BREAKOUT_INDICES,
-    S7_ORB_INDICES,
     S29_ORB_INDICES,
     STRATEGY_GAMMA,
     STRATEGY_S1_OI,
     STRATEGY_S2_SMC,
     STRATEGY_S3_BREAKOUT,
-    STRATEGY_S7_ORB,
     STRATEGY_S8_CHOCH,
     STRATEGY_S29_ORB,
+    STRATEGY_GC_OF,
 )
 from app.services import cache_manager
 from app.services.broker_pnl_store import (
@@ -271,6 +270,8 @@ def render_s7_strategy_panel(
 
     key = cache_key or cache_manager.S7_STATE_KEY
     subtitle = f"{index_code} · opening range breakout"
+    if title.startswith("S29"):
+        subtitle = f"{index_code} · 1m OR 09:18–09:21 · LTP +3"
     if paper:
         subtitle += " · paper"
 
@@ -318,6 +319,8 @@ def render_s7_strategy_panel(
         p3.metric("Stop-Loss", fmt(float(pos.get("sl", 0))))
         p4.metric("TP1", fmt(float(pos.get("tp1", 0))))
         p5.metric("Lots", str(pos.get("lots", 1)))
+        if pos.get("legs"):
+            st.caption(f"Fan-out: {pos['legs']}")
         if idx.get("spot") is not None and pos.get("entry") is not None:
             live_pnl = (
                 float(idx["spot"]) - float(pos["entry"])
@@ -331,6 +334,70 @@ def render_s7_strategy_panel(
     signals = idx.get("signals") or []
     if signals:
         with st.expander("Recent ORB signals", expanded=False):
+            for line in reversed(signals):
+                st.markdown(f'<p class="ak07-signal-line">{line}</p>', unsafe_allow_html=True)
+
+
+def render_gc_strategy_panel() -> None:
+    """GoCharting orderflow webhook → live ITM options."""
+    from app.ui.styles import strategy_card_header
+
+    st.markdown(
+        strategy_card_header("GC · Orderflow", "GC BUY/SELL · Upstox ITM + FUT trail"),
+        unsafe_allow_html=True,
+    )
+    gc = cache_manager.get_json(cache_manager.GC_STATE_KEY)
+    if not gc:
+        st.caption("GoCharting OMS offline — is the `gc_engine` service running?")
+        return
+
+    updated = str(gc.get("timestamp", ""))[:19].replace("T", " ")
+    mode = "PAPER" if gc.get("paper_trading") else "LIVE"
+    total_pnl = gc.get("total_daily_pnl_inr")
+    pnl_str = f"₹{total_pnl:+,.0f}" if total_pnl is not None else "—"
+    st.caption(f"GC state updated {updated} · {mode} · day P&L {pnl_str}")
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Trades today", f"{gc.get('trades_today', 0)}/2")
+    c2.metric("Last alert", str(gc.get("last_alert") or "—")[:42] or "—")
+    setup = str(gc.get("setup_label") or "—")
+    c3.metric("Status", setup[:28])
+    indices = gc.get("indices") or {}
+    nifty_spot = (indices.get("NIFTY") or {}).get("spot")
+    bn_spot = (indices.get("BANKNIFTY") or {}).get("spot")
+    c4.metric("Nifty / BN FUT", f"{fmt(nifty_spot)} / {fmt(bn_spot)}")
+    if gc.get("win_lock"):
+        st.caption("First win locked — ignoring further GoCharting alerts today.")
+
+    pos = None
+    pos_index = ""
+    for code, idx in indices.items():
+        if isinstance(idx, dict) and idx.get("position"):
+            pos = idx["position"]
+            pos_index = code
+            break
+    st.markdown("##### GC — Active Position")
+    if pos:
+        p1, p2, p3, p4, p5 = st.columns(5)
+        p1.metric("Index", f"{pos_index} {pos.get('strategy', '')}")
+        p2.metric("Direction", pos.get("direction", "—"))
+        p3.metric("Entry FUT", fmt(float(pos.get("entry", 0))))
+        p4.metric("Stop (FUT)", fmt(pos.get("sl")) if pos.get("sl") is not None else "—")
+        p5.metric("1R FUT", fmt(pos.get("tp1")) if pos.get("tp1") is not None else "—")
+        trail = str(pos.get("trail") or "wait")
+        if pos.get("legs"):
+            st.caption(f"Fan-out: {pos['legs']} · trail {trail}")
+        else:
+            st.caption(f"Trail {trail} after 1R, then 1:1 on Upstox futures LTP")
+    else:
+        st.caption("Flat — waiting for a GoCharting webhook alert.")
+
+    signals = []
+    for idx in indices.values():
+        if isinstance(idx, dict):
+            signals = idx.get("signals") or signals
+    if signals:
+        with st.expander("Recent GC alerts", expanded=False):
             for line in reversed(signals):
                 st.markdown(f'<p class="ak07-signal-line">{line}</p>', unsafe_allow_html=True)
 
@@ -739,31 +806,20 @@ def _render_strategy_sections() -> None:
                     with tab:
                         render_smc_crt_strategy_panel(code, show_header=False)
 
-    if user_can_view_strategy(STRATEGY_S7_ORB):
-        s7_codes = [c for c in S7_ORB_INDICES if c in INDEX_CONFIGS]
-        with st.container(border=True, key="ak07_s7"):
-            if len(s7_codes) == 1:
-                render_s7_strategy_panel(s7_codes[0])
-            elif s7_codes:
-                st.markdown(
-                    strategy_card_header("S7 · ORB+ ADX", "Opening range breakout · BankNifty / Sensex"),
-                    unsafe_allow_html=True,
-                )
-                s7_tabs = st.tabs([INDEX_CONFIGS[c].display for c in s7_codes])
-                for tab, code in zip(s7_tabs, s7_codes):
-                    with tab:
-                        render_s7_strategy_panel(code, show_header=False)
-
     if user_can_view_strategy(STRATEGY_S29_ORB):
         with st.container(border=True, key="ak07_s29"):
             for s29_code in S29_ORB_INDICES:
                 render_s7_strategy_panel(
                     s29_code,
-                    title="S29 · Nifty ORB+",
-                    paper=True,
+                    title="S29 · Nifty 9:18 ORB",
+                    paper=False,
                     cache_key=cache_manager.S29_STATE_KEY,
                     offline_hint="S29 engine offline — is the `s29_engine` service running?",
                 )
+
+    if user_can_view_strategy(STRATEGY_GC_OF):
+        with st.container(border=True, key="ak07_gc"):
+            render_gc_strategy_panel()
 
     if user_can_view_strategy(STRATEGY_GAMMA) and tabbed_codes:
         with st.container(border=True, key="ak07_gamma"):

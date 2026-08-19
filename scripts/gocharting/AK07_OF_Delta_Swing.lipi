@@ -1,0 +1,50 @@
+indicator("AK07 Delta Swing", overlay = true)
+
+// Round 2 - do not replace AK07 OF All 4.
+// Buy:  5m green, delta < 0, min delta < 0, max delta ~ 0, at a swing low
+// Sell: 5m red,   delta > 0, max delta > 0, min delta ~ 0, at a swing high
+// Delta = buy vol - sell vol. Max/min delta = most +/- delta inside the bar.
+
+zeroAbs = input(50.0, title = "Treat max/min delta as zero if abs <=")
+swingLen = input(8, title = "Swing lookback (5m bars)")
+swingTolPts = input(5.0, title = "Nifty swing touch (pts)")
+inSessOnly = input(true, title = "Session 09:15-15:30 only")
+
+d = orderflow.delta
+maxD = orderflow.maxdelta
+minD = orderflow.mindelta
+
+bull = close > open
+bear = close < open
+tick = 0.05
+isBN = close > 40000
+sTol = isBN ? swingTolPts * 4.0 : swingTolPts
+
+inSess = (hour == 9 and minute >= 15) or (hour > 9 and hour < 15) or (hour == 15 and minute <= 30)
+sessOk = not inSessOnly or inSess
+
+swLo = talib.lowest(low, swingLen)
+swHi = talib.highest(high, swingLen)
+atSwingLo = low <= swLo + sTol
+atSwingHi = high >= swHi - sTol
+
+// Max delta is zero: no buy-side extreme. Min delta is zero: no sell-side extreme.
+maxIsZero = math.abs(maxD) <= zeroAbs
+minIsZero = math.abs(minD) <= zeroAbs
+
+buyRaw = bull and d < 0 and minD < 0 and maxIsZero
+sellRaw = bear and d > 0 and maxD > 0 and minIsZero
+
+buySw = sessOk and buyRaw and atSwingLo
+sellSw = sessOk and sellRaw and atSwingHi
+
+plotshape(buySw, title="SW Buy", shape=shape.triangleup, location=location.belowbar, color=color.lime, size=size.large, text="BUY SW")
+plotshape(sellSw, title="SW Sell", shape=shape.triangledown, location=location.abovebar, color=color.red, size=size.large, text="SELL SW")
+
+plot(swLo, title="Swing low", color=color.green)
+plot(swHi, title="Swing high", color=color.red)
+
+bgcolor(buySw ? color.new(color.green, 0.55) : sellSw ? color.new(color.red, 0.55) : na)
+
+alertcondition(buySw, title = "AK07 SW Buy", message = "AK07|SW|BUY|{{ticker}}|{{interval}}|sl={{low}}")
+alertcondition(sellSw, title = "AK07 SW Sell", message = "AK07|SW|SELL|{{ticker}}|{{interval}}|sl={{high}}")

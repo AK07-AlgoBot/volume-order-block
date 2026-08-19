@@ -15,12 +15,28 @@ from app.constants import (
     ADMIN_ROLE,
     ALL_STRATEGIES,
     DASHBOARD_USERNAME,
+    STRATEGY_GC_OF,
+    STRATEGY_S3_BREAKOUT,
+    STRATEGY_S29_ORB,
     SUPPORTED_BROKERS,
     USER_ROLE,
 )
 
 _lock = threading.Lock()
 _IST = ZoneInfo("Asia/Kolkata")
+_LEGACY_STRATEGY_MAP = {"s7_orb": "s29_orb", "s7_vmb": "s29_orb"}
+
+
+def _normalize_enabled_strategies(strategies: list[Any]) -> list[str]:
+    out: list[str] = []
+    for raw in strategies:
+        sid = _LEGACY_STRATEGY_MAP.get(str(raw), str(raw))
+        if sid in ALL_STRATEGIES and sid not in out:
+            out.append(sid)
+    if STRATEGY_GC_OF in ALL_STRATEGIES and STRATEGY_GC_OF not in out:
+        if STRATEGY_S3_BREAKOUT in out or STRATEGY_S29_ORB in out:
+            out.append(STRATEGY_GC_OF)
+    return out
 
 
 def _sanitize_username(username: str) -> str:
@@ -48,7 +64,7 @@ def profile_path(username: str) -> Path:
 
 
 def _default_profile(username: str, role: str = USER_ROLE) -> dict[str, Any]:
-    enabled = list(ALL_STRATEGIES) if role == ADMIN_ROLE else [ALL_STRATEGIES[2]]  # S3 default
+    enabled = list(ALL_STRATEGIES) if role == ADMIN_ROLE else [STRATEGY_S3_BREAKOUT, STRATEGY_GC_OF]
     return {
         "username": _sanitize_username(username),
         "role": role,
@@ -76,7 +92,7 @@ def read_profile(username: str, *, role: str = USER_ROLE) -> dict[str, Any]:
         return base
     strategies = raw.get("enabled_strategies")
     if isinstance(strategies, list):
-        base["enabled_strategies"] = [s for s in strategies if s in ALL_STRATEGIES]
+        base["enabled_strategies"] = _normalize_enabled_strategies(strategies)
     broker = str(raw.get("broker") or "upstox").strip().lower()
     base["broker"] = broker if broker in SUPPORTED_BROKERS else "upstox"
     base["paper_trading"] = bool(raw.get("paper_trading", base["paper_trading"]))
@@ -102,7 +118,7 @@ def write_profile(username: str, data: dict[str, Any]) -> dict[str, Any]:
     safe = _sanitize_username(username)
     current = read_profile(safe)
     if "enabled_strategies" in data and isinstance(data["enabled_strategies"], list):
-        current["enabled_strategies"] = [s for s in data["enabled_strategies"] if s in ALL_STRATEGIES]
+        current["enabled_strategies"] = _normalize_enabled_strategies(data["enabled_strategies"])
     if "broker" in data:
         broker = str(data["broker"] or "upstox").strip().lower()
         current["broker"] = broker if broker in SUPPORTED_BROKERS else current["broker"]

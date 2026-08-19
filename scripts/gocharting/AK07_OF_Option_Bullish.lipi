@@ -1,0 +1,127 @@
+// =============================================================================
+// AK07 Option Bullish (GoCharting Lipi)
+// Apply on FUTURES footprint chart. Set ATM CE + PE symbols in inputs each day.
+// Rule: futures colour vs option colour mismatch = strong buyers in that strike.
+//   - Fut green + PE green  → buy CE/long bias (PE should have been red)
+//   - Fut red   + CE green  → buy CE (CE should have been red)
+// Locations: edge / dip / fib; mid only with prior-day/up bias
+// =============================================================================
+
+indicator("AK07 OF Option Bullish", overlay = true)
+
+ceSym = input("", title = "ATM CE symbol (exact GoCharting id)")
+peSym = input("", title = "ATM PE symbol (exact GoCharting id)")
+locTolPts = input(25.0, title = "Location tolerance (pts)")
+fibMinBars = input(3, title = "Min continuous bars for Fib")
+requireLoc = input(true, title = "Require edge/dip/fib (or mid+bias)")
+banExactDay = input(true, title = "Ban exact day H/L bounce")
+maxTradesDay = input(2, title = "Max signals/day")
+
+inSess = (hour == 9 and minute >= 15) or (hour > 9 and hour < 15) or (hour == 15 and minute <= 30)
+newDay = dayofweek != dayofweek[1] or (hour == 9 and minute == 15 and minute[1] != 15)
+
+bull = close > open
+bear = close < open
+
+var float dayHi = na
+var float dayLo = na
+if newDay or na(dayHi) {
+    dayHi := high
+    dayLo := low
+} else {
+    dayHi := math.max(dayHi, high)
+    dayLo := math.min(dayLo, low)
+}
+atDayHi = math.abs(high - dayHi) <= locTolPts
+atDayLo = math.abs(low - dayLo) <= locTolPts
+
+f_countRun(up) =>
+    cnt = 0
+    for i = 0 to 40 {
+        ok = up ? close[i] > open[i] : close[i] < open[i]
+        if not ok {
+            break
+        }
+        cnt := cnt + 1
+    }
+    cnt
+
+upRun = f_countRun(true)
+dnRun = f_countRun(false)
+var float fib6 = na
+var float fib7 = na
+if upRun >= fibMinBars and upRun >= dnRun {
+    lo = low
+    hi = high
+    for i = 0 to upRun - 1 {
+        lo := math.min(lo, low[i])
+        hi := math.max(hi, high[i])
+    }
+    fib6 := hi - 0.6 * (hi - lo)
+    fib7 := hi - 0.7 * (hi - lo)
+} else if dnRun >= fibMinBars {
+    lo2 = low
+    hi2 = high
+    for i = 0 to dnRun - 1 {
+        lo2 := math.min(lo2, low[i])
+        hi2 := math.max(hi2, high[i])
+    }
+    fib6 := lo2 + 0.6 * (hi2 - lo2)
+    fib7 := lo2 + 0.7 * (hi2 - lo2)
+}
+inFib67 = not na(fib6) and not na(fib7) and low <= math.max(fib6, fib7) + locTolPts and high >= math.min(fib6, fib7) - locTolPts
+
+var float dipRef = na
+var int dipSide = 0
+if high >= dayHi and close < high and low < low[1] {
+    dipRef := low
+    dipSide := 1
+}
+if low <= dayLo and close > low and high > high[1] {
+    dipRef := high
+    dipSide := -1
+}
+nearDip = not na(dipRef) and math.abs((dipSide == 1 ? low : high) - dipRef) <= locTolPts
+atEdge = atDayHi or atDayLo
+midZone = not atEdge and not inFib67 and not nearDip
+
+// Prior session bias proxy: close vs day open
+dayOpen = open
+biasUp = close > dayOpen
+
+// Option legs (leave blank until set — script stays quiet)
+ceO = na
+ceC = na
+peO = na
+peC = na
+if ceSym != "" {
+    [ceO, ceC] := request.security(ceSym, timeframe.period, [open, close])
+}
+if peSym != "" {
+    [peO, peC] := request.security(peSym, timeframe.period, [open, close])
+}
+
+ceValid = ceSym != "" and not na(ceC)
+peValid = peSym != "" and not na(peC)
+ceBull = ceValid and ceC > ceO
+peBull = peValid and peC > peO
+
+// Mismatch rules
+obRaw = inSess and ((bull and peValid and peBull) or (bear and ceValid and ceBull))
+locOk = not requireLoc or atEdge or nearDip or inFib67 or (midZone and biasUp)
+obBuy = obRaw and locOk and not (banExactDay and atDayLo and not nearDip and not inFib67)
+
+var int daySignals = 0
+if newDay {
+    daySignals := 0
+}
+obBuyGate = obBuy and daySignals < maxTradesDay
+if obBuyGate {
+    daySignals := daySignals + 1
+}
+
+plotshape(obBuyGate, title = "OB Buy", style = shape.triangleup, location = location.belowbar, color = color.yellow, size = size.small, text = "OB")
+plot(obBuyGate ? low : na, title = "OB SL", color = color.yellow, style = plotStyle.circles)
+bgcolor(obBuyGate ? color.new(color.yellow, 0.85) : na)
+
+alertcondition(obBuyGate, title = "AK07 Option Bullish", message = "AK07|OB|BUY|{{ticker}}|{{interval}}|sl={{low}}|ce={{ceSym}}|pe={{peSym}}")

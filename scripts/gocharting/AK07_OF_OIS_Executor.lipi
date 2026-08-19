@@ -1,0 +1,61 @@
+indicator("AK07 OIS Executor", overlay = true)
+
+// Thin overlay. No for-loop (All 4 / Sweep Trap already scan the day).
+// Do not stack the ChatGPT OIS script. Apply this ONCE. 2 shapes only.
+
+enableDD = input(true, title = "Enable Delta Divergence")
+enableFD = input(true, title = "Enable Full Delta")
+nearZeroAbs = input(50.0, title = "Near-zero floor |delta|")
+oppFrac = input(25.0, title = "Opp extreme vs |delta| pct")
+similarPct = input(12.0, title = "FD similarity pct")
+bigVolMult = input(1.50, title = "FD vol vs SMA")
+volSmaLen = input(20, title = "Vol SMA len")
+maruBodyPct = input(80.0, title = "FD maru body pct")
+maruWickPct = input(10.0, title = "FD max wick pct")
+
+d = orderflow.delta
+maxD = orderflow.maxdelta
+minD = orderflow.mindelta
+cotH = orderflow.cothigh
+cotL = orderflow.cotlow
+
+bull = close > open
+bear = close < open
+tick = 0.05
+rng = math.max(high - low, tick)
+nearZ = math.max(nearZeroAbs, math.abs(d) * oppFrac / 100.0)
+bodyPct = 100.0 * math.abs(close - open) / rng
+upWickPct = 100.0 * (high - math.max(open, close)) / rng
+dnWickPct = 100.0 * (math.min(open, close) - low) / rng
+maruBull = bull and bodyPct >= maruBodyPct and upWickPct <= maruWickPct and dnWickPct <= maruWickPct
+maruBear = bear and bodyPct >= maruBodyPct and upWickPct <= maruWickPct and dnWickPct <= maruWickPct
+volSma = talib.sma(volume, volSmaLen)
+bigOrder = volume >= volSma * bigVolMult
+
+m3 = (math.abs(d) + math.abs(maxD) + math.abs(cotL)) / 3.0
+similarBuy = m3 > tick and math.abs(d - maxD) <= m3 * similarPct / 100.0 and math.abs(d - cotL) <= m3 * similarPct / 100.0 and math.abs(maxD - cotL) <= m3 * similarPct / 100.0
+m3s = (math.abs(d) + math.abs(minD) + math.abs(cotH)) / 3.0
+similarSell = m3s > tick and math.abs(d - minD) <= m3s * similarPct / 100.0 and math.abs(d - cotH) <= m3s * similarPct / 100.0 and math.abs(minD - cotH) <= m3s * similarPct / 100.0
+
+inSess = (hour == 9 and minute >= 15) or (hour > 9 and hour < 15) or (hour == 15 and minute <= 30)
+
+ddBuy = enableDD and inSess and bull and d < 0 and minD < 0 and math.abs(maxD) <= nearZ
+ddSell = enableDD and inSess and bear and d > 0 and maxD > 0 and math.abs(minD) <= nearZ
+
+priorNotMaruLong = not (close[1] > open[1] and (100.0 * math.abs(close[1] - open[1]) / math.max(high[1] - low[1], tick)) >= maruBodyPct * 0.9)
+priorNotMaruShort = not (close[1] < open[1] and (100.0 * math.abs(close[1] - open[1]) / math.max(high[1] - low[1], tick)) >= maruBodyPct * 0.9)
+fdBuy = enableFD and inSess and maruBull and bigOrder and similarBuy and priorNotMaruLong
+fdSell = enableFD and inSess and maruBear and bigOrder and similarSell and priorNotMaruShort
+
+anyBuy = ddBuy or fdBuy
+anySell = ddSell or fdSell
+
+plotshape(anyBuy, title="Buy", shape=shape.triangleup, location=location.belowbar, color=color.lime, size=size.large, text="BUY")
+plotshape(anySell, title="Sell", shape=shape.triangledown, location=location.abovebar, color=color.red, size=size.large, text="SELL")
+
+bgcolor(anyBuy ? color.new(color.green, 0.55) : anySell ? color.new(color.red, 0.55) : na)
+
+alertcondition(ddBuy, title = "AK07 DD Buy", message = "AK07|DD|BUY|{{ticker}}|{{interval}}|sl={{low}}")
+alertcondition(ddSell, title = "AK07 DD Sell", message = "AK07|DD|SELL|{{ticker}}|{{interval}}|sl={{high}}")
+alertcondition(fdBuy, title = "AK07 FD Buy", message = "AK07|FD|BUY|{{ticker}}|{{interval}}|sl={{low}}")
+alertcondition(fdSell, title = "AK07 FD Sell", message = "AK07|FD|SELL|{{ticker}}|{{interval}}|sl={{high}}")
