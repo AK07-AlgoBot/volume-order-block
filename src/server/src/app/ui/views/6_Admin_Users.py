@@ -35,14 +35,22 @@ def _lots_header(prof: dict, strategies: list) -> str:
     return " · ".join(f"{STRATEGY_PILL_SHORT.get(sid, sid)}×{sl[sid]}" for sid in ids)
 
 
-def _render_strategy_lot_inputs(key_prefix: str, prof: dict | None = None) -> dict[str, int]:
+def _render_strategy_lot_inputs(
+    key_prefix: str,
+    enabled_ids: list[str],
+    prof: dict | None = None,
+) -> dict[str, int]:
     sl = _strategy_lots_map(prof or {})
+    ids = [sid for sid in ALL_STRATEGIES if sid in set(enabled_ids)]
     st.markdown("**Lots per strategy**")
-    st.caption("F&O lots on live entries for this user. S3, S29, and GoCharting use these allotments.")
+    if not ids:
+        st.caption("Enable a strategy above — its lot box will appear here.")
+        return {}
+    st.caption("Only enabled strategies. Add or remove one above to show or hide its lots.")
     out: dict[str, int] = {}
-    cols = st.columns(3)
-    for i, sid in enumerate(ALL_STRATEGIES):
-        with cols[i % 3]:
+    cols = st.columns(min(3, len(ids)))
+    for i, sid in enumerate(ids):
+        with cols[i % len(cols)]:
             out[sid] = int(
                 st.number_input(
                     STRATEGY_PILL_SHORT.get(sid, sid),
@@ -254,10 +262,19 @@ else:
         with st.expander(header, expanded=False):
             if role == "admin":
                 st.caption("All strategies (admin) · Telegram alerts enabled")
+                edit_strats = list(ALL_STRATEGIES)
             else:
                 labels = [STRATEGY_LABELS.get(s, s) for s in strategies]
                 st.caption(
                     "Strategies: " + (", ".join(labels) if labels else "none") + " · Telegram: off"
+                )
+                default_strats = [s for s in strategies if s in strategy_options]
+                edit_strats = st.multiselect(
+                    "Enabled strategies",
+                    options=list(strategy_options.keys()),
+                    default=default_strats or [STRATEGY_S3_BREAKOUT],
+                    format_func=lambda x: strategy_options.get(x, x),
+                    key=f"edit_strats_{u}",
                 )
             with st.form(f"edit_user_{u}"):
                 ec1, ec2 = st.columns(2)
@@ -284,26 +301,22 @@ else:
                         key=f"edit_egress_{u}",
                         placeholder="e.g. 65.109.255.239",
                     )
-                default_strats = [s for s in strategies if s in strategy_options]
-                if role == "admin":
-                    st.caption("Admin always has all strategies — selection below is informational.")
-                    edit_strats = list(ALL_STRATEGIES)
-                else:
-                    edit_strats = st.multiselect(
-                        "Enabled strategies",
-                        options=list(strategy_options.keys()),
-                        default=default_strats or [STRATEGY_S3_BREAKOUT],
-                        format_func=lambda x: strategy_options.get(x, x),
-                        key=f"edit_strats_{u}",
-                    )
-                edit_strategy_lots = _render_strategy_lot_inputs(f"edit_lots_{u}", prof)
+                edit_strategy_lots = _render_strategy_lot_inputs(
+                    f"edit_lots_{u}", edit_strats, prof
+                )
                 save_edit = st.form_submit_button("Save configuration", type="primary")
             if save_edit:
+                merged_lots = _strategy_lots_map(prof)
+                merged_lots.update(edit_strategy_lots)
                 body = {
                     "broker": edit_broker,
                     "paper_trading": edit_paper,
-                    "lots": int(edit_strategy_lots.get(STRATEGY_S3_BREAKOUT) or 1),
-                    "strategy_lots": edit_strategy_lots,
+                    "lots": int(
+                        edit_strategy_lots.get(STRATEGY_S3_BREAKOUT)
+                        or merged_lots.get(STRATEGY_S3_BREAKOUT)
+                        or 1
+                    ),
+                    "strategy_lots": merged_lots,
                     "egress_ip": edit_egress.strip(),
                 }
                 if role != "admin":
@@ -322,6 +335,13 @@ else:
 st.markdown("---")
 st.markdown("### Create user")
 
+picked = st.multiselect(
+    "Enabled strategies",
+    options=list(strategy_options.keys()),
+    default=[STRATEGY_S3_BREAKOUT],
+    format_func=lambda x: strategy_options.get(x, x),
+    key="create_strats",
+)
 with st.form("create_user_form"):
     c1, c2 = st.columns(2)
     with c1:
@@ -336,13 +356,7 @@ with st.form("create_user_form"):
             placeholder="e.g. 65.109.255.239",
         )
     new_paper = st.checkbox("Paper trading default", value=True)
-    picked = st.multiselect(
-        "Enabled strategies",
-        options=list(strategy_options.keys()),
-        default=[STRATEGY_S3_BREAKOUT],
-        format_func=lambda x: strategy_options.get(x, x),
-    )
-    new_strategy_lots = _render_strategy_lot_inputs("new_lots")
+    new_strategy_lots = _render_strategy_lot_inputs("new_lots", picked)
     submit = st.form_submit_button("Create user", type="primary")
 
 if submit:

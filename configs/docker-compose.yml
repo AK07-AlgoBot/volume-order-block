@@ -184,6 +184,28 @@ services:
     networks:
       - ak07
 
+  copy_kite_engine:
+    build:
+      context: ..
+      dockerfile: configs/docker/Dockerfile.api
+    restart: unless-stopped
+    mem_limit: 512m
+    memswap_limit: 512m
+    command: ["python", "-u", "src/server/src/app/services/kite_copy_engine.py"]
+    env_file:
+      - ../.env
+    environment:
+      PYTHONUNBUFFERED: "1"
+      PYTHONPATH: /app/src/server/src
+      REDIS_HOST: redis
+    volumes:
+      - ak07_server_data:/app/src/server/data
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks:
+      - ak07
+
   choch_engine:
     # Retired — Strategy 8 not live. Start only with: --profile choch
     profiles: ["choch"]
@@ -317,6 +339,8 @@ services:
       s29_engine:
         condition: service_started
       gc_engine:
+        condition: service_started
+      copy_kite_engine:
         condition: service_started
       profit_target_engine:
         condition: service_started

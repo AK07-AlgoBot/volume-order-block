@@ -21,6 +21,7 @@ from app.constants import (
     STRATEGY_S8_CHOCH,
     STRATEGY_S29_ORB,
     STRATEGY_GC_OF,
+    STRATEGY_COPY_KITE,
 )
 from app.services import cache_manager
 from app.services.broker_pnl_store import (
@@ -241,6 +242,7 @@ def render_top_status_bar(
     gamma_hb = cache_manager.get_json(cache_manager.GAMMA_HEARTBEAT_KEY)
     s29_state = cache_manager.get_json(cache_manager.S29_STATE_KEY)
     gc_state = cache_manager.get_json(cache_manager.GC_STATE_KEY)
+    copy_state = cache_manager.get_json(cache_manager.COPY_KITE_STATE_KEY)
     choch_state = cache_manager.get_json(cache_manager.CHOCH_STATE_KEY)
     system_bias = cache_manager.get_system_bias()
 
@@ -258,6 +260,10 @@ def render_top_status_bar(
         gc_detail = "paper" if gc_state.get("paper_trading") else "live"
     else:
         gc_detail = "offline"
+    if copy_state:
+        copy_detail = "paper" if copy_state.get("paper_trading") else "live"
+    else:
+        copy_detail = "offline"
     choch_detail = "live" if choch_state else "offline"
 
     upstox_pnl = cache_manager.get_json(cache_manager.UPSTOX_DAILY_PNL_KEY) or {}
@@ -287,6 +293,8 @@ def render_top_status_bar(
         pill_specs.append((STRATEGY_PILL_SHORT[STRATEGY_S29_ORB], STRATEGY_S29_ORB, bool(s29_state), s29_detail))
     if can_view(STRATEGY_GC_OF):
         pill_specs.append((STRATEGY_PILL_SHORT[STRATEGY_GC_OF], STRATEGY_GC_OF, bool(gc_state), gc_detail))
+    if can_view(STRATEGY_COPY_KITE):
+        pill_specs.append((STRATEGY_PILL_SHORT[STRATEGY_COPY_KITE], STRATEGY_COPY_KITE, bool(copy_state), copy_detail))
     if can_view(STRATEGY_S8_CHOCH):
         pill_specs.append((STRATEGY_PILL_SHORT[STRATEGY_S8_CHOCH], STRATEGY_S8_CHOCH, bool(choch_state), choch_detail))
     if can_view(STRATEGY_GAMMA):

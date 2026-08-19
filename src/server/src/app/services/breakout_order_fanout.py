@@ -7,7 +7,7 @@ import os
 from dataclasses import dataclass
 from typing import Any, Final
 
-from app.constants import STRATEGY_GC_OF, STRATEGY_S29_ORB, STRATEGY_S3_BREAKOUT
+from app.constants import STRATEGY_COPY_KITE, STRATEGY_GC_OF, STRATEGY_S29_ORB, STRATEGY_S3_BREAKOUT
 from app.services.groww_engine import GrowwClient
 from app.services.kite_engine import KiteClient
 from app.services.upstox_engine import UpstoxClient, build_upstox_client
@@ -28,7 +28,12 @@ class S3Trader:
     lots: int = 1
 
 
-def list_live_traders(strategy_id: str) -> list[S3Trader]:
+def list_live_traders(
+    strategy_id: str,
+    *,
+    lots_strategy_id: str | None = None,
+    exclude_usernames: frozenset[str] | set[str] | None = None,
+) -> list[S3Trader]:
     """Live (non-paper) users who have this strategy enabled.
 
     Pass ``FANOUT_ALL_LIVE`` (``"*"``) to skip the entitlement filter.
@@ -36,12 +41,18 @@ def list_live_traders(strategy_id: str) -> list[S3Trader]:
     from app.services.user_profiles_store import lots_for_strategy, read_profile
     from app.services.users_store import list_users
 
-    lot_sid = STRATEGY_GC_OF if strategy_id == FANOUT_ALL_LIVE else strategy_id
+    skip = {str(n).strip().lower() for n in (exclude_usernames or ()) if str(n).strip()}
+    if strategy_id == FANOUT_ALL_LIVE:
+        lot_sid = lots_strategy_id or STRATEGY_GC_OF
+    else:
+        lot_sid = lots_strategy_id or strategy_id
     traders: list[S3Trader] = []
     for row in list_users():
         username = str(row.get("username") or "")
         role = str(row.get("role") or "user")
         if not username:
+            continue
+        if username.strip().lower() in skip:
             continue
         profile = read_profile(username, role=role)
         enabled = profile.get("enabled_strategies") or []
@@ -864,3 +875,206 @@ def catchup_gc_legs(
         log_tag="GC",
         force_options=True,
     )
+
+
+def _copy_fanout_strategy_id() -> str:
+    raw = (os.environ.get("AK07_COPY_FANOUT_ALL_LIVE") or "1").strip().lower()
+    if raw in ("0", "false", "no", "off"):
+        return STRATEGY_COPY_KITE
+    return FANOUT_ALL_LIVE
+
+
+def place_copy_orders(
+    *,
+    index_code: str,
+    side: str,
+    lot_size: int,
+    kite_exchange: str,
+    kite_symbol: str,
+    instrument_kind: str,
+    option_strike: int,
+    option_type: str,
+    expiry: str,
+    upstox_market_client: UpstoxClient | None,
+    global_paper: bool,
+    exclude_usernames: frozenset[str] | set[str] | None = None,
+) -> list[dict[str, Any]]:
+    """Copy a filled Kite FNO order onto other live accounts (Upstox OMS + each broker)."""
+    log_tag = "COPY"
+    side_u = side.upper()
+    exclude = frozenset(str(n).strip() for n in (exclude_usernames or ()) if str(n).strip())
+    traders = list_live_traders(
+        _copy_fanout_strategy_id(),
+        lots_strategy_id=STRATEGY_COPY_KITE,
+        exclude_usernames=exclude,
+    )
+    if global_paper:
+        return [
+            {
+                "username": t.username,
+                "broker": t.broker,
+                "trading_symbol": kite_symbol,
+                "quantity": lot_size * t.lots,
+                "lots": t.lots,
+                "paper": True,
+                "instrument_kind": instrument_kind,
+            }
+            for t in traders
+        ]
+
+    shared_upstox: dict[str, Any] | None = None
+    if instrument_kind == "options" and upstox_market_client is not None:
+        shared_upstox = upstox_market_client.get_option_contract_exact(
+            index_code, expiry=expiry, strike=option_strike, option_type=option_type
+        )
+        if not shared_upstox:
+            logger.error(
+                "%s no Upstox %s %s%d %s — aborting fan-out",
+                log_tag,
+                index_code,
+                option_type,
+                option_strike,
+                expiry,
+            )
+            return []
+
+    legs: list[dict[str, Any]] = []
+    for trader in traders:
+        trader_lots = max(1, int(trader.lots or 1))
+        quantity = lot_size * trader_lots
+        if trader.broker == "upstox":
+            upstox = build_upstox_client(trader.username)
+            if instrument_kind == "options":
+                contract = shared_upstox
+                if not contract or not contract.get("instrument_key"):
+                    logger.error("[%s] %s skipped — no Upstox option key", trader.username, log_tag)
+                    continue
+                ok = upstox.place_market_order(str(contract["instrument_key"]), quantity, side_u)
+                if not ok:
+                    logger.error("[%s] Upstox %s order failed", trader.username, log_tag)
+                    continue
+                premium = upstox.get_ltp(str(contract["instrument_key"]))
+                label = f"{contract['strike']}{contract['option_type']}"
+                legs.append(
+                    {
+                        "username": trader.username,
+                        "broker": "upstox",
+                        "trading_symbol": label,
+                        "instrument_key": contract["instrument_key"],
+                        "quantity": quantity,
+                        "lots": trader_lots,
+                        "instrument_kind": "options",
+                        "option_strike": int(contract["strike"]),
+                        "option_type": str(contract["option_type"]),
+                        "premium_entry": float(premium) if premium is not None else None,
+                    }
+                )
+                logger.info("[%s] %s Upstox %s %d x %s", trader.username, log_tag, side_u, quantity, label)
+                continue
+            fut = upstox.get_index_future_contract(index_code)
+            if not fut or not fut.get("instrument_key"):
+                logger.error("[%s] %s skipped — no Upstox future", trader.username, log_tag)
+                continue
+            ok = upstox.place_market_order(str(fut["instrument_key"]), quantity, side_u)
+            if not ok:
+                logger.error("[%s] Upstox %s future order failed", trader.username, log_tag)
+                continue
+            legs.append(
+                {
+                    "username": trader.username,
+                    "broker": "upstox",
+                    "trading_symbol": fut.get("trading_symbol") or "",
+                    "instrument_key": fut["instrument_key"],
+                    "quantity": quantity,
+                    "lots": trader_lots,
+                    "instrument_kind": "futures",
+                }
+            )
+            logger.info(
+                "[%s] %s Upstox %s %d x %s",
+                trader.username,
+                log_tag,
+                side_u,
+                quantity,
+                fut.get("trading_symbol"),
+            )
+            continue
+
+        if trader.broker == "kite":
+            kite = KiteClient(trader.username)
+            if not kite.has_token():
+                logger.error("[%s] %s skipped — no Kite token", trader.username, log_tag)
+                continue
+            order_id = kite.place_market_order(kite_exchange, kite_symbol, quantity, side_u)
+            if not order_id:
+                logger.error("[%s] Kite %s order failed", trader.username, log_tag)
+                continue
+            legs.append(
+                {
+                    "username": trader.username,
+                    "broker": "kite",
+                    "trading_symbol": kite_symbol,
+                    "exchange": kite_exchange,
+                    "quantity": quantity,
+                    "lots": trader_lots,
+                    "kite_order_id": order_id,
+                    "instrument_kind": instrument_kind,
+                    "option_strike": option_strike,
+                    "option_type": option_type,
+                }
+            )
+            logger.info(
+                "[%s] %s Kite %s %d x %s:%s (%s)",
+                trader.username,
+                log_tag,
+                side_u,
+                quantity,
+                kite_exchange,
+                kite_symbol,
+                order_id,
+            )
+            continue
+
+        if trader.broker == "groww":
+            groww = GrowwClient(trader.username)
+            if not groww.has_token():
+                logger.error("[%s] %s skipped — no Groww token", trader.username, log_tag)
+                continue
+            if instrument_kind == "options":
+                contract = groww.get_option_contract_exact(
+                    index_code, expiry=expiry, strike=option_strike, option_type=option_type
+                )
+            else:
+                contract = groww.get_index_future_contract(index_code)
+            if not contract:
+                logger.error("[%s] %s skipped — no Groww contract", trader.username, log_tag)
+                continue
+            qty = int(contract.get("lot_size") or lot_size) * trader_lots
+            sym = str(contract.get("trading_symbol") or "")
+            order_id = groww.place_market_order(
+                sym,
+                qty,
+                side_u,
+                exchange=str(contract.get("exchange") or "NSE"),
+            )
+            if not order_id:
+                logger.error("[%s] Groww %s order failed", trader.username, log_tag)
+                continue
+            legs.append(
+                {
+                    "username": trader.username,
+                    "broker": "groww",
+                    "trading_symbol": sym,
+                    "quantity": qty,
+                    "lots": trader_lots,
+                    "groww_order_id": order_id,
+                    "instrument_kind": instrument_kind,
+                    "option_strike": option_strike,
+                    "option_type": option_type,
+                }
+            )
+            logger.info("[%s] %s Groww %s %d x %s (%s)", trader.username, log_tag, side_u, qty, sym, order_id)
+            continue
+
+        logger.error("[%s] %s skipped — unsupported broker %s", trader.username, log_tag, trader.broker)
+    return legs

@@ -36,6 +36,7 @@ SERVICES = {
     "engine  (S1)":           "engine",
     "s29_engine  (S29 Nifty ORB+)": "s29_engine",
     "gc_engine  (GoCharting OF)": "gc_engine",
+    "copy_kite_engine  (Copy Kite)": "copy_kite_engine",
     "choch_engine  (S8 CHOCH)": "choch_engine",
     "smc_crt_engine  (S2)":   "smc_crt_engine",
     "breakout_engine  (S3)":  "breakout_engine",

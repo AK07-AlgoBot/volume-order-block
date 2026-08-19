@@ -742,6 +742,59 @@ class UpstoxClient:
                 }
         return best
 
+    def get_option_contract_exact(
+        self,
+        index_code: str,
+        *,
+        expiry: str,
+        strike: int,
+        option_type: str,
+    ) -> dict[str, Any] | None:
+        """Exact CE/PE by expiry + strike from the Upstox option chain."""
+        cfg = INDEX_CONFIGS.get(index_code.upper())
+        if not cfg or strike <= 0:
+            return None
+        opt = option_type.upper()
+        leg = "call_options" if opt == "CE" else "put_options"
+        want_exp = (expiry or "")[:10]
+        expiries = self.list_expiries(cfg.spot_instrument_key)
+        chosen = want_exp if want_exp in expiries else None
+        if chosen is None and want_exp:
+            for exp in expiries:
+                if exp.startswith(want_exp[:7]):
+                    chosen = exp
+                    break
+        if chosen is None:
+            chosen = expiries[0] if expiries else None
+        if not chosen:
+            return None
+        rows = self.get_option_chain_for_expiry(cfg.spot_instrument_key, chosen)
+        for row in rows:
+            try:
+                row_strike = int(float(row.get("strike_price") or 0))
+            except (TypeError, ValueError):
+                continue
+            if row_strike != int(strike):
+                continue
+            leg_data = row.get(leg) or {}
+            key = str(leg_data.get("instrument_key") or "")
+            if not key:
+                continue
+            md = leg_data.get("market_data") or {}
+            try:
+                ltp = float(md.get("ltp") or md.get("last_price") or 0)
+            except (TypeError, ValueError):
+                ltp = 0.0
+            return {
+                "instrument_key": key,
+                "strike": row_strike,
+                "option_type": opt,
+                "expiry": chosen,
+                "ltp": ltp,
+                "selection": "copy_exact",
+            }
+        return None
+
     def get_index_future_contract(self, index_code: str) -> dict[str, Any] | None:
         """Nearest-expiry index futures contract (NSE FUTIDX / BSE)."""
         cfg = INDEX_CONFIGS.get(index_code.upper())

@@ -515,6 +515,53 @@ class GrowwClient:
             "selection": selection,
         }
 
+    def get_option_contract_exact(
+        self,
+        index_code: str,
+        *,
+        expiry: str,
+        strike: int,
+        option_type: str,
+    ) -> dict[str, Any] | None:
+        opt = option_type.upper()
+        want_exp = (expiry or "")[:10]
+        rows = _load_index_fno_rows_from_csv(index_code, option_types=frozenset({opt}))
+        best: dict[str, str] | None = None
+        for row in rows:
+            try:
+                row_strike = int(float(row.get("strike_price") or 0))
+            except (TypeError, ValueError):
+                continue
+            if row_strike != int(strike):
+                continue
+            if want_exp and str(row.get("expiry_date") or "")[:10] != want_exp:
+                continue
+            best = row
+            break
+        if best is None:
+            for row in rows:
+                try:
+                    row_strike = int(float(row.get("strike_price") or 0))
+                except (TypeError, ValueError):
+                    continue
+                if row_strike == int(strike):
+                    best = row
+                    break
+        if best is None:
+            return None
+        strike_i = int(float(best.get("strike_price") or 0))
+        return {
+            "trading_symbol": best["trading_symbol"],
+            "groww_symbol": best["groww_symbol"],
+            "expiry": best.get("expiry_date") or want_exp,
+            "contract_label": f"{index_code.upper()} {strike_i}{opt}",
+            "lot_size": int(best.get("lot_size") or 65),
+            "instrument_key": f"groww:{best['groww_symbol']}",
+            "strike": strike_i,
+            "option_type": opt,
+            "selection": "copy_exact",
+        }
+
     def get_fno_ltp(self, trading_symbol: str, *, exchange: str = "NSE") -> float | None:
         """Last traded price for an FNO contract (NSE_SYMBOL format)."""
         symbol_key = f"{exchange}_{trading_symbol}"

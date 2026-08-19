@@ -29,6 +29,7 @@ from app.constants import (
     STRATEGY_S8_CHOCH,
     STRATEGY_S29_ORB,
     STRATEGY_GC_OF,
+    STRATEGY_COPY_KITE,
 )
 from app.services import cache_manager
 from app.services.broker_pnl_store import (
@@ -398,6 +399,34 @@ def render_gc_strategy_panel() -> None:
             signals = idx.get("signals") or signals
     if signals:
         with st.expander("Recent GC alerts", expanded=False):
+            for line in reversed(signals):
+                st.markdown(f'<p class="ak07-signal-line">{line}</p>', unsafe_allow_html=True)
+
+
+def render_copy_kite_panel() -> None:
+    """Leader Kite fills → live fan-out via Upstox OMS."""
+    from app.ui.styles import strategy_card_header
+
+    st.markdown(
+        strategy_card_header("Copy Kite", "Arun Kite fills · Upstox OMS fan-out"),
+        unsafe_allow_html=True,
+    )
+    state = cache_manager.get_json(cache_manager.COPY_KITE_STATE_KEY)
+    if not state:
+        st.caption("Copy Kite engine offline — is the `copy_kite_engine` service running?")
+        return
+    updated = str(state.get("timestamp", ""))[:19].replace("T", " ")
+    mode = "PAPER" if state.get("paper_trading") else "LIVE"
+    st.caption(
+        f"Copy Kite updated {updated} · {mode} · leader {state.get('leader') or 'Arun'}"
+    )
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Copies today", str(state.get("copies_today") or 0))
+    c2.metric("Status", str(state.get("setup_label") or "—")[:32])
+    c3.metric("Leader", str(state.get("leader") or "Arun"))
+    signals = state.get("signals") or []
+    if signals:
+        with st.expander("Recent copied fills", expanded=False):
             for line in reversed(signals):
                 st.markdown(f'<p class="ak07-signal-line">{line}</p>', unsafe_allow_html=True)
 
@@ -820,6 +849,10 @@ def _render_strategy_sections() -> None:
     if user_can_view_strategy(STRATEGY_GC_OF):
         with st.container(border=True, key="ak07_gc"):
             render_gc_strategy_panel()
+
+    if user_can_view_strategy(STRATEGY_COPY_KITE):
+        with st.container(border=True, key="ak07_copy_kite"):
+            render_copy_kite_panel()
 
     if user_can_view_strategy(STRATEGY_GAMMA) and tabbed_codes:
         with st.container(border=True, key="ak07_gamma"):

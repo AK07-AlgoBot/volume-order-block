@@ -147,6 +147,61 @@ def _kite_instrument_key(exchange: str, tradingsymbol: str) -> str:
     return f"{exchange}:{tradingsymbol}"
 
 
+def _index_code_from_kite_row(row: dict[str, str]) -> str | None:
+    name = str(row.get("name") or "").upper()
+    sym = str(row.get("tradingsymbol") or "").upper()
+    if name == "BANKNIFTY" or sym.startswith("BANKNIFTY"):
+        return "BANKNIFTY"
+    if name == "SENSEX" or sym.startswith("SENSEX"):
+        return "SENSEX"
+    if name == "NIFTY" or (sym.startswith("NIFTY") and not sym.startswith("NIFTYNXT")):
+        if "BANKNIFTY" in sym or "FINNIFTY" in sym or "MIDCP" in sym:
+            return None
+        return "NIFTY"
+    return None
+
+
+def lookup_kite_fno_instrument(exchange: str, tradingsymbol: str) -> dict[str, Any] | None:
+    """Resolve a Kite NFO/BFO symbol to index, strike, expiry, lot size."""
+    ex = (exchange or "NFO").upper()
+    sym = (tradingsymbol or "").strip()
+    if not sym or not _ensure_kite_instruments(ex):
+        return None
+    path = _cache_path(ex)
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    want = sym.upper()
+    for row in csv.DictReader(io.StringIO(text)):
+        if str(row.get("tradingsymbol") or "").strip().upper() != want:
+            continue
+        if str(row.get("exchange") or "").upper() != ex:
+            continue
+        inst = str(row.get("instrument_type") or "").upper()
+        index_code = _index_code_from_kite_row(row)
+        if not index_code:
+            return None
+        try:
+            strike = int(float(row.get("strike") or 0))
+        except (TypeError, ValueError):
+            strike = 0
+        lot = int(float(row.get("lot_size") or 0) or 0)
+        cfg = INDEX_CONFIGS.get(index_code)
+        return {
+            "tradingsymbol": str(row.get("tradingsymbol") or "").strip(),
+            "exchange": ex,
+            "index_code": index_code,
+            "instrument_type": inst,
+            "strike": strike,
+            "option_type": inst if inst in ("CE", "PE") else "",
+            "expiry": _parse_expiry(str(row.get("expiry") or "")),
+            "lot_size": lot or (cfg.lot_size if cfg else 65),
+            "name": str(row.get("name") or "").strip(),
+        }
+    return None
+
+
 class KiteClient:
     def __init__(self, username: str) -> None:
         self.username = username
@@ -228,6 +283,14 @@ class KiteClient:
         except requests.RequestException as exc:
             logger.warning("[%s] Kite POST %s error: %s", self.username, path, exc)
             return None
+
+    def get_orders(self) -> list[dict[str, Any]]:
+        """Today's Kite order book (all statuses)."""
+        data = self._get("/orders")
+        if not data:
+            return []
+        rows = data.get("_list")
+        return [row for row in rows if isinstance(row, dict)] if isinstance(rows, list) else []
 
     def get_fno_positions(self) -> list[dict[str, Any]]:
         data = self._get("/portfolio/positions")
