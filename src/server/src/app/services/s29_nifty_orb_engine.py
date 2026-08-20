@@ -80,6 +80,7 @@ class S29State:
     fut_key: str = ""
     fut_label: str = ""
     fut_ltp: float | None = None
+    index_spot: float | None = None
     orb_high: float | None = None
     orb_low: float | None = None
     orb_range: float | None = None
@@ -178,6 +179,8 @@ class S29NiftyOrbEngine:
             self._publish(now)
             return
 
+        self._refresh_quotes()
+
         if not self.state.orb_done:
             if now.time() < ORB_END:
                 self.state.setup_label = "Waiting OR 09:18–09:21"
@@ -188,11 +191,10 @@ class S29NiftyOrbEngine:
                 self._publish(now)
                 return
 
-        fut_ltp = self._fut_ltp()
+        fut_ltp = self.state.fut_ltp
         if fut_ltp is None:
             self._publish(now)
             return
-        self.state.fut_ltp = fut_ltp
 
         if self.state.position:
             self._catchup_fanout()
@@ -235,6 +237,14 @@ class S29NiftyOrbEngine:
         self.state.setup_label = str(raw.get("setup_label") or self.state.setup_label)
         idx = (raw.get("indices") or {}).get(INDEX_CODE) or {}
         if isinstance(idx, dict):
+            if idx.get("fut_label"):
+                self.state.fut_label = str(idx["fut_label"])
+            if idx.get("fut_ltp") is not None:
+                self.state.fut_ltp = float(idx["fut_ltp"])
+            elif idx.get("spot") is not None:
+                self.state.fut_ltp = float(idx["spot"])
+            if idx.get("index_spot") is not None:
+                self.state.index_spot = float(idx["index_spot"])
             if idx.get("or_high") is not None and idx.get("or_low") is not None:
                 self.state.orb_high = float(idx["or_high"])
                 self.state.orb_low = float(idx["or_low"])
@@ -332,6 +342,19 @@ class S29NiftyOrbEngine:
         if not self.client or not self.state.fut_key:
             return None
         return self.client.get_ltp(self.state.fut_key)
+
+    def _refresh_quotes(self) -> None:
+        fut = self._fut_ltp()
+        if fut is not None:
+            self.state.fut_ltp = fut
+        if MOCK_MODE:
+            self.state.index_spot = round(self._mock_fut - 12.0, 2)
+            return
+        if not self.client:
+            return
+        spot = self.client.get_ltp(self.cfg.spot_instrument_key)
+        if spot is not None:
+            self.state.index_spot = float(spot)
 
     def _can_enter(self, now: datetime) -> bool:
         if self.state.win_lock:
@@ -554,6 +577,8 @@ class S29NiftyOrbEngine:
         s = self.state
         idx: dict[str, Any] = {
             "spot": s.fut_ltp,
+            "index_spot": s.index_spot,
+            "fut_ltp": s.fut_ltp,
             "or_high": s.orb_high,
             "or_low": s.orb_low,
             "day_review": "ARMED" if s.orb_done else "PENDING",

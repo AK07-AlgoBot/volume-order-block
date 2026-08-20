@@ -10,6 +10,7 @@
     "notes": "GoCharting is signal-only. SL, ITM option, and futures trail use AK07 Upstox."
   },
   "example_plain_text": "AK07|DD|BUY|NSE:NIFTY-I|5",
+  "placeholder_note": "GoCharting does not expand {{ticker}}. OMS accepts that payload and defaults to NIFTY; BankNifty needs BANKNIFTY in the body or ?index=BANKNIFTY.",
   "live_webhook": "https://ak07.in/api/gocharting/alert?token=<AK07_GC_WEBHOOK_SECRET>",
   "oms_behavior": {
     "max_trades_per_day": 2,

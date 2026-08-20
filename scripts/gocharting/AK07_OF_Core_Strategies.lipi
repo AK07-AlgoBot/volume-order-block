@@ -191,8 +191,8 @@ if showDbg {
 }
 
 // ---------------- Alerts (webhook-ready messages) ----------------
-alertcondition(ddBuy, title = "AK07 DD Buy", message = "AK07|DD|BUY|{{ticker}}|{{interval}}|sl={{low}}|delta={{plot_0}}")
-alertcondition(ddSell, title = "AK07 DD Sell", message = "AK07|DD|SELL|{{ticker}}|{{interval}}|sl={{high}}")
-alertcondition(fdBuy, title = "AK07 FD Buy", message = "AK07|FD|BUY|{{ticker}}|{{interval}}|sl={{low}}")
-alertcondition(fdSell, title = "AK07 FD Sell", message = "AK07|FD|SELL|{{ticker}}|{{interval}}|sl={{high}}")
-alertcondition(anySig, title = "AK07 Any OF Signal", message = "AK07|OF|SIGNAL|{{ticker}}|{{interval}}")
+alertcondition(ddBuy, title = "AK07 DD Buy", message = "AK07|DD|BUY|" + syminfo.ticker + "|5")
+alertcondition(ddSell, title = "AK07 DD Sell", message = "AK07|DD|SELL|" + syminfo.ticker + "|5")
+alertcondition(fdBuy, title = "AK07 FD Buy", message = "AK07|FD|BUY|" + syminfo.ticker + "|5")
+alertcondition(fdSell, title = "AK07 FD Sell", message = "AK07|FD|SELL|" + syminfo.ticker + "|5")
+alertcondition(anySig, title = "AK07 Any OF Signal", message = "AK07|OF|SIGNAL|" + syminfo.ticker + "|5")

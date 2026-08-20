@@ -301,12 +301,25 @@ def render_s7_strategy_panel(
         st.info(f"No ORB state for {index_code} yet — waiting for market open.")
         return
 
-    c1, c2, c3, c4, c5 = st.columns(5)
-    c1.metric("Spot", fmt(float(idx["spot"])) if idx.get("spot") is not None else "—")
-    c2.metric("OR High", fmt(idx.get("or_high")))
-    c3.metric("OR Low", fmt(idx.get("or_low")))
-    c4.metric("Day Review", str(idx.get("day_review") or "PENDING"))
-    c5.metric("Trades Today", f"{idx.get('trades_today', 0)}/{2}")
+    is_s29 = title.startswith("S29")
+    if is_s29:
+        c1, c2, c3, c4, c5, c6 = st.columns(6)
+        c1.metric("Spot", fmt(idx.get("index_spot")))
+        fut_label = str(idx.get("fut_label") or "Nifty FUT")
+        c2.metric("Nifty FUT", fmt(idx.get("fut_ltp") if idx.get("fut_ltp") is not None else idx.get("spot")))
+        if fut_label and fut_label not in {"Nifty FUT", "NIFTY FUT"}:
+            c2.caption(fut_label)
+        c3.metric("OR High", fmt(idx.get("or_high")))
+        c4.metric("OR Low", fmt(idx.get("or_low")))
+        c5.metric("Day Review", str(idx.get("day_review") or "PENDING"))
+        c6.metric("Trades Today", f"{idx.get('trades_today', 0)}/{2}")
+    else:
+        c1, c2, c3, c4, c5 = st.columns(5)
+        c1.metric("Spot", fmt(float(idx["spot"])) if idx.get("spot") is not None else "—")
+        c2.metric("OR High", fmt(idx.get("or_high")))
+        c3.metric("OR Low", fmt(idx.get("or_low")))
+        c4.metric("Day Review", str(idx.get("day_review") or "PENDING"))
+        c5.metric("Trades Today", f"{idx.get('trades_today', 0)}/{2}")
 
     setup = str(idx.get("setup_label") or "—")
     st.markdown(f'<p class="ak07-muted-line">{setup}</p>', unsafe_allow_html=True)
@@ -322,13 +335,14 @@ def render_s7_strategy_panel(
         p5.metric("Lots", str(pos.get("lots", 1)))
         if pos.get("legs"):
             st.caption(f"Fan-out: {pos['legs']}")
-        if idx.get("spot") is not None and pos.get("entry") is not None:
+        live_px = idx.get("fut_ltp") if idx.get("fut_ltp") is not None else idx.get("spot")
+        if live_px is not None and pos.get("entry") is not None:
             live_pnl = (
-                float(idx["spot"]) - float(pos["entry"])
+                float(live_px) - float(pos["entry"])
                 if pos.get("direction") == "LONG"
-                else float(pos["entry"]) - float(idx["spot"])
+                else float(pos["entry"]) - float(live_px)
             )
-            st.metric("Live P&L (pts)", f"{live_pnl:+.2f}")
+            st.metric("Live P&L (FUT pts)", f"{live_pnl:+.2f}")
     else:
         st.caption("Flat — waiting for ORB breakout + ADX confirmation.")
 

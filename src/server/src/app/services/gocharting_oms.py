@@ -78,6 +78,8 @@ _SPACE_RE = re.compile(
     r"^AK07\s+(?P<strategy>DD|FD|OB|STK|ST|SW|SWEEP|TR|OF|STACK)\s+(?P<side>BUY|SELL)$",
     re.IGNORECASE,
 )
+_PLACEHOLDER_RE = re.compile(r"\{\{[^}]*\}\}")
+_FALLBACK_INDEX: Final[str] = "NIFTY"
 
 
 @dataclass
@@ -144,8 +146,13 @@ class GcState:
     fut_ltp: dict[str, float] = field(default_factory=dict)
 
 
+def _clean_placeholder(value: str) -> str:
+    """GoCharting does not expand TradingView {{ticker}} tokens — drop them."""
+    return _PLACEHOLDER_RE.sub("", value or "").strip("|- ")
+
+
 def parse_index_from_ticker(ticker: str) -> str | None:
-    raw = (ticker or "").upper().replace(" ", "")
+    raw = _clean_placeholder(ticker).upper().replace(" ", "")
     if not raw:
         return None
     if "BANKNIFTY" in raw or "NIFTYBANK" in raw:
@@ -154,6 +161,18 @@ def parse_index_from_ticker(ticker: str) -> str | None:
         return None
     if "NIFTY" in raw:
         return "NIFTY"
+    return None
+
+
+def _resolve_index(ticker: str, default_index: str = "") -> str | None:
+    for candidate in (
+        ticker,
+        default_index,
+        os.environ.get("AK07_GC_DEFAULT_INDEX") or "",
+    ):
+        code = parse_index_from_ticker(str(candidate or ""))
+        if code:
+            return code
     return None
 
 
@@ -216,6 +235,7 @@ def _apply_fut_trail(pos: GcPosition, fut_ltp: float) -> str | None:
 def parse_gocharting_alert(raw: str, *, default_index: str = "") -> GcAlert | None:
     """Parse GoCharting plain-text (or JSON-wrapped) alert body."""
     text = (raw or "").strip()
+    json_ticker = ""
     if not text:
         return None
     if text.startswith("{") or text.startswith("["):
@@ -224,14 +244,20 @@ def parse_gocharting_alert(raw: str, *, default_index: str = "") -> GcAlert | No
         except json.JSONDecodeError:
             return None
         if isinstance(obj, dict):
+            json_ticker = str(
+                obj.get("ticker") or obj.get("symbol") or obj.get("instrument") or obj.get("market") or ""
+            ).strip()
             nested = obj.get("message") or obj.get("text") or obj.get("alert_message") or obj.get("body")
             if nested:
-                parsed = parse_gocharting_alert(str(nested), default_index=default_index)
+                parsed = parse_gocharting_alert(
+                    str(nested),
+                    default_index=default_index or json_ticker,
+                )
                 if parsed:
                     return parsed
             strategy = str(obj.get("strategy") or obj.get("tag") or "").strip().upper()
             side = str(obj.get("side") or obj.get("action") or obj.get("signal") or "").strip().upper()
-            ticker = str(obj.get("ticker") or obj.get("symbol") or "").strip()
+            ticker = json_ticker
             if strategy and side in ("BUY", "SELL"):
                 text = f"AK07|{strategy}|{side}|{ticker}|{obj.get('interval') or ''}|sl={obj.get('sl') or ''}"
             else:
@@ -251,15 +277,19 @@ def parse_gocharting_alert(raw: str, *, default_index: str = "") -> GcAlert | No
     strategy = _STRATEGY_ALIASES.get(strategy_raw)
     if not strategy:
         return None
-    ticker = str(groups.get("ticker") or "").strip() if "ticker" in groups else ""
-    interval = str(groups.get("interval") or "").strip() if "interval" in groups else ""
+    ticker = _clean_placeholder(str(groups.get("ticker") or "") if "ticker" in groups else "")
+    interval = _clean_placeholder(str(groups.get("interval") or "") if "interval" in groups else "")
     rest = str(groups.get("rest") or "") if "rest" in groups else ""
-    sl = _parse_sl(rest) or _parse_sl(first_line)
-    index_code = parse_index_from_ticker(ticker)
+    sl = _parse_sl(_clean_placeholder(rest)) or _parse_sl(_clean_placeholder(first_line))
+    index_code = _resolve_index(ticker or json_ticker, default_index)
     if index_code is None:
-        fallback = (default_index or os.environ.get("AK07_GC_DEFAULT_INDEX") or "").strip().upper()
-        index_code = fallback if fallback in ALLOWED_INDICES else None
-    if index_code is None or index_code not in ALLOWED_INDICES:
+        index_code = _FALLBACK_INDEX
+        logger.warning(
+            "GC ticker missing (%r) — using %s. BankNifty alerts need NSE:BANKNIFTY-I or ?index=BANKNIFTY",
+            first_line[:180],
+            index_code,
+        )
+    if index_code not in ALLOWED_INDICES:
         return None
     return GcAlert(
         strategy=strategy,
@@ -272,9 +302,9 @@ def parse_gocharting_alert(raw: str, *, default_index: str = "") -> GcAlert | No
     )
 
 
-def enqueue_gocharting_alert(raw: str) -> dict[str, Any]:
+def enqueue_gocharting_alert(raw: str, *, default_index: str = "") -> dict[str, Any]:
     """Parse + queue an alert. Used by the FastAPI webhook."""
-    parsed = parse_gocharting_alert(raw)
+    parsed = parse_gocharting_alert(raw, default_index=default_index)
     payload = {
         "raw": (raw or "")[:2000],
         "received_at": datetime.now(IST).isoformat(),

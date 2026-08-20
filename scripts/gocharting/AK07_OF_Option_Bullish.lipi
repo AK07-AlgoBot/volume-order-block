@@ -124,4 +124,4 @@ plotshape(obBuyGate, title = "OB Buy", style = shape.triangleup, location = loca
 plot(obBuyGate ? low : na, title = "OB SL", color = color.yellow, style = plotStyle.circles)
 bgcolor(obBuyGate ? color.new(color.yellow, 0.85) : na)
 
-alertcondition(obBuyGate, title = "AK07 Option Bullish", message = "AK07|OB|BUY|{{ticker}}|{{interval}}|sl={{low}}|ce={{ceSym}}|pe={{peSym}}")
+alertcondition(obBuyGate, title = "AK07 Option Bullish", message = "AK07|OB|BUY|" + syminfo.ticker + "|5")

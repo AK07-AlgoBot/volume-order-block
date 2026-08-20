@@ -46,5 +46,5 @@ plot(swHi, title="Swing high", color=color.red)
 
 bgcolor(buySw ? color.new(color.green, 0.55) : sellSw ? color.new(color.red, 0.55) : na)
 
-alertcondition(buySw, title = "AK07 SW Buy", message = "AK07|SW|BUY|{{ticker}}|{{interval}}|sl={{low}}")
-alertcondition(sellSw, title = "AK07 SW Sell", message = "AK07|SW|SELL|{{ticker}}|{{interval}}|sl={{high}}")
+alertcondition(buySw, title = "AK07 SW Buy", message = "AK07|SW|BUY|" + syminfo.ticker + "|5")
+alertcondition(sellSw, title = "AK07 SW Sell", message = "AK07|SW|SELL|" + syminfo.ticker + "|5")

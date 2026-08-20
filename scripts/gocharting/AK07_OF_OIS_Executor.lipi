@@ -55,7 +55,7 @@ plotshape(anySell, title="Sell", shape=shape.triangledown, location=location.abo
 
 bgcolor(anyBuy ? color.new(color.green, 0.55) : anySell ? color.new(color.red, 0.55) : na)
 
-alertcondition(ddBuy, title = "AK07 DD Buy", message = "AK07|DD|BUY|{{ticker}}|{{interval}}|sl={{low}}")
-alertcondition(ddSell, title = "AK07 DD Sell", message = "AK07|DD|SELL|{{ticker}}|{{interval}}|sl={{high}}")
-alertcondition(fdBuy, title = "AK07 FD Buy", message = "AK07|FD|BUY|{{ticker}}|{{interval}}|sl={{low}}")
-alertcondition(fdSell, title = "AK07 FD Sell", message = "AK07|FD|SELL|{{ticker}}|{{interval}}|sl={{high}}")
+alertcondition(ddBuy, title = "AK07 DD Buy", message = "AK07|DD|BUY|" + syminfo.ticker + "|5")
+alertcondition(ddSell, title = "AK07 DD Sell", message = "AK07|DD|SELL|" + syminfo.ticker + "|5")
+alertcondition(fdBuy, title = "AK07 FD Buy", message = "AK07|FD|BUY|" + syminfo.ticker + "|5")
+alertcondition(fdSell, title = "AK07 FD Sell", message = "AK07|FD|SELL|" + syminfo.ticker + "|5")

@@ -46,7 +46,11 @@ async def gocharting_alert_probe(request: Request, token: str | None = Query(def
 
 
 @router.post("/alert")
-async def receive_gocharting_alert(request: Request, token: str | None = Query(default=None)):
+async def receive_gocharting_alert(
+    request: Request,
+    token: str | None = Query(default=None),
+    index: str | None = Query(default=None),
+):
     _authorize(request, token)
     raw_bytes = await request.body()
     raw = raw_bytes.decode("utf-8", errors="replace")
@@ -55,7 +59,15 @@ async def receive_gocharting_alert(request: Request, token: str | None = Query(d
 
     from app.services.gocharting_oms import enqueue_gocharting_alert  # noqa: PLC0415
 
-    result = enqueue_gocharting_alert(raw)
+    header_index = (
+        request.headers.get("x-symbol")
+        or request.headers.get("x-ticker")
+        or ""
+    )
+    result = enqueue_gocharting_alert(
+        raw,
+        default_index=(index or header_index or "").strip(),
+    )
     if result.get("reason") == "redis queue failed":
         raise HTTPException(status_code=503, detail="alert queue unavailable")
     if not result.get("ok"):

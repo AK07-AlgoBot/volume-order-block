@@ -16,8 +16,15 @@ OMS path: `POST https://ak07.in/api/gocharting/alert?token=<AK07_GC_WEBHOOK_SECR
 3. In GoCharting: Alert → Delivery Methods → webhook URL with the token.
 4. Probe: `curl -s "https://ak07.in/api/gocharting/alert?token=SECRET"` should return `{"ok":true,...}`.
 
-Message body is the Lipi `alertcondition` string (plain text), e.g.
-`AK07|DD|BUY|{{ticker}}|{{interval}}`
+Message body is the Lipi `alertcondition` string (plain text). GoCharting does
+**not** expand TradingView `{{ticker}}` tokens — those arrive as literal text
+and used to be ignored. OMS now treats a missing ticker as NIFTY.
+
+Preferred message (baked from the chart symbol):
+`AK07|DD|BUY|NIFTY-I|5`
+
+BankNifty alerts: either put `BANKNIFTY` in the message, or append
+`&index=BANKNIFTY` to that chart's webhook URL.
 
 BUY → long ITM CE. SELL → long ITM PE. Strike is the S3 ITM pick from Upstox (shared across brokers). Fan-out is every live (non-paper) broker account (`AK07_GC_FANOUT_ALL_LIVE=1`).
 
