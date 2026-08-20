@@ -26,6 +26,7 @@ from app.services import cache_manager, performance_store, telegram_notifier
 from app.services.breakout_order_fanout import (
     catchup_s29_legs,
     legs_summary,
+    leg_usernames,
     place_s29_entries,
     place_s29_exits,
     position_legs,
@@ -529,6 +530,7 @@ class S29NiftyOrbEngine:
             exit_reason=reason,
             entry_at=pos.opened_at,
             paper_trading=self.paper,
+            extra={"participants": leg_usernames(pos.order_legs)},
         )
         logger.info("S29 exit %s FUT %.2f | opt %+.2f | INR %+.0f", reason, fut_ltp, pnl_pts, pnl_inr)
         telegram_notifier.notify_trade_exit(

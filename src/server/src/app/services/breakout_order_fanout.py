@@ -737,6 +737,21 @@ def legs_summary(legs: list[dict[str, Any]]) -> str:
     return ", ".join(bits)
 
 
+def leg_usernames(legs: list[dict[str, Any]] | None) -> list[str]:
+    """Unique follower names from fan-out legs, first-seen order."""
+    out: list[str] = []
+    seen: set[str] = set()
+    for leg in legs or []:
+        if not isinstance(leg, dict):
+            continue
+        name = str(leg.get("username") or "").strip()
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        out.append(name)
+    return out
+
+
 def position_legs(pos: Any) -> list[dict[str, Any]]:
     legs = getattr(pos, "order_legs", None)
     return legs if isinstance(legs, list) else []

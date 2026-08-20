@@ -15,12 +15,14 @@ IST = ZoneInfo("Asia/Kolkata")
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
-from app.services import performance_store
+from app.constants import STRATEGY_COPY_KITE
+from app.services import cache_manager, performance_store
 from app.ui.auth_session import is_admin, require_login
 from app.ui.strategy_access import (
     enabled_strategy_ids,
     enabled_strategy_labels_text,
     performance_start_floor,
+    user_can_view_strategy,
     user_can_view_trade,
 )
 from app.ui.styles import format_exit_reason_label, inject_dark_theme, summary_chip_row
@@ -33,6 +35,7 @@ _PERF_STRATEGY_BY_ENTITLEMENT = {
     "s7_orb": performance_store.STRATEGY_S7_ORB,
     "s29_orb": performance_store.STRATEGY_S29_ORB,
     "gc_of": performance_store.STRATEGY_GC_OF,
+    "copy_kite": performance_store.STRATEGY_COPY_KITE,
     "gamma": performance_store.STRATEGY_GAMMA,
 }
 
@@ -207,10 +210,47 @@ if other_trades:
             }
         )
     st.dataframe(other_rows, use_container_width=True, hide_index=True)
-elif not show_s3 and not trades:
-    pass
-elif not show_s3 and trades and not other_trades:
-    st.caption("No order rows to display.")
+else:
+    show_other = allowed_perf_strategies is None or any(
+        label != performance_store.STRATEGY_BREAKOUT for label in (allowed_perf_strategies or [])
+    )
+    if show_other:
+        st.markdown("#### Other strategies")
+        st.info("No GoCharting, S29, or Copy Kite closes in this range yet.")
+
+show_copy_kite = admin or user_can_view_strategy(STRATEGY_COPY_KITE)
+if show_copy_kite:
+    st.markdown("#### Copy Kite — copied fills")
+    st.caption(
+        "Live copies of Arun's untagged Kite FNO fills. AK07 engine orders "
+        "(GoCharting, S29, S1, S3) are tagged and skipped — they are not Copy Kite trades."
+    )
+    copy_state = cache_manager.get_json(cache_manager.COPY_KITE_STATE_KEY)
+    if not copy_state:
+        st.info("Copy Kite engine offline — no fill log.")
+    else:
+        fills = copy_state.get("copied_fills") or []
+        if fills:
+            fill_rows = []
+            for row in reversed(fills):
+                if not isinstance(row, dict):
+                    continue
+                fill_rows.append(
+                    {
+                        "Copied at": str(row.get("at") or "")[:19],
+                        "Side": row.get("side") or "",
+                        "Index": row.get("index") or "",
+                        "Contract": row.get("contract") or "",
+                        "Leader px": row.get("leader_price"),
+                        "Followers": row.get("followers") or "",
+                    }
+                )
+            st.dataframe(fill_rows, use_container_width=True, hide_index=True)
+        else:
+            st.info(
+                f"No Copy Kite copies today · {copy_state.get('setup_label') or 'idle'} · "
+                f"copies {copy_state.get('copies_today') or 0}."
+            )
 
 # --- Admin-only analytics (collapsed) ---
 if admin and trades:

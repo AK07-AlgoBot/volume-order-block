@@ -19,8 +19,12 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from app.constants import STRATEGY_COPY_KITE
-from app.services import cache_manager, telegram_notifier
-from app.services.breakout_order_fanout import legs_summary, place_copy_orders
+from app.services import cache_manager, performance_store, telegram_notifier
+from app.services.breakout_order_fanout import (
+    legs_summary,
+    leg_usernames,
+    place_copy_orders,
+)
 from app.services.engine_intraday import entries_globally_blocked
 from app.services.kite_engine import KiteClient, lookup_kite_fno_instrument
 from app.services.upstox_engine import MOCK_MODE, build_upstox_client
@@ -61,6 +65,69 @@ def _copyable(order: dict[str, Any]) -> bool:
     return side in ("BUY", "SELL")
 
 
+def _apply_leader_fill(
+    positions: dict[str, dict[str, Any]],
+    symbol: str,
+    side: str,
+    qty: int,
+    avg: float,
+    now: datetime,
+    index_code: str,
+) -> dict[str, Any] | None:
+    """Update leader net position. Return a closed-leg dict when qty is reduced."""
+    if qty <= 0 or not symbol:
+        return None
+    delta = qty if side == "BUY" else -qty
+    pos = positions.get(symbol)
+    if not pos or int(pos.get("qty") or 0) == 0:
+        positions[symbol] = {
+            "qty": delta,
+            "avg": avg,
+            "opened_at": now.isoformat(),
+            "index_code": index_code,
+        }
+        return None
+    old_qty = int(pos.get("qty") or 0)
+    old_avg = float(pos.get("avg") or 0)
+    same_way = (old_qty > 0 and delta > 0) or (old_qty < 0 and delta < 0)
+    if same_way:
+        new_qty = old_qty + delta
+        positions[symbol] = {
+            "qty": new_qty,
+            "avg": ((abs(old_qty) * old_avg) + (qty * avg)) / abs(new_qty) if new_qty else avg,
+            "opened_at": str(pos.get("opened_at") or now.isoformat()),
+            "index_code": str(pos.get("index_code") or index_code),
+        }
+        return None
+    closed_qty = min(abs(old_qty), qty)
+    if old_qty > 0:
+        direction = "LONG"
+        pnl = avg - old_avg
+    else:
+        direction = "SHORT"
+        pnl = old_avg - avg
+    remaining = old_qty + delta
+    closed = {
+        "direction": direction,
+        "entry": old_avg,
+        "exit": avg,
+        "pnl_points": pnl,
+        "entry_at": str(pos.get("opened_at") or ""),
+        "index_code": str(pos.get("index_code") or index_code),
+        "closed_qty": closed_qty,
+    }
+    if remaining == 0:
+        positions.pop(symbol, None)
+    else:
+        positions[symbol] = {
+            "qty": remaining,
+            "avg": avg if (old_qty > 0) != (remaining > 0) else old_avg,
+            "opened_at": now.isoformat() if (old_qty > 0) != (remaining > 0) else str(pos.get("opened_at") or now.isoformat()),
+            "index_code": index_code if (old_qty > 0) != (remaining > 0) else str(pos.get("index_code") or index_code),
+        }
+    return closed
+
+
 class KiteCopyEngine:
     def __init__(self) -> None:
         self.paper = bool(MOCK_MODE)
@@ -72,6 +139,8 @@ class KiteCopyEngine:
         self.setup_label = f"Waiting for {LEADER_USER} Kite fills"
         self.copies_today = 0
         self.trade_day = ""
+        self.copied_fills: list[dict[str, Any]] = []
+        self._positions: dict[str, dict[str, Any]] = {}
         self._hydrate()
         logger.info(
             "Copy Kite live | leader=%s poll=%.0fs paper=%s fan-out all live except leader",
@@ -146,8 +215,17 @@ class KiteCopyEngine:
             logger.error("Copy Kite skip %s:%s — unknown instrument", exchange, symbol)
             return
         kind = "options" if inst["instrument_type"] in ("CE", "PE") else "futures"
+        try:
+            filled = int(order.get("filled_quantity") or order.get("quantity") or 0)
+        except (TypeError, ValueError):
+            filled = 0
+        try:
+            avg = float(order.get("average_price") or 0)
+        except (TypeError, ValueError):
+            avg = 0.0
+        index_code = str(inst["index_code"])
         legs = place_copy_orders(
-            index_code=str(inst["index_code"]),
+            index_code=index_code,
             side=side,
             lot_size=int(inst["lot_size"]),
             kite_exchange=exchange,
@@ -163,20 +241,62 @@ class KiteCopyEngine:
         self.copies_today += 1
         note = legs_summary(legs) if legs else "no legs"
         line = (
-            f"{side} {inst['index_code']} {symbol} "
+            f"{side} {index_code} {symbol} "
             f"{inst.get('strike') or ''}{inst.get('option_type') or ''} [{note}]"
         )
         self.signal_log.append(line)
         self.signal_log = self.signal_log[-20:]
+        self.copied_fills.append(
+            {
+                "at": now.isoformat(),
+                "side": side,
+                "index": index_code,
+                "contract": symbol,
+                "leader_price": round(avg, 2),
+                "followers": note,
+            }
+        )
+        self.copied_fills = self.copied_fills[-50:]
         logger.info("Copy Kite %s", line)
+        closed = _apply_leader_fill(self._positions, symbol, side, filled, avg, now, index_code)
+        if closed and legs:
+            self._record_closed(closed, symbol, inst, note, legs)
         telegram_notifier.notify_trade_execution(
-            index_name=f"Copy Kite {inst['index_code']} ({symbol})",
+            index_name=f"Copy Kite {index_code} ({symbol})",
             trade_type="LONG" if side == "BUY" else "SHORT",
-            entry_price=float(order.get("average_price") or 0),
+            entry_price=avg,
             target_price=0.0,
             sl_price=0.0,
             component_sentiment=str(inst.get("option_type") or kind),
             timestamp=now.strftime("%Y-%m-%d %H:%M:%S IST"),
+        )
+
+    def _record_closed(
+        self,
+        closed: dict[str, Any],
+        symbol: str,
+        inst: dict[str, Any],
+        note: str,
+        legs: list[dict[str, Any]] | None = None,
+    ) -> None:
+        performance_store.record_completed_trade(
+            strategy=performance_store.STRATEGY_COPY_KITE,
+            strategy_id=STRATEGY_COPY_KITE,
+            symbol=str(closed.get("index_code") or inst.get("index_code") or ""),
+            direction=str(closed.get("direction") or ""),
+            entry_price=float(closed.get("entry") or 0),
+            exit_price=float(closed.get("exit") or 0),
+            pnl_points=float(closed.get("pnl_points") or 0),
+            exit_reason="COPIED_CLOSE",
+            entry_at=str(closed.get("entry_at") or ""),
+            paper_trading=self.paper,
+            extra={
+                "contract_label": symbol,
+                "option_strike": inst.get("strike") or None,
+                "option_type": inst.get("option_type") or "",
+                "copies": note,
+                "participants": leg_usernames(legs),
+            },
         )
 
     def _roll_day(self, now: datetime) -> None:
@@ -188,12 +308,20 @@ class KiteCopyEngine:
         self.seeded = False
         self.copies_today = 0
         self.signal_log = []
+        self.copied_fills = []
         self.setup_label = "New session"
 
     def _hydrate(self) -> None:
         raw = cache_manager.get_json(cache_manager.COPY_KITE_STATE_KEY)
         if not isinstance(raw, dict):
             return
+        positions = raw.get("leader_positions") or {}
+        if isinstance(positions, dict):
+            self._positions = {
+                str(key): value
+                for key, value in positions.items()
+                if str(key).strip() and isinstance(value, dict)
+            }
         today = datetime.now(IST).date().isoformat()
         if str(raw.get("trade_day") or "") != today:
             return
@@ -204,6 +332,9 @@ class KiteCopyEngine:
         if isinstance(seen, list):
             self.seen = {str(x) for x in seen if x}
             self.seeded = True
+        fills = raw.get("copied_fills") or []
+        if isinstance(fills, list):
+            self.copied_fills = [row for row in fills if isinstance(row, dict)]
 
     def _publish(self, now: datetime) -> None:
         cache_manager.set_json(
@@ -219,6 +350,8 @@ class KiteCopyEngine:
                 "setup_label": self.setup_label,
                 "seen_order_ids": list(self.seen)[-400:],
                 "signals": self.signal_log[-8:],
+                "copied_fills": self.copied_fills[-50:],
+                "leader_positions": self._positions,
             },
             ttl_seconds=86_400,
         )

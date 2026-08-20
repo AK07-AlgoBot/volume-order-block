@@ -73,7 +73,7 @@ def _entitlement_for_trade(trade: dict[str, Any]) -> str | None:
 
 
 def user_can_view_trade(trade: dict[str, Any]) -> bool:
-    """Non-admins: assigned strategies only, and only trades attributed to them."""
+    """Non-admins: assigned strategies; named rows only when a username is set."""
     from app.ui.auth_session import current_username, is_admin
 
     entitlement = _entitlement_for_trade(trade)
@@ -83,11 +83,17 @@ def user_can_view_trade(trade: dict[str, Any]) -> bool:
         return False
     if is_admin():
         return True
+    me = str(current_username() or "").strip()
     trade_user = str(trade.get("username") or "").strip()
-    # Hide shared/historical unattributed rows from onboarded users.
-    if not trade_user:
-        return False
-    return trade_user == str(current_username() or "").strip()
+    if trade_user:
+        return trade_user == me
+    raw_participants = trade.get("participants") or trade.get("usernames") or []
+    if isinstance(raw_participants, list) and raw_participants:
+        names = {str(name).strip() for name in raw_participants if str(name).strip()}
+        if names:
+            return me in names
+    # Shared fan-out row (GC / S29 / Copy Kite / S1) with no per-user stamp.
+    return True
 
 
 def performance_start_floor() -> date | None:
