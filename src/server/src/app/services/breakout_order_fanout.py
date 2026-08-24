@@ -943,15 +943,14 @@ def place_copy_orders(
             index_code, expiry=expiry, strike=option_strike, option_type=option_type
         )
         if not shared_upstox:
-            logger.error(
-                "%s no Upstox %s %s%d %s — aborting fan-out",
+            logger.warning(
+                "%s no Upstox %s %s%d %s — skipping Upstox followers, still copying Kite/Groww",
                 log_tag,
                 index_code,
                 option_type,
                 option_strike,
                 expiry,
             )
-            return []
 
     legs: list[dict[str, Any]] = []
     for trader in traders:
@@ -961,6 +960,10 @@ def place_copy_orders(
             upstox = build_upstox_client(trader.username)
             if instrument_kind == "options":
                 contract = shared_upstox
+                if (not contract or not contract.get("instrument_key")) and option_strike > 0:
+                    contract = upstox.get_option_contract_exact(
+                        index_code, expiry=expiry, strike=option_strike, option_type=option_type
+                    )
                 if not contract or not contract.get("instrument_key"):
                     logger.error("[%s] %s skipped — no Upstox option key", trader.username, log_tag)
                     continue

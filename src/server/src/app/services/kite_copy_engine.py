@@ -163,6 +163,8 @@ class KiteCopyEngine:
         self._roll_day(now)
         if self.leader:
             self.leader.refresh_auth_from_disk()
+        if self.upstox:
+            self.upstox.refresh_access_token_from_disk()
         if now.time() < SESSION_START or now.time() >= BOT_END:
             self.setup_label = "Session closed"
             self._publish(now)
