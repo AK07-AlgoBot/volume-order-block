@@ -184,6 +184,31 @@ services:
     networks:
       - ak07
 
+  # Always-on GoCharting charts. Bound to localhost only — SSH tunnel to :3000.
+  # Start: docker compose -p ak07 -f configs/docker-compose.yml up -d gc_browser
+  gc_browser:
+    image: lscr.io/linuxserver/chromium:latest
+    restart: unless-stopped
+    mem_limit: 2g
+    memswap_limit: 2g
+    shm_size: "1gb"
+    security_opt:
+      - seccomp:unconfined
+    environment:
+      PUID: "1000"
+      PGID: "1000"
+      TZ: Asia/Kolkata
+      CUSTOM_USER: ${GC_BROWSER_USER:-ak07}
+      PASSWORD: ${GC_BROWSER_PASSWORD:-}
+      CHROME_CLI: https://gocharting.com/terminal?ticker=NSE:NIFTY-I
+    volumes:
+      - ak07_gc_browser:/config
+    ports:
+      - "127.0.0.1:3000:3000"
+      - "127.0.0.1:3001:3001"
+    networks:
+      - ak07
+
   copy_kite_engine:
     build:
       context: ..
@@ -361,3 +386,4 @@ networks:
 volumes:
   ak07_server_data:
   ak07_redis_data:
+  ak07_gc_browser:

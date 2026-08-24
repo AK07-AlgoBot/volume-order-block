@@ -7,6 +7,44 @@ Option pick, futures LTP, SL, 1R trail, and 14:55 square-off all use AK07 Upstox
 1. GoCharting Premium with NSE futures footprint (5m NIFTY-I and BANKNIFTY-I).
 2. Lipi scripts in this folder pasted into Script Editor (All 4 is the live overlay).
 3. Webhook URL on each alert (OMS endpoint below).
+4. Charts must stay on 5m during 09:15–14:45 IST. Easiest: run Chromium on the AK07 server
+   (`gc_browser` in docker-compose) so your laptop can close.
+
+## Always-on server browser (recommended)
+Lipi alerts only fire while the indicator is on a live 5m chart. This container keeps
+Chromium open on the VPS. It is bound to 127.0.0.1:3000 — not on the public internet.
+
+On the server `.env` (once):
+
+    GC_BROWSER_USER=ak07
+    GC_BROWSER_PASSWORD=<long random password>
+
+Then:
+
+    cd ~/volume-order-block
+    git pull
+    docker compose -p ak07 -f configs/docker-compose.yml up -d gc_browser
+
+From your PC (leave this SSH window open while you set up):
+
+    ssh -L 3000:127.0.0.1:3000 root@YOUR_SERVER_IP
+
+Open http://127.0.0.1:3000 in your local browser. Log in with GC_BROWSER_USER / PASSWORD
+if prompted. That page is the SERVER Chromium, not your laptop Chrome.
+
+Inside that remote Chromium (one-time):
+1. Log into the same GoCharting Premium account.
+2. Confirm NIFTY-I is 5m footprint. Apply AK07 OF All 4. Do not click 1D/5D.
+3. New tab: NSE:BANKNIFTY-I 5m footprint. Apply the same script.
+4. Confirm existing webhook alerts are still on (expiry months out). Do not recreate daily.
+5. Leave both tabs open. Close your laptop. The server Chromium stays up.
+
+Re-open the tunnel only if GoCharting logged out or a tab left 5m:
+
+    docker compose -p ak07 -f configs/docker-compose.yml ps gc_browser
+    docker compose -p ak07 -f configs/docker-compose.yml restart gc_browser
+
+Login cookies live in the `ak07_gc_browser` volume, so a restart usually restores the session.
 
 ## Live webhook
 OMS path: `POST https://ak07.in/api/gocharting/alert?token=<AK07_GC_WEBHOOK_SECRET>`
