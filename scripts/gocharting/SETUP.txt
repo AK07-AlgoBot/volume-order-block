@@ -74,7 +74,7 @@ BUY → long ITM CE. SELL → long ITM PE. Strike is the S3 ITM pick from Upstox
 5. Do not click 1D / 5D / 15D / 1M — stay on 5m.
 
 ## OMS risk (server / Upstox, not Lipi)
-- Max 2 trades/day, one open position at a time.
+- Max 3 trades/day, one open position at a time.
 - First winning trade (option P&L > 0) locks the engine for the rest of the day. A loser still allows a second attempt.
 - SL = last closed Upstox 5m futures candle extreme ±5 pts (BUY: low−5, SELL: high+5). Webhook `sl=` is fallback only.
 - After 1R, trail 1:1 on Upstox futures LTP. No option max-loss cap and no premium target.
@@ -84,7 +84,7 @@ BUY → long ITM CE. SELL → long ITM PE. Strike is the S3 ITM pick from Upstox
 ## Tuning (match 1–2 trades / tight SL)
 - `nearZeroAbs`: start 10–20 (lots); tighten if too many DD signals.
 - `similarPct`: 10–15 for Full Delta.
-- `maxTradesDay`: 2 in Lipi; OMS also caps at 2.
+- `maxTradesDay`: Lipi visual gate; OMS caps at 3 (`AK07_GC_MAX_TRADES_PER_DAY`).
 
 ## Stacked option buy
 Not auto in Lipi yet (no price-level stack API). Use checklist in `AK07_webhook_payload.example.json`.

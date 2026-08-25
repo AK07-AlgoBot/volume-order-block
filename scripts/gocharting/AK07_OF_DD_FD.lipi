@@ -1,4 +1,4 @@
-indicator("AK07 OF All 4", overlay = true)
+indicator("AK07 OF BuySell", overlay = true)
 
 // Video playbook: 1 DD  2 FD  3 Option bullish  4 Stacked option buy
 // Apply on 5m NIFTY-I and BANKNIFTY-I footprint (same file; price picks scale).
@@ -6,11 +6,13 @@ indicator("AK07 OF All 4", overlay = true)
 
 nearZeroAbs = input(600.0, title = "Near-zero floor |delta| (both indices)")
 oppFrac = input(25.0, title = "Opp extreme vs |delta| pct")
-similarPct = input(12.0, title = "FD similarity pct")
-bigVolMult = input(1.6, title = "FD/STACK big vol vs SMA")
+// Video Full Delta: rare sudden marubozu where delta~max/min~COT, big vol, not day H/L, at location.
+similarPct = input(8.0, title = "FD similarity pct (video: tight)")
+bigVolMult = input(2.0, title = "FD/STACK big vol vs SMA")
 volSmaLen = input(20, title = "Vol SMA len")
-maruBodyPct = input(80.0, title = "FD maru body pct")
-maruWickPct = input(10.0, title = "FD max wick pct")
+maruBodyPct = input(85.0, title = "FD maru body pct")
+maruWickPct = input(8.0, title = "FD max wick pct")
+fdMinAbs = input(800.0, title = "FD min |delta| (Nifty; BN auto x2)")
 locTolPts = input(25.0, title = "Nifty location touch (pts)")
 fibMinBars = input(6, title = "Min bars into the day for Fib")
 runFibMin = input(3, title = "Video run Fib min same-color bars")
@@ -20,10 +22,11 @@ maxTradesDay = input(8, title = "Max signals/day (0=off)")
 chartIsOpt = input(false, title = "This chart is CE/PE (enables OB)")
 enableDD = input(true, title = "1 Enable DD")
 enableFD = input(true, title = "2 Enable FD")
-enableOB = input(true, title = "3 Enable Option Bullish")
-enableST = input(true, title = "4 Enable Stacked (bar proxy)")
-requireLoc = input(true, title = "Location ON (day swing Fib 0.6-0.7)")
-banExactDay = input(false, title = "Ban exact day H/L bounce")
+enableOB = input(false, title = "3 Enable Option Bullish (CE/PE chart only)")
+enableST = input(false, title = "4 Enable Stacked (bar proxy)")
+requireLoc = input(false, title = "DD require Fib location (off = mid-day DD OK)")
+requireLocFD = input(true, title = "FD require location (video)")
+banExactDay = input(true, title = "Ban exact day H/L bounce (video)")
 
 d = orderflow.delta
 maxD = orderflow.maxdelta
@@ -101,27 +104,38 @@ atEdge = atDayHi or atDayLo
 midZone = not atEdge and not inFib67 and not nearDip
 goodLocLong = inFib67 and upSwing
 goodLocShort = inFib67 and not upSwing
+// Video locations for FD: Fib 0.6-0.7, dip after break, or edge (not naked mid-range).
+fdLocLong = goodLocLong or nearDip or (atEdge and not midZone)
+fdLocShort = goodLocShort or nearDip or (atEdge and not midZone)
 dayOpen = open
 biasUp = close > dayOpen
 locOkLong = not requireLoc or goodLocLong
 locOkShort = not requireLoc or goodLocShort
 locOkOB = not requireLoc or inFib67
-bounceBanLong = banExactDay and atDayLo and not inFib67
-bounceBanShort = banExactDay and atDayHi and not inFib67
+fdLocOkLong = not requireLocFD or fdLocLong
+fdLocOkShort = not requireLocFD or fdLocShort
+bounceBanLong = banExactDay and atDayLo and not inFib67 and not nearDip
+bounceBanShort = banExactDay and atDayHi and not inFib67 and not nearDip
 
 canSignal = maxTradesDay > -1
+fdFloor = isBN ? fdMinAbs * 2.0 : fdMinAbs
 
-// 1) Delta divergence (video)
+// 1) Delta divergence (video) - primary / most frequent
 ddBuyRaw = enableDD and inSess and bull and d < 0 and minD < 0 and math.abs(maxD) <= nearZ
 ddSellRaw = enableDD and inSess and bear and d > 0 and maxD > 0 and math.abs(minD) <= nearZ
-ddBuy = ddBuyRaw and canSignal and locOkLong
-ddSell = ddSellRaw and canSignal and locOkShort
+ddBuy = ddBuyRaw and canSignal and locOkLong and not bounceBanLong
+ddSell = ddSellRaw and canSignal and locOkShort and not bounceBanShort
 
-// 2) Full delta (video)
-priorNotMaruLong = not (close[1] > open[1] and (100.0 * math.abs(close[1] - open[1]) / math.max(high[1] - low[1], tick)) >= maruBodyPct * 0.9)
-priorNotMaruShort = not (close[1] < open[1] and (100.0 * math.abs(close[1] - open[1]) / math.max(high[1] - low[1], tick)) >= maruBodyPct * 0.9)
-fdBuy = enableFD and inSess and canSignal and maruBull and bigOrder and similarBuy and not atDayHi and not atDayLo and priorNotMaruLong
-fdSell = enableFD and inSess and canSignal and maruBear and bigOrder and similarSell and not atDayHi and not atDayLo and priorNotMaruShort
+// 2) Full delta (video) - SUDDEN first marubozu only (not a run of same-colour marus),
+//    delta~max/min~COT, big volume, not exact day H/L, at location.
+priorMaruLong1 = close[1] > open[1] and (100.0 * math.abs(close[1] - open[1]) / math.max(high[1] - low[1], tick)) >= maruBodyPct * 0.9
+priorMaruLong2 = close[2] > open[2] and (100.0 * math.abs(close[2] - open[2]) / math.max(high[2] - low[2], tick)) >= maruBodyPct * 0.9
+priorMaruShort1 = close[1] < open[1] and (100.0 * math.abs(close[1] - open[1]) / math.max(high[1] - low[1], tick)) >= maruBodyPct * 0.9
+priorMaruShort2 = close[2] < open[2] and (100.0 * math.abs(close[2] - open[2]) / math.max(high[2] - low[2], tick)) >= maruBodyPct * 0.9
+suddenBuy = not priorMaruLong1 and not priorMaruLong2
+suddenSell = not priorMaruShort1 and not priorMaruShort2
+fdBuy = enableFD and inSess and canSignal and maruBull and bigOrder and similarBuy and math.abs(d) >= fdFloor and not atDayHi and not atDayLo and suddenBuy and fdLocOkLong and not bounceBanLong
+fdSell = enableFD and inSess and canSignal and maruBear and bigOrder and similarSell and math.abs(d) >= fdFloor and not atDayHi and not atDayLo and suddenSell and fdLocOkShort and not bounceBanShort
 
 // 3) Option bullish - futures vs ATM option colour mismatch
 // Lipi cannot pull a second symbol (request.security is not usable here).
@@ -143,28 +157,21 @@ stackSellStart = stackNeed <= 2 ? not imbSellBar[2] : not imbSellBar[3]
 stBuy = enableST and inSess and canSignal and stackBuyRun and stackBuyStart and math.abs(minD) <= nearZ and lowerHalf and bigOrder
 stSell = enableST and inSess and canSignal and stackSellRun and stackSellStart and math.abs(maxD) <= nearZ and upperHalf and bigOrder
 
-anySig = ddBuy or ddSell or fdBuy or fdSell or obBuy or stBuy or stSell
+// Combined BUY/SELL only (video DD primary + rare FD). Closed 5m via [1]+offset.
+// No separate BUY FD/SELL FD spray. No bgcolor. No static/var/barstate/force_overlay.
+anyBuy = ddBuy or fdBuy
+anySell = ddSell or fdSell
+anySig = anyBuy or anySell
+buyClose = anyBuy[1]
+sellClose = anySell[1]
+buyPulse = buyClose and not buyClose[1]
+sellPulse = sellClose and not sellClose[1]
 
-// Triangles (not labelup) — GoCharting footprint often hides labelup text.
-// Do not use force_overlay — this Lipi build errors and plots nothing.
-// Shapes and DD alerts both use RAW DD so a BUY/SELL triangle fires the webhook.
-plotshape(ddBuyRaw, title="DD Buy", shape=shape.triangleup, location=location.belowbar, color=color.lime, size=size.large, text="BUY")
-plotshape(ddSellRaw, title="DD Sell", shape=shape.triangledown, location=location.abovebar, color=color.red, size=size.large, text="SELL")
-plotshape(fdBuy, title="FD Buy", shape=shape.triangleup, location=location.belowbar, color=color.aqua, size=size.small, text="BUY FD")
-plotshape(fdSell, title="FD Sell", shape=shape.triangledown, location=location.abovebar, color=color.fuchsia, size=size.small, text="SELL FD")
-plotshape(obBuy, title="OB Buy", shape=shape.triangleup, location=location.belowbar, color=color.yellow, size=size.small, text="BUY OB")
-plotshape(stBuy, title="ST Buy", shape=shape.diamond, location=location.belowbar, color=color.orange, size=size.large, text="BUY STK")
-plotshape(stSell, title="ST Sell", shape=shape.diamond, location=location.abovebar, color=color.purple, size=size.large, text="SELL STK")
+plotshape(buyClose, title="Buy", shape=shape.triangleup, location=location.belowbar, color=color.lime, offset=-1, size=size.large, text="BUY")
+plotshape(sellClose, title="Sell", shape=shape.triangledown, location=location.abovebar, color=color.red, offset=-1, size=size.large, text="SELL")
 
 plot(fib6, title="Fib 0.6", color=color.orange)
 plot(fib7, title="Fib 0.7", color=color.yellow)
 
-bgcolor(ddBuyRaw or fdBuy or obBuy or stBuy ? color.new(color.green, 0.55) : ddSellRaw or fdSell or stSell ? color.new(color.red, 0.55) : na)
-
-alertcondition(ddBuyRaw, title = "AK07 DD Buy", message = "AK07|DD|BUY|{{ticker}}|{{interval}}")
-alertcondition(ddSellRaw, title = "AK07 DD Sell", message = "AK07|DD|SELL|{{ticker}}|{{interval}}")
-alertcondition(fdBuy, title = "AK07 FD Buy", message = "AK07|FD|BUY|{{ticker}}|{{interval}}")
-alertcondition(fdSell, title = "AK07 FD Sell", message = "AK07|FD|SELL|{{ticker}}|{{interval}}")
-alertcondition(obBuy, title = "AK07 OB Buy", message = "AK07|OB|BUY|{{ticker}}|{{interval}}")
-alertcondition(stBuy, title = "AK07 ST Buy", message = "AK07|STK|BUY|{{ticker}}|{{interval}}")
-alertcondition(stSell, title = "AK07 ST Sell", message = "AK07|STK|SELL|{{ticker}}|{{interval}}")
+alertcondition(buyPulse, title = "AK07 Buy", message = "AK07|OF|BUY|{{ticker}}|{{interval}}")
+alertcondition(sellPulse, title = "AK07 Sell", message = "AK07|OF|SELL|{{ticker}}|{{interval}}")
