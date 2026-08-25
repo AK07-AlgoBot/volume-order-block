@@ -145,13 +145,14 @@ stSell = enableST and inSess and canSignal and stackSellRun and stackSellStart a
 
 anySig = ddBuy or ddSell or fdBuy or fdSell or obBuy or stBuy or stSell
 
-// Labels use RAW DD so Fib location does not hide BUY/SELL on the chart.
-// Alerts stay on loc-filtered ddBuy/ddSell.
-plotshape(ddBuyRaw, title="DD Buy", shape=shape.labelup, location=location.belowbar, color=color.lime, text="BUY", textcolor=color.white, size=size.large)
-plotshape(ddSellRaw, title="DD Sell", shape=shape.labeldown, location=location.abovebar, color=color.red, text="SELL", textcolor=color.white, size=size.large)
-plotshape(fdBuy, title="FD Buy", shape=shape.labelup, location=location.belowbar, color=color.aqua, text="BUY FD", textcolor=color.white, size=size.normal)
-plotshape(fdSell, title="FD Sell", shape=shape.labeldown, location=location.abovebar, color=color.fuchsia, text="SELL FD", textcolor=color.white, size=size.normal)
-plotshape(obBuy, title="OB Buy", shape=shape.labelup, location=location.belowbar, color=color.yellow, text="BUY OB", textcolor=color.white, size=size.normal)
+// Triangles (not labelup) — GoCharting footprint often hides labelup text.
+// Do not use force_overlay — this Lipi build errors and plots nothing.
+// Shapes and DD alerts both use RAW DD so a BUY/SELL triangle fires the webhook.
+plotshape(ddBuyRaw, title="DD Buy", shape=shape.triangleup, location=location.belowbar, color=color.lime, size=size.large, text="BUY")
+plotshape(ddSellRaw, title="DD Sell", shape=shape.triangledown, location=location.abovebar, color=color.red, size=size.large, text="SELL")
+plotshape(fdBuy, title="FD Buy", shape=shape.triangleup, location=location.belowbar, color=color.aqua, size=size.small, text="BUY FD")
+plotshape(fdSell, title="FD Sell", shape=shape.triangledown, location=location.abovebar, color=color.fuchsia, size=size.small, text="SELL FD")
+plotshape(obBuy, title="OB Buy", shape=shape.triangleup, location=location.belowbar, color=color.yellow, size=size.small, text="BUY OB")
 plotshape(stBuy, title="ST Buy", shape=shape.diamond, location=location.belowbar, color=color.orange, size=size.large, text="BUY STK")
 plotshape(stSell, title="ST Sell", shape=shape.diamond, location=location.abovebar, color=color.purple, size=size.large, text="SELL STK")
 
@@ -160,8 +161,8 @@ plot(fib7, title="Fib 0.7", color=color.yellow)
 
 bgcolor(ddBuyRaw or fdBuy or obBuy or stBuy ? color.new(color.green, 0.55) : ddSellRaw or fdSell or stSell ? color.new(color.red, 0.55) : na)
 
-alertcondition(ddBuy, title = "AK07 DD Buy", message = "AK07|DD|BUY|{{ticker}}|{{interval}}")
-alertcondition(ddSell, title = "AK07 DD Sell", message = "AK07|DD|SELL|{{ticker}}|{{interval}}")
+alertcondition(ddBuyRaw, title = "AK07 DD Buy", message = "AK07|DD|BUY|{{ticker}}|{{interval}}")
+alertcondition(ddSellRaw, title = "AK07 DD Sell", message = "AK07|DD|SELL|{{ticker}}|{{interval}}")
 alertcondition(fdBuy, title = "AK07 FD Buy", message = "AK07|FD|BUY|{{ticker}}|{{interval}}")
 alertcondition(fdSell, title = "AK07 FD Sell", message = "AK07|FD|SELL|{{ticker}}|{{interval}}")
 alertcondition(obBuy, title = "AK07 OB Buy", message = "AK07|OB|BUY|{{ticker}}|{{interval}}")
