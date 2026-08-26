@@ -3,6 +3,10 @@
 Market data: AK07 Upstox Nifty futures (1-minute OR, then LTP).
 Options: S3 ITM CE/PE pick, fan-out to live users' brokers.
 First winning trade locks new entries for the rest of the day.
+
+Futures SL: ORB extreme at entry. After +1R, SL moves to cost, then trails
+1:1 with each further favourable futures point (same idea as S3 premium trail /
+GC futures trail). Option ₹ max-loss and 2×range target still apply.
 """
 
 from __future__ import annotations
@@ -73,6 +77,49 @@ class S29Position:
     lot_size: int
     opened_at: str
     order_legs: list[dict[str, Any]] = field(default_factory=list)
+    initial_sl_fut: float = 0.0
+    r_pts: float = 0.0
+    trail_armed: bool = False
+    extreme_fut: float | None = None
+
+
+def _apply_fut_trail(pos: S29Position, fut_ltp: float) -> str | None:
+    """After 1R favourable, move SL to cost then trail 1:1 on futures.
+
+    Long: at extreme >= entry+R → SL = extreme − R (at exactly 1R that is entry).
+    Short: at extreme <= entry−R → SL = extreme + R.
+    Never trail through the futures target (leave a tick of room).
+    """
+    r_pts = float(pos.r_pts or 0.0)
+    if r_pts <= 0:
+        return None
+    note: str | None = None
+    if pos.option_side == "CE":
+        extreme = max(float(pos.extreme_fut or fut_ltp), fut_ltp)
+        pos.extreme_fut = extreme
+        if not pos.trail_armed and extreme >= pos.entry_fut + r_pts:
+            pos.trail_armed = True
+            note = f"1R trail on @ {extreme:.2f} → SL to cost"
+        if pos.trail_armed:
+            new_sl = round(extreme - r_pts, 2)
+            # Cap just below target so TARGET HIT can still book.
+            new_sl = min(new_sl, round(pos.tgt_fut - 0.05, 2))
+            if new_sl > pos.sl_fut + 1e-9:
+                pos.sl_fut = new_sl
+                note = f"trail SL {new_sl:.2f} (ext {extreme:.2f})"
+        return note
+    extreme = min(float(pos.extreme_fut if pos.extreme_fut is not None else fut_ltp), fut_ltp)
+    pos.extreme_fut = extreme
+    if not pos.trail_armed and extreme <= pos.entry_fut - r_pts:
+        pos.trail_armed = True
+        note = f"1R trail on @ {extreme:.2f} → SL to cost"
+    if pos.trail_armed:
+        new_sl = round(extreme + r_pts, 2)
+        new_sl = max(new_sl, round(pos.tgt_fut + 0.05, 2))
+        if new_sl < pos.sl_fut - 1e-9:
+            pos.sl_fut = new_sl
+            note = f"trail SL {new_sl:.2f} (ext {extreme:.2f})"
+    return note
 
 
 @dataclass
@@ -145,7 +192,7 @@ class S29NiftyOrbEngine:
         self._hydrate()
         logger.info(
             "S29 nifty3v4 live | paper=%s mock=%s | OR 09:18-09:21 1m FUT | "
-            "LTP +%.0f pts | ITM fan-out | poll=%.0fs",
+            "LTP +%.0f pts | 1R→cost then 1:1 trail | ITM fan-out | poll=%.0fs",
             self.paper, MOCK_MODE, ENTRY_BUFFER, POLL_SECONDS,
         )
 
@@ -429,6 +476,7 @@ class S29NiftyOrbEngine:
         if premium is not None and qty > 0:
             option_sl = round(premium - (MAX_LOSS_PER_TRADE / qty), 2)
 
+        r_pts = abs(fut_ltp - sl_fut)
         fanout_note = legs_summary(legs)
         pos = S29Position(
             direction=direction,
@@ -445,6 +493,10 @@ class S29NiftyOrbEngine:
             lot_size=self.cfg.lot_size,
             opened_at=now.isoformat(),
             order_legs=legs,
+            initial_sl_fut=sl_fut,
+            r_pts=r_pts,
+            trail_armed=False,
+            extreme_fut=fut_ltp,
         )
         self.state.position = pos
         self.state.trades_today += 1
@@ -452,7 +504,11 @@ class S29NiftyOrbEngine:
             self.state.ce_taken = True
         else:
             self.state.pe_taken = True
-        reason = f"S29 {side} breakout FUT {fut_ltp:.2f} vs {ce_trigger if side == 'CE' else pe_trigger:.2f}"
+        reason = (
+            f"S29 {side} breakout FUT {fut_ltp:.2f} vs "
+            f"{ce_trigger if side == 'CE' else pe_trigger:.2f} "
+            f"SL {sl_fut:.2f} TP {tgt_fut:.2f} 1R={r_pts:.1f}"
+        )
         self.state.signal_log.append(f"{reason} [{fanout_note}]")
         self.state.setup_label = f"S29 {side} @ {fut_ltp:.2f}"
         logger.info("%s [%s]", reason, fanout_note)
@@ -474,6 +530,14 @@ class S29NiftyOrbEngine:
             opt = self._option_ltp(pos)
             self._exit(fut_ltp, opt, "FORCE_EXIT_1525", now)
             return
+
+        trail_note = _apply_fut_trail(pos, fut_ltp)
+        if trail_note:
+            self.state.signal_log.append(trail_note)
+            self.state.signal_log = self.state.signal_log[-20:]
+            if pos.trail_armed:
+                self.state.setup_label = f"S29 {pos.option_side} trail SL {pos.sl_fut:.2f}"
+            logger.info("S29 %s", trail_note)
 
         hit_sl = fut_ltp <= pos.sl_fut if pos.option_side == "CE" else fut_ltp >= pos.sl_fut
         hit_tgt = fut_ltp >= pos.tgt_fut if pos.option_side == "CE" else fut_ltp <= pos.tgt_fut
@@ -594,7 +658,11 @@ class S29NiftyOrbEngine:
                 "direction": s.position.direction,
                 "entry": s.position.entry_fut,
                 "sl": s.position.sl_fut,
+                "initial_sl": s.position.initial_sl_fut,
                 "tp1": s.position.tgt_fut,
+                "r_pts": s.position.r_pts,
+                "trail": "1R" if s.position.trail_armed else "wait",
+                "extreme": s.position.extreme_fut,
                 "lots": s.position.lots,
                 "legs": legs_summary(s.position.order_legs),
             }
