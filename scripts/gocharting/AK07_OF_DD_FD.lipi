@@ -173,5 +173,6 @@ plotshape(sellClose, title="Sell", shape=shape.triangledown, location=location.a
 plot(fib6, title="Fib 0.6", color=color.orange)
 plot(fib7, title="Fib 0.7", color=color.yellow)
 
-alertcondition(buyPulse, title = "AK07 Buy", message = "AK07|OF|BUY|{{ticker}}|{{interval}}")
-alertcondition(sellPulse, title = "AK07 Sell", message = "AK07|OF|SELL|{{ticker}}|{{interval}}")
+// Bake ticker (GC does not expand {{ticker}}). BN needs BANKNIFTY in body or ?index=BANKNIFTY.
+alertcondition(buyPulse, title = "AK07 Buy", message = "AK07|OF|BUY|" + syminfo.ticker + "|5")
+alertcondition(sellPulse, title = "AK07 Sell", message = "AK07|OF|SELL|" + syminfo.ticker + "|5")
