@@ -38,6 +38,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, time as dtime, timedelta
 from pathlib import Path
 from typing import Any, Final
+from urllib.parse import quote
 from zoneinfo import ZoneInfo
 
 import requests
@@ -605,10 +606,15 @@ class UpstoxClient:
         return None
 
     def get_closed_5min_candles(self, instrument_key: str) -> list[dict[str, float]] | None:
-        """Today's completed 5-min candles from V3 intraday. None = legacy payload rejected."""
+        """Today's completed 5-min candles from V3 intraday. None = legacy payload rejected.
+
+        Instrument keys contain ``|`` (e.g. ``NSE_FO|58072``) and must be URL-encoded
+        in the path — otherwise Upstox returns UDAPI100011 Invalid Instrument key.
+        """
         v3_base = self.base_url.replace("/v2", "/v3")
+        key = quote(instrument_key, safe="")
         data = self._get(
-            f"{v3_base}/historical-candle/intraday/{instrument_key}/minutes/{CANDLE_MINUTES}"
+            f"{v3_base}/historical-candle/intraday/{key}/minutes/{CANDLE_MINUTES}"
         )
         return parse_v3_intraday_candles(data, datetime.now(IST))
 

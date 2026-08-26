@@ -490,7 +490,25 @@ class GoChartingOmsEngine:
             return None
         candles = self.client.get_closed_5min_candles(key)
         if not candles:
-            return None
+            # Stale/wrong key after expiry roll — drop cache and resolve once more.
+            self.state.fut_keys.pop(index_code, None)
+            self.state.fut_labels.pop(index_code, None)
+            key = self._ensure_future(index_code)
+            if key:
+                candles = self.client.get_closed_5min_candles(key)
+        if not candles:
+            # Last resort so a candle API blip does not skip a live alert.
+            ltp = self.state.fut_ltp.get(index_code)
+            if ltp is None:
+                return None
+            logger.warning(
+                "GC %s SL fallback to LTP±20 — no closed 5m bar for %s",
+                index_code,
+                key,
+            )
+            if option_side == "CE":
+                return round(float(ltp) - 20.0 - SL_BUFFER_PTS, 2)
+            return round(float(ltp) + 20.0 + SL_BUFFER_PTS, 2)
         bar = candles[-1]
         if option_side == "CE":
             return round(float(bar["low"]) - SL_BUFFER_PTS, 2)
