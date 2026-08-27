@@ -4,9 +4,11 @@ Market data: AK07 Upstox Nifty futures (1-minute OR, then LTP).
 Options: S3 ITM CE/PE pick, fan-out to live users' brokers.
 First winning trade locks new entries for the rest of the day.
 
-Futures SL: ORB extreme at entry. After +1R, SL moves to cost, then trails
-1:1 with each further favourable futures point (same idea as S3 premium trail /
-GC futures trail). Option ₹ max-loss and 2×range target still apply.
+Futures SL: ORB extreme at entry. After +1R favourable move, futures SL moves to
+cost then trails 1:1 (exit if hit). Option side mirrors S3: after +10 premium pts,
+option SL → entry+1 then +1 per further premium peak (exit if hit). Also ₹ max-loss
+floor at entry. Exits on whichever hits first: futures 2×range target, option trail
+SL, or futures trail / ORB SL. Force flat 15:25.
 """
 
 from __future__ import annotations
@@ -59,6 +61,13 @@ DAILY_MAX_LOSS: Final[float] = float(os.environ.get("S29_DAILY_MAX_LOSS", "-4000
 MAX_LOSS_PER_TRADE: Final[float] = float(os.environ.get("S29_MAX_LOSS_PER_TRADE", "1900"))
 POLL_SECONDS: Final[float] = float(os.environ.get("S29_POLL_SECONDS", "3"))
 RANGE_TARGET_MULT: Final[float] = 2.0
+# S3-style option premium trail (same defaults as breakout_engine).
+OPTION_BREAKEVEN_PTS: Final[float] = float(
+    os.environ.get("S29_OPTION_BREAKEVEN_PTS", os.environ.get("BREAKOUT_OPTION_BREAKEVEN_PTS", "10"))
+)
+OPTION_TRAIL_LOCK_PTS: Final[float] = float(
+    os.environ.get("S29_OPTION_TRAIL_LOCK_PTS", os.environ.get("BREAKOUT_OPTION_TRAIL_LOCK_PTS", "1"))
+)
 
 
 @dataclass
@@ -81,6 +90,27 @@ class S29Position:
     r_pts: float = 0.0
     trail_armed: bool = False
     extreme_fut: float | None = None
+    premium_high: float | None = None
+
+
+def _apply_option_trail(pos: S29Position, opt_ltp: float) -> str | None:
+    """S3-style: after +10 premium pts → SL at entry+1, then +1 SL per +1 peak."""
+    if pos.premium_entry is None or pos.option_sl is None:
+        return None
+    if pos.premium_high is None or opt_ltp > pos.premium_high:
+        pos.premium_high = opt_ltp
+    peak_profit = float(pos.premium_high) - float(pos.premium_entry)
+    if peak_profit + 1e-9 < OPTION_BREAKEVEN_PTS:
+        return None
+    steps_beyond = int(peak_profit - OPTION_BREAKEVEN_PTS)
+    new_sl = round(
+        float(pos.premium_entry) + OPTION_TRAIL_LOCK_PTS + max(0, steps_beyond),
+        2,
+    )
+    if new_sl > pos.option_sl + 0.009:
+        pos.option_sl = new_sl
+        return f"opt trail SL {new_sl:.2f} (peak +{peak_profit:.1f})"
+    return None
 
 
 def _apply_fut_trail(pos: S29Position, fut_ltp: float) -> str | None:
@@ -192,8 +222,13 @@ class S29NiftyOrbEngine:
         self._hydrate()
         logger.info(
             "S29 nifty3v4 live | paper=%s mock=%s | OR 09:18-09:21 1m FUT | "
-            "LTP +%.0f pts | 1R→cost then 1:1 trail | ITM fan-out | poll=%.0fs",
-            self.paper, MOCK_MODE, ENTRY_BUFFER, POLL_SECONDS,
+            "LTP +%.0f pts | opt +%.0f→cost+%.0f trail | fut 1R trail | ITM fan-out | poll=%.0fs",
+            self.paper,
+            MOCK_MODE,
+            ENTRY_BUFFER,
+            OPTION_BREAKEVEN_PTS,
+            OPTION_TRAIL_LOCK_PTS,
+            POLL_SECONDS,
         )
 
     def run(self) -> None:
@@ -497,6 +532,7 @@ class S29NiftyOrbEngine:
             r_pts=r_pts,
             trail_armed=False,
             extreme_fut=fut_ltp,
+            premium_high=premium,
         )
         self.state.position = pos
         self.state.trades_today += 1
@@ -531,17 +567,24 @@ class S29NiftyOrbEngine:
             self._exit(fut_ltp, opt, "FORCE_EXIT_1525", now)
             return
 
-        trail_note = _apply_fut_trail(pos, fut_ltp)
-        if trail_note:
+        opt_ltp = self._option_ltp(pos)
+        for trail_note in filter(
+            None,
+            (
+                _apply_option_trail(pos, opt_ltp) if opt_ltp is not None else None,
+                _apply_fut_trail(pos, fut_ltp),
+            ),
+        ):
             self.state.signal_log.append(trail_note)
             self.state.signal_log = self.state.signal_log[-20:]
-            if pos.trail_armed:
-                self.state.setup_label = f"S29 {pos.option_side} trail SL {pos.sl_fut:.2f}"
             logger.info("S29 %s", trail_note)
+        if pos.trail_armed:
+            self.state.setup_label = (
+                f"S29 {pos.option_side} fut SL {pos.sl_fut:.2f} opt SL {pos.option_sl}"
+            )
 
         hit_sl = fut_ltp <= pos.sl_fut if pos.option_side == "CE" else fut_ltp >= pos.sl_fut
         hit_tgt = fut_ltp >= pos.tgt_fut if pos.option_side == "CE" else fut_ltp <= pos.tgt_fut
-        opt_ltp = self._option_ltp(pos)
         hit_opt_sl = (
             pos.option_sl is not None
             and opt_ltp is not None
@@ -550,7 +593,12 @@ class S29NiftyOrbEngine:
         if hit_tgt:
             self._exit(fut_ltp, opt_ltp, "TARGET HIT", now)
         elif hit_opt_sl:
-            self._exit(fut_ltp, opt_ltp, "MAX LOSS HIT", now)
+            trailed = (
+                pos.premium_entry is not None
+                and pos.premium_high is not None
+                and float(pos.premium_high) - float(pos.premium_entry) >= OPTION_BREAKEVEN_PTS
+            )
+            self._exit(fut_ltp, opt_ltp, "OPT TRAIL SL" if trailed else "MAX LOSS HIT", now)
         elif hit_sl:
             self._exit(fut_ltp, opt_ltp, "SL HIT", now)
 
@@ -663,6 +711,8 @@ class S29NiftyOrbEngine:
                 "r_pts": s.position.r_pts,
                 "trail": "1R" if s.position.trail_armed else "wait",
                 "extreme": s.position.extreme_fut,
+                "option_sl": s.position.option_sl,
+                "premium_high": s.position.premium_high,
                 "lots": s.position.lots,
                 "legs": legs_summary(s.position.order_legs),
             }
