@@ -123,12 +123,22 @@ def broker_connection_status(username: str, role: str = "user") -> dict[str, Any
                 timeout=12,
             )
     except requests.RequestException as exc:
+        detail = f"Connection error: {exc}"
+        egress = resolve_egress_ip(username)
+        if egress and ("502" in str(exc) or "ProxyError" in type(exc).__name__):
+            proxy = session.proxies.get("https") or session.proxies.get("http") or "?"
+            detail = (
+                f"Egress proxy failed ({proxy}) for IP {egress} — "
+                f"run on host: systemctl status ak07-egress-proxy; "
+                f"python3 scripts/diagnose_egress_proxy.py --user {username}. "
+                f"Raw: {exc}"
+            )
         return _result(
             username=username,
             broker=broker,
             connected=False,
             updated_today=updated_today,
-            detail=f"Connection error: {exc}",
+            detail=detail,
         )
 
     connected = response.status_code == 200

@@ -173,6 +173,9 @@ plotshape(sellClose, title="Sell", shape=shape.triangledown, location=location.a
 plot(fib6, title="Fib 0.6", color=color.orange)
 plot(fib7, title="Fib 0.7", color=color.yellow)
 
-// Bake ticker (GC does not expand {{ticker}}). BN needs BANKNIFTY in body or ?index=BANKNIFTY.
-alertcondition(buyPulse, title = "AK07 Buy", message = "AK07|OF|BUY|" + syminfo.ticker + "|5")
-alertcondition(sellPulse, title = "AK07 Sell", message = "AK07|OF|SELL|" + syminfo.ticker + "|5")
+// Lipi alertcondition message must be const string (no syminfo concat). Pick the
+// Nifty or BN alert on each chart — only the matching isBN branch ever fires.
+alertcondition(buyPulse and isBN, title = "AK07 Buy BN", message = "AK07|OF|BUY|BANKNIFTY-I|5")
+alertcondition(buyPulse and not isBN, title = "AK07 Buy Nifty", message = "AK07|OF|BUY|NIFTY-I|5")
+alertcondition(sellPulse and isBN, title = "AK07 Sell BN", message = "AK07|OF|SELL|BANKNIFTY-I|5")
+alertcondition(sellPulse and not isBN, title = "AK07 Sell Nifty", message = "AK07|OF|SELL|NIFTY-I|5")

@@ -46,6 +46,32 @@ Re-open the tunnel only if GoCharting logged out or a tab left 5m:
 
 Login cookies live in the `ak07_gc_browser` volume, so a restart usually restores the session.
 
+## Blank / black screen (Selkies)
+
+The linuxserver Chromium image uses **Selkies** (not old noVNC). Rules:
+
+1. **Use HTTPS port 3001** — `http://…:3000` shows *"only accessible over HTTPS"*.
+2. **Accept the self-signed cert** in Chrome: Advanced → Proceed to site.
+3. **Set a password** in server `.env` (required for Selkies auth):
+   ```
+   GC_BROWSER_USER=ak07
+   GC_BROWSER_PASSWORD=<long random password>
+   ```
+   Then: `docker compose -p ak07 -f configs/docker-compose.yml up -d gc_browser`
+4. **Use Chrome or Edge** on desktop — Firefox Android lacks WebCodecs (stuck/black).
+5. If Selkies sidebar shows but desktop is **black**, restart the container:
+   ```
+   cd ~/volume-order-block
+   docker compose -p ak07 -f configs/docker-compose.yml logs gc_browser --tail 50
+   docker compose -p ak07 -f configs/docker-compose.yml restart gc_browser
+   ```
+   Wait ~30s, hard-refresh `https://YOUR_IP:3001` (Ctrl+Shift+R).
+6. Still black after restart — recreate container (keeps cookies in volume):
+   ```
+   docker compose -p ak07 -f configs/docker-compose.yml pull gc_browser
+   docker compose -p ak07 -f configs/docker-compose.yml up -d --force-recreate gc_browser
+   ```
+
 ## Live webhook
 OMS path: `POST https://ak07.in/api/gocharting/alert?token=<AK07_GC_WEBHOOK_SECRET>`
 
