@@ -18,6 +18,20 @@ python scripts/run_mock_cockpit.py
 
 This sets `AK07_MOCK=1`, uses in-process `fakeredis`, and seeds simulated market data on every dashboard refresh.
 
+## OrderFlowMap (Upstox live heatmap)
+
+Bookmap-style UI via **Upstox `full` feed** (no OpenAlgo). See `scripts/orderflow/SETUP_OFMAP.md`.
+
+```bash
+# server
+git pull origin AK07-Model
+python3 scripts/orderflow/upstox_ofmap_bridge.py --host 0.0.0.0 --port 8766 --user AK07 --api-key ak07 &
+python3 -m http.server 7890 --directory scripts/orderflow/OrderFlowMap &
+# UI http://SERVER:7890  → Live → ws://127.0.0.1:8766  key ak07  symbol NIFTY  exchange NFO
+```
+
+Port **8766** = OFMap bridge (keep **8765** for MCP).
+
 ## Local live-paper stack
 
 ```powershell
@@ -120,6 +134,45 @@ docker compose -p ak07 -f configs/docker-compose.yml exec api \
 Expected output: `https://ak07.in/api/brokers/kite/callback`
 
 If login opens but callback fails, check `docker compose -p ak07 -f configs/docker-compose.yml logs api` and confirm the redirect URL in the Kite app matches exactly.
+
+### SEBI egress proxy (502 Bad Gateway on Kite/Upstox/Groww)
+
+Users with a dedicated **`egress_ip`** in Admin → Users send broker API calls through a host-side CONNECT proxy (`scripts/egress_bind_proxy.py`). If the proxy is down or the secondary IP is missing from the host, you see:
+
+`ProxyError … Tunnel connection failed: 502 Bad Gateway`
+
+**On the server:**
+
+```bash
+cd ~/volume-order-block
+
+# 1. Diagnose (from host or api container)
+python3 scripts/diagnose_egress_proxy.py
+python3 scripts/diagnose_egress_proxy.py --user Kesavulu
+
+# 2. Egress proxy systemd units (one per secondary IP)
+systemctl status ak07-egress-proxy ak07-egress-proxy-95
+systemctl restart ak07-egress-proxy ak07-egress-proxy-95
+
+# 3. Secondary IPs must exist on eth0
+ip -4 addr | grep -E '65.109.255.239|95.216.179.8'
+
+# 4. Test proxy tunnel from host
+curl -v -x http://127.0.0.1:18901 https://api.kite.trade/
+
+# 5. Docker bridge gateway must match .env (usually 172.19.0.1)
+ip -4 addr | grep br-
+grep EGRESS ~/volume-order-block/.env
+```
+
+**`.env` on server (example):**
+
+```env
+AK07_EGRESS_PROXY=http://172.19.0.1:18901
+AK07_EGRESS_PROXY_MAP=65.109.255.239=http://172.19.0.1:18901,95.216.179.8=http://172.19.0.1:18902
+```
+
+**Quick workaround** (if secondary IP is not on this VPS): Admin → Users → clear **Egress IP** for that user so they use the primary IP (only if SEBI allows).
 
 ### Groww Trade API (order placement)
 
