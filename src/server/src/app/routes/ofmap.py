@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, RedirectResponse
+from fastapi.responses import FileResponse, RedirectResponse, Response
 
 from app.services.ofmap_bridge import (
     handle_ofmap_client,
@@ -17,12 +17,27 @@ logger = logging.getLogger("ak07.ofmap")
 router = APIRouter(tags=["ofmap"])
 
 
+def _index_response() -> Response:
+    path = ofmap_static_dir() / "index.html"
+    if not path.is_file():
+        return Response(
+            content=(
+                '{"error":"OrderFlowMap index.html missing",'
+                f'"path":"{path.as_posix()}"}'
+            ),
+            status_code=404,
+            media_type="application/json",
+        )
+    return FileResponse(path, media_type="text/html")
+
+
 @router.get("/api/ofmap/health")
 async def ofmap_health():
     static = ofmap_static_dir()
     return {
         "ok": True,
-        "ui": "/ofmap/",
+        "ui": "/api/ofmap/",
+        "ui_alt": "/ofmap/",
         "ws": "/api/ofmap/ws",
         "static_exists": (static / "index.html").is_file(),
     }
@@ -43,14 +58,23 @@ async def ofmap_ws(websocket: WebSocket) -> None:
             pass
 
 
+# UI under /api/ofmap/ — works with existing nginx location /api/ (no extra nginx block).
+@router.get("/api/ofmap")
+async def ofmap_api_redirect():
+    return RedirectResponse(url="/api/ofmap/", status_code=307)
+
+
+@router.get("/api/ofmap/")
+async def ofmap_api_index():
+    return _index_response()
+
+
+# Also keep /ofmap/ once host nginx proxies it (see host-nginx-ak07.conf.example).
 @router.get("/ofmap")
 async def ofmap_redirect():
-    return RedirectResponse(url="/ofmap/", status_code=307)
+    return RedirectResponse(url="/api/ofmap/", status_code=307)
 
 
 @router.get("/ofmap/")
 async def ofmap_index():
-    path = ofmap_static_dir() / "index.html"
-    if not path.is_file():
-        return {"error": "OrderFlowMap index.html missing", "path": str(path)}
-    return FileResponse(path, media_type="text/html")
+    return _index_response()

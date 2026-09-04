@@ -6,7 +6,9 @@
 2. Update host nginx from `configs/host-nginx-ak07.conf.example` (needs `/ofmap/` + WS upgrade on `/api/`).
 3. Open:
 
-**https://ak07.in/ofmap/**
+**https://ak07.in/api/ofmap/**
+
+(also `/ofmap/` if nginx is updated — `/api/ofmap/` works with existing `/api/` proxy)
 
 4. Click **Live** → **Connect**  
    - WS URL auto-fills: `wss://ak07.in/api/ofmap/ws`  

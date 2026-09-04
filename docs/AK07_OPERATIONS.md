@@ -20,10 +20,11 @@ This sets `AK07_MOCK=1`, uses in-process `fakeredis`, and seeds simulated market
 
 ## OrderFlowMap (Upstox live heatmap)
 
-**Production:** https://ak07.in/ofmap/ → Live → Connect  
+**Production:** https://ak07.in/api/ofmap/ → Live → Connect  
 WS: `wss://ak07.in/api/ofmap/ws` (uses server Upstox token — no local IP).
 
-Requires nginx `/ofmap/` + WS upgrade on `/api/` (see `configs/host-nginx-ak07.conf.example`).  
+Works under existing nginx `/api/` proxy (no extra location required).  
+Optional pretty URL `/ofmap/` if you add that block from `configs/host-nginx-ak07.conf.example`.  
 Details: `scripts/orderflow/SETUP_OFMAP.md`.
 
 ```bash

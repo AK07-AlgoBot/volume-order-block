@@ -1031,7 +1031,8 @@ function clearAllData(){
 function defaultOfmapWsUrl(){
   try{
     const host = location.hostname || '127.0.0.1';
-    if(location.pathname.indexOf('/ofmap') === 0 || host.indexOf('ak07.in') >= 0){
+    const path = location.pathname || '';
+    if(path.indexOf('/ofmap') === 0 || path.indexOf('/api/ofmap') === 0 || host.indexOf('ak07.in') >= 0){
       const p = location.protocol === 'https:' ? 'wss:' : 'ws:';
       return p + '//' + location.host + '/api/ofmap/ws';
     }
