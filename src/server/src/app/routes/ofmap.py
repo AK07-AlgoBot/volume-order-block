@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
@@ -20,11 +21,13 @@ router = APIRouter(tags=["ofmap"])
 def _index_response() -> Response:
     path = ofmap_static_dir() / "index.html"
     if not path.is_file():
+        body = (
+            '{"error":"OrderFlowMap index.html missing","path":'
+            + json.dumps(path.as_posix())
+            + "}"
+        )
         return Response(
-            content=(
-                '{"error":"OrderFlowMap index.html missing",'
-                f'"path":"{path.as_posix()}"}'
-            ),
+            content=body,
             status_code=404,
             media_type="application/json",
         )
