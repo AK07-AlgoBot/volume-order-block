@@ -16,6 +16,7 @@ from app.routes import (
     gocharting_webhook,
     groww_token,
     kite_oauth,
+    ofmap,
     settings_credentials,
     settings_upstox,
     upstox_notifier,
@@ -49,6 +50,7 @@ app.include_router(settings_upstox.router)
 app.include_router(settings_credentials.router)
 app.include_router(upstox_notifier.router)
 app.include_router(gocharting_webhook.router)
+app.include_router(ofmap.router)
 
 
 @app.get("/api/health")

@@ -254,18 +254,18 @@
           </div>
           <div id="livePanel" style="display:none">
             <div class="row"><label>WS URL</label></div>
-            <div class="row"><input type="text" id="wsUrl" value="ws://127.0.0.1:8766" class="conn-input"></div>
+            <div class="row"><input type="text" id="wsUrl" value="" placeholder="auto: /api/ofmap/ws on ak07.in" class="conn-input"></div>
             <div class="row"><label>API Key</label></div>
-            <div class="row"><input type="password" id="apiKey" placeholder="AK07 bridge key (default: ak07)" class="conn-input"></div>
+            <div class="row"><input type="password" id="apiKey" value="ak07" placeholder="optional on ak07.in" class="conn-input"></div>
             <div class="row">
               <label>Symbol</label>
-              <input type="text" id="wsSymbol" value="RELIANCE" class="conn-input" style="width:90px;flex:none">
+              <input type="text" id="wsSymbol" value="NIFTY" class="conn-input" style="width:90px;flex:none">
             </div>
             <div class="row">
               <label>Exchange</label>
               <select class="btn" id="wsExchange" style="flex:1">
-                <option value="NSE" selected>NSE</option>
-                <option value="NFO">NFO</option>
+                <option value="NSE">NSE</option>
+                <option value="NFO" selected>NFO</option>
                 <option value="BSE">BSE</option>
                 <option value="BFO">BFO</option>
                 <option value="MCX">MCX</option>
@@ -444,7 +444,7 @@
    =====================================================================
    Modes:
      SIMULATE — synthetic NIFTY data with sweep/iceberg events
-     LIVE     — WebSocket to OpenAlgo (ZMQ proxy) at ws://127.0.0.1:8766
+     LIVE     — WebSocket to AK07 Upstox bridge (/api/ofmap/ws on ak07.in)
    Data arrays:
      bars[]    : per-second {time, mid, bbid, bask, vwap}
      depth[]   : per-second L2 snapshot {time, bids[5], asks[5]}
@@ -1028,14 +1028,28 @@ function clearAllData(){
   heatmap.requestUpdate();
 }
 
+function defaultOfmapWsUrl(){
+  try{
+    const host = location.hostname || '127.0.0.1';
+    if(location.pathname.indexOf('/ofmap') === 0 || host.indexOf('ak07.in') >= 0){
+      const p = location.protocol === 'https:' ? 'wss:' : 'ws:';
+      return p + '//' + location.host + '/api/ofmap/ws';
+    }
+  }catch(e){}
+  return 'ws://127.0.0.1:8766';
+}
 function connectLive(){
-  const url = document.getElementById('wsUrl').value.trim();
-  const apiKey = document.getElementById('apiKey').value.trim();
+  let url = document.getElementById('wsUrl').value.trim();
+  if(!url){
+    url = defaultOfmapWsUrl();
+    document.getElementById('wsUrl').value = url;
+  }
+  let apiKey = document.getElementById('apiKey').value.trim();
+  if(!apiKey) apiKey = 'ak07';
   const symbol = document.getElementById('wsSymbol').value.trim().toUpperCase();
   const exchange = document.getElementById('wsExchange').value;
 
   if(!url){ connLog('URL required','err'); return; }
-  if(!apiKey){ connLog('API key required','err'); return; }
   if(!symbol){ connLog('Symbol required','err'); return; }
 
   // Update tick size from user input
@@ -1613,6 +1627,7 @@ document.getElementById('resetBtn').addEventListener('click',()=>{
 // Mode switching
 document.getElementById('modeSimBtn').addEventListener('click', ()=>switchMode('sim'));
 document.getElementById('modeLiveBtn').addEventListener('click', ()=>switchMode('live'));
+document.getElementById('wsUrl').value = defaultOfmapWsUrl();
 
 // Connect/Disconnect
 document.getElementById('connectBtn').addEventListener('click', ()=>{

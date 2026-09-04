@@ -20,17 +20,18 @@ This sets `AK07_MOCK=1`, uses in-process `fakeredis`, and seeds simulated market
 
 ## OrderFlowMap (Upstox live heatmap)
 
-Bookmap-style UI via **Upstox `full` feed** (no OpenAlgo). See `scripts/orderflow/SETUP_OFMAP.md`.
+**Production:** https://ak07.in/ofmap/ → Live → Connect  
+WS: `wss://ak07.in/api/ofmap/ws` (uses server Upstox token — no local IP).
+
+Requires nginx `/ofmap/` + WS upgrade on `/api/` (see `configs/host-nginx-ak07.conf.example`).  
+Details: `scripts/orderflow/SETUP_OFMAP.md`.
 
 ```bash
-# server
 git pull origin AK07-Model
-python3 scripts/orderflow/upstox_ofmap_bridge.py --host 0.0.0.0 --port 8766 --user AK07 --api-key ak07 &
-python3 -m http.server 7890 --directory scripts/orderflow/OrderFlowMap &
-# UI http://SERVER:7890  → Live → ws://127.0.0.1:8766  key ak07  symbol NIFTY  exchange NFO
+docker compose -p ak07 -f configs/docker-compose.yml up -d --build api
+# update nginx from configs/host-nginx-ak07.conf.example, then:
+sudo nginx -t && sudo systemctl reload nginx
 ```
-
-Port **8766** = OFMap bridge (keep **8765** for MCP).
 
 ## Local live-paper stack
 
