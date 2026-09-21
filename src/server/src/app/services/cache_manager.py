@@ -51,6 +51,8 @@ CHOCH_SESSION_KEY_TEMPLATE: Final[str] = "ak07:choch_session:{day}"
 GAMMA_STATE_KEY: Final[str] = "ak07:gamma_state"
 GAMMA_HEARTBEAT_KEY: Final[str] = "ak07:gamma_heartbeat"
 GAMMA_BACKTEST_KEY: Final[str] = "ak07:gamma_backtest_summary"
+OFTRAP_STATE_KEY_TEMPLATE: Final[str] = "ak07:oftrap_state:{symbol}"
+OFTRAP_EVENTS_KEY: Final[str] = "ak07:oftrap_events"
 TRADE_LOG_KEY_TEMPLATE: Final[str] = "ak07:trade_log:{day}"
 
 LIVE_STATE_TTL_SECONDS: Final[int] = 300

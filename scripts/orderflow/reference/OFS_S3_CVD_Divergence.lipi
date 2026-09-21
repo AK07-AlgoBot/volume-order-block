@@ -1,0 +1,68 @@
+indicator("OFS S3 CVD Divergence", overlay = true)
+
+// KEPT REFERENCE STRATEGY (promoted 2026-09-15) - GoCharting Lipi, bar-level.
+// Cumulative-delta (CVD) divergence: last-N delta sum vs a fresh price extreme.
+// Price makes a fresh extreme that the recent flow does NOT confirm -> reversal.
+//   BUY  = fresh LOW  + CVD meaningfully HIGHER than N bars ago + green + delta flips +.
+//   SELL = fresh HIGH + CVD meaningfully LOWER  than N bars ago + red   + delta flips -.
+//
+// Noise filters (added when promoted, to keep it selective):
+//   1. minCvdGap  - the CVD higher-low / lower-high must clear a magnitude, not
+//                   just be marginally different (kills the "too many signals" spray).
+//   2. delta flip - the signal bar's own delta must agree (d>0 buy / d<0 sell).
+//   3. pressure   - buy/sell volume must dominate on the bar.
+// 5m NIFTY-I / BANKNIFTY-I footprint. Confirms on bar close. No broker orders.
+
+lookN = input(6, title = "Divergence lookback (bars)")
+minCvdGapAbs = input(200.0, title = "Min CVD divergence gap (Nifty; BN auto x2)")
+pressRatio = input(1.2, title = "Buy/Sell pressure ratio to confirm")
+needPress = input(true, title = "Require buy/sell pressure confirm")
+useSess = input(true, title = "Only signal 09:15-15:30")
+
+d = orderflow.delta
+buyV = orderflow.buyvolume
+sellV = orderflow.sellvolume
+bull = close > open
+bear = close < open
+tick = 0.05
+isBN = close > 40000
+minGap = isBN ? minCvdGapAbs * 2.0 : minCvdGapAbs
+inSess = not useSess or (hour == 9 and minute >= 15) or (hour > 9 and hour < 15) or (hour == 15 and minute <= 30)
+
+// Fresh price extreme vs the prior lookN bars.
+freshLo = low < talib.lowest(low[1], lookN)
+freshHi = high > talib.highest(high[1], lookN)
+
+// CVD slope over lookN bars = sum of the last lookN deltas.
+// Same as (session CVD now) - (session CVD lookN ago) when both bars are
+// the same session. Avoids the 80-bar orderflow.delta scan that made Apply hang.
+sameSess = dayofweek[lookN] == dayofweek
+gap = talib.sma(d, lookN) * lookN
+cvdHigherLo = sameSess and gap >= minGap
+cvdLowerHi = sameSess and gap <= -minGap
+
+// Buy/sell pressure (filter 3).
+buyPress = sellV <= 0.0 ? buyV > 0.0 : buyV >= sellV * pressRatio
+sellPress = buyV <= 0.0 ? sellV > 0.0 : sellV >= buyV * pressRatio
+pressOkLong = not needPress or buyPress
+pressOkShort = not needPress or sellPress
+
+// Signal = divergence + fresh extreme + delta flip (filter 2) + pressure.
+buyDiv = inSess and freshLo and cvdHigherLo and bull and d > 0.0 and pressOkLong
+sellDiv = inSess and freshHi and cvdLowerHi and bear and d < 0.0 and pressOkShort
+conflict = buyDiv and sellDiv
+buySig = buyDiv and not conflict
+sellSig = sellDiv and not conflict
+
+buyClose = buySig[1]
+sellClose = sellSig[1]
+buyPulse = buyClose and not buyClose[1]
+sellPulse = sellClose and not sellClose[1]
+
+plotshape(buyClose, title = "Buy", shape = shape.triangleup, location = location.belowbar, color = color.lime, offset = -1, size = size.large, text = "BUY")
+plotshape(sellClose, title = "Sell", shape = shape.triangledown, location = location.abovebar, color = color.red, offset = -1, size = size.large, text = "SELL")
+
+alertcondition(buyPulse and isBN, title = "S3 Buy BN", message = "OFS|S3|BUY|BANKNIFTY-I|5")
+alertcondition(buyPulse and not isBN, title = "S3 Buy Nifty", message = "OFS|S3|BUY|NIFTY-I|5")
+alertcondition(sellPulse and isBN, title = "S3 Sell BN", message = "OFS|S3|SELL|BANKNIFTY-I|5")
+alertcondition(sellPulse and not isBN, title = "S3 Sell Nifty", message = "OFS|S3|SELL|NIFTY-I|5")

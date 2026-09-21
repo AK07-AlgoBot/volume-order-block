@@ -417,6 +417,70 @@ def render_gc_strategy_panel() -> None:
                 st.markdown(f'<p class="ak07-signal-line">{line}</p>', unsafe_allow_html=True)
 
 
+def render_oftrap_panel() -> None:
+    """Orderflow Absorption-Trap — live footprint reconstructed from Upstox full feed.
+
+    Paper / compare-vs-GoCharting only. Mirrors `OFS_Absorption_Trap.lipi`:
+      S = selling absorption at a low · B = buying absorption at a high ·
+      TRAP BUY/SELL = the signal (opposite absorption after a move to the extreme).
+    """
+    from app.ui.styles import strategy_card_header
+
+    st.markdown(
+        strategy_card_header("OF Trap · Absorption", "Upstox live footprint · S/B + TRAP · paper vs GoCharting"),
+        unsafe_allow_html=True,
+    )
+
+    symbols = [s.strip().upper() for s in (os.environ.get("OFTRAP_SYMBOLS") or "NIFTY,BANKNIFTY").split(",") if s.strip()]
+    states = {}
+    for sym in symbols:
+        s = cache_manager.get_json(cache_manager.OFTRAP_STATE_KEY_TEMPLATE.format(symbol=sym))
+        if s:
+            states[sym] = s
+    events = cache_manager.get_json(cache_manager.OFTRAP_EVENTS_KEY) or []
+
+    if not states and not events:
+        st.caption("OF Trap engine offline — start the `oftrap_engine` service (profile `oftrap`).")
+        return
+
+    tabs = st.tabs(list(states.keys())) if len(states) > 1 else None
+    items = list(states.items())
+    for i, (sym, s) in enumerate(items):
+        ctx = tabs[i] if tabs else st.container()
+        with ctx:
+            if not tabs and len(items) == 1:
+                pass
+            delta = s.get("delta", 0)
+            flag = "TRAP SELL" if s.get("trap_sell") else ("TRAP BUY" if s.get("trap_buy") else (
+                "SELL ABS (S)" if s.get("sell_abs") else ("BUY ABS (B)" if s.get("buy_abs") else "—")))
+            c1, c2, c3, c4, c5 = st.columns(5)
+            c1.metric(f"{sym} · last 5m", str(s.get("time") or "—"))
+            c2.metric("Close", fmt(s.get("close")))
+            c3.metric("Delta", f"{delta:+,}")
+            c4.metric("Buy / Sell vol", f"{s.get('buy_vol', 0):,} / {s.get('sell_vol', 0):,}")
+            c5.metric("Signal", flag)
+            updated = str(s.get("updated", ""))[:19].replace("T", " ")
+            st.caption(f"O {fmt(s.get('open'))} · H {fmt(s.get('high'))} · L {fmt(s.get('low'))} · vol {s.get('volume', 0):,} · updated {updated}")
+
+    if events:
+        with st.expander("Recent absorption / trap events", expanded=True):
+            for ev in reversed(events[-15:]):
+                kind = str(ev.get("kind") or "")
+                label = {
+                    "TRAP_BUY": "🟢 TRAP BUY",
+                    "TRAP_SELL": "🔴 TRAP SELL",
+                    "S": "🔴 S · sell absorbed",
+                    "B": "🟢 B · buy absorbed",
+                }.get(kind, kind)
+                line = (
+                    f'{ev.get("time","")} · {ev.get("symbol","")} · {label} · '
+                    f'{fmt(ev.get("price"))} (Δ {ev.get("delta",0):+,}) — {ev.get("detail","")}'
+                )
+                st.markdown(f'<p class="ak07-signal-line">{line}</p>', unsafe_allow_html=True)
+
+    st.caption("Reconstructed from Upstox `full` feed (Lee-Ready aggressor). Approximation — compare against GoCharting footprint.")
+
+
 def render_copy_kite_panel() -> None:
     """Leader Kite fills → live fan-out via Upstox OMS."""
     from app.ui.styles import strategy_card_header
@@ -867,6 +931,11 @@ def _render_strategy_sections() -> None:
     if user_can_view_strategy(STRATEGY_COPY_KITE):
         with st.container(border=True, key="ak07_copy_kite"):
             render_copy_kite_panel()
+
+    # Orderflow Absorption-Trap — research/compare tool (admin only, paper).
+    if auth_session.is_admin():
+        with st.container(border=True, key="ak07_oftrap"):
+            render_oftrap_panel()
 
     if user_can_view_strategy(STRATEGY_GAMMA) and tabbed_codes:
         with st.container(border=True, key="ak07_gamma"):

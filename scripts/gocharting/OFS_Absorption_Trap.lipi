@@ -1,0 +1,115 @@
+indicator("OFS Absorption Trap", overlay = true)
+
+// Bar-level clone of the red/green absorption bubbles + the trap sequence.
+// Lipi cannot plot per-price footprint rows (those nested circles on each
+// cluster cell). Same idea, one bubble at the bar's low / high, sized by
+// how hard the tape pushed.
+//
+// RED  at the LOW  = selling absorption. Aggressive sellers hit, price
+//                    rejects the low / closes up. Buyers ate the selling.
+// GREEN at the HIGH = buying absorption. Aggressive buyers lift, price
+//                    rejects the high / closes down. Sellers ate the buying.
+// TRAP SHORT = selling was absorbed earlier today, price ran toward the
+//              day high, NOW buying is being absorbed = longs trapped.
+// TRAP LONG  = the mirror.
+//
+// 5m NIFTY-I / BANKNIFTY-I footprint. Bubbles live; trap confirms on close.
+
+lookN = input(5, title = "Local extreme lookback (bars)")
+imbRatio = input(1.25, title = "Buy/Sell volume ratio")
+wickMin = input(0.28, title = "Min rejection wick fraction")
+volMult = input(0.9, title = "Min volume vs SMA")
+volSmaLen = input(20, title = "Volume SMA length")
+dFloorNifty = input(180.0, title = "Min |delta| for bigger bubble (Nifty; BN x2)")
+locTolPts = input(35.0, title = "Near day H/L / local extreme (pts)")
+awayPtsNifty = input(40.0, title = "Min rally/drop before trap (Nifty; BN x2)")
+needMismatch = input(true, title = "Require delta vs close mismatch")
+useSess = input(true, title = "Only 09:15-15:30")
+
+d = orderflow.delta
+buyV = orderflow.buyvolume
+sellV = orderflow.sellvolume
+bull = close > open
+bear = close < open
+tick = 0.05
+rng = math.max(high - low, tick)
+isBN = close > 40000
+dFloor = isBN ? dFloorNifty * 2.0 : dFloorNifty
+locTol = isBN ? locTolPts * 4.0 : locTolPts
+awayPts = isBN ? awayPtsNifty * 2.0 : awayPtsNifty
+inSess = not useSess or (hour == 9 and minute >= 15) or (hour > 9 and hour < 15) or (hour == 15 and minute <= 30)
+
+lowerWick = (math.min(open, close) - low) / rng
+upperWick = (high - math.max(open, close)) / rng
+volSma = talib.sma(volume, volSmaLen)
+volOk = volume >= volSma * volMult
+
+// Local extreme (cheap talib, no orderflow history scan).
+locLo = low <= talib.lowest(low, lookN) + locTol
+locHi = high >= talib.highest(high, lookN) - locTol
+
+// Textbook absorption: effort one way, result the other.
+// Sell abs: sellers dominate the tape, bar still holds / closes up.
+sellDom = sellV >= buyV * imbRatio or d < 0.0
+buyDom = buyV >= sellV * imbRatio or d > 0.0
+mismatchUp = d < 0.0 and (bull or close >= (high + low) / 2.0)
+mismatchDn = d > 0.0 and (bear or close <= (high + low) / 2.0)
+rejectLo = lowerWick >= wickMin
+rejectHi = upperWick >= wickMin
+
+sellAbsRaw = sellDom and rejectLo and locLo and volOk and (not needMismatch or mismatchUp)
+buyAbsRaw = buyDom and rejectHi and locHi and volOk and (not needMismatch or mismatchDn)
+sellAbs = inSess and sellAbsRaw
+buyAbs = inSess and buyAbsRaw
+
+// Strength → one extra bubble when delta/volume is large.
+dAbs = math.abs(d)
+volX = volume / math.max(volSma, 1.0)
+strong = dAbs >= dFloor or volX >= 1.4
+
+// Recent H/L (1 hour of 5m) — talib only, no history loop (loops hang Apply).
+sessHi = talib.highest(high, 12)
+sessLo = talib.lowest(low, 12)
+nearHi = high >= sessHi - locTol
+nearLo = low <= sessLo + locTol
+movedUp = close - sessLo >= awayPts
+movedDn = sessHi - close >= awayPts
+
+// Prior absorption in the last hour, unrolled (same session only).
+s1 = dayofweek[1] == dayofweek
+s2 = dayofweek[2] == dayofweek
+s3 = dayofweek[3] == dayofweek
+s4 = dayofweek[4] == dayofweek
+s5 = dayofweek[5] == dayofweek
+s6 = dayofweek[6] == dayofweek
+s7 = dayofweek[7] == dayofweek
+s8 = dayofweek[8] == dayofweek
+s9 = dayofweek[9] == dayofweek
+s10 = dayofweek[10] == dayofweek
+s11 = dayofweek[11] == dayofweek
+s12 = dayofweek[12] == dayofweek
+seenSellAbs = (s1 and sellAbs[1]) or (s2 and sellAbs[2]) or (s3 and sellAbs[3]) or (s4 and sellAbs[4]) or (s5 and sellAbs[5]) or (s6 and sellAbs[6]) or (s7 and sellAbs[7]) or (s8 and sellAbs[8]) or (s9 and sellAbs[9]) or (s10 and sellAbs[10]) or (s11 and sellAbs[11]) or (s12 and sellAbs[12])
+seenBuyAbs = (s1 and buyAbs[1]) or (s2 and buyAbs[2]) or (s3 and buyAbs[3]) or (s4 and buyAbs[4]) or (s5 and buyAbs[5]) or (s6 and buyAbs[6]) or (s7 and buyAbs[7]) or (s8 and buyAbs[8]) or (s9 and buyAbs[9]) or (s10 and buyAbs[10]) or (s11 and buyAbs[11]) or (s12 and buyAbs[12])
+
+// The trap: opposite absorption after the move to the other extreme.
+trapShort = inSess and seenSellAbs and buyAbs and nearHi and movedUp
+trapLong = inSess and seenBuyAbs and sellAbs and nearLo and movedDn
+conflict = trapShort and trapLong
+trapS = trapShort and not conflict
+trapL = trapLong and not conflict
+trapSClose = trapS[1]
+trapLClose = trapL[1]
+trapSPulse = trapSClose and not trapSClose[1]
+trapLPulse = trapLClose and not trapLClose[1]
+
+plotshape(sellAbs, title = "Sell abs", shape = shape.circle, location = location.belowbar, color = color.red, size = size.small, text = "S")
+plotshape(sellAbs and strong, title = "Sell abs strong", shape = shape.circle, location = location.belowbar, color = color.red, size = size.large, text = "S")
+plotshape(buyAbs, title = "Buy abs", shape = shape.circle, location = location.abovebar, color = color.lime, size = size.small, text = "B")
+plotshape(buyAbs and strong, title = "Buy abs strong", shape = shape.circle, location = location.abovebar, color = color.lime, size = size.large, text = "B")
+plotshape(trapLClose, title = "Trap long", shape = shape.triangleup, location = location.belowbar, color = color.lime, offset = -1, size = size.large, text = "TRAP")
+plotshape(trapSClose, title = "Trap short", shape = shape.triangledown, location = location.abovebar, color = color.red, offset = -1, size = size.large, text = "TRAP")
+
+alertcondition(trapLPulse and isBN, title = "Trap Long BN", message = "OFS|TRAP|BUY|BANKNIFTY-I|5")
+alertcondition(trapLPulse and not isBN, title = "Trap Long Nifty", message = "OFS|TRAP|BUY|NIFTY-I|5")
+alertcondition(trapSPulse and isBN, title = "Trap Short BN", message = "OFS|TRAP|SELL|BANKNIFTY-I|5")
+alertcondition(trapSPulse and not isBN, title = "Trap Short Nifty", message = "OFS|TRAP|SELL|NIFTY-I|5")
