@@ -483,15 +483,23 @@ def render_oftrap_panel() -> None:
     pos = trade.get("position") if isinstance(trade, dict) else None
     st.markdown("##### OF Trap — Option trade (same 5m candle)")
     if pos:
-        t1, t2, t3, t4, t5 = st.columns(5)
+        t1, t2, t3, t4, t5, t6 = st.columns(6)
         t1.metric("Setup", f"{pos.get('kind')} {pos.get('bar_time')} → {pos.get('option_side')} {pos.get('strike')}")
         t2.metric("Entry", fmt(pos.get("entry")))
-        t3.metric("SL", fmt(pos.get("sl")))
-        t4.metric("TP 1:4", fmt(pos.get("target")))
-        t5.metric("Trail", "1R→cost +1/pt" if pos.get("trail_armed") else "wait 1R")
+        try:
+            ltp_num = float(pos["ltp"]) if pos.get("ltp") is not None else None
+            entry_num = float(pos["entry"]) if pos.get("entry") is not None else None
+        except (TypeError, ValueError, KeyError):
+            ltp_num = entry_num = None
+        ltp_delta = round(ltp_num - entry_num, 2) if ltp_num is not None and entry_num is not None else None
+        t3.metric("LTP", fmt(ltp_num), delta=ltp_delta)
+        t4.metric("SL", fmt(pos.get("sl")))
+        t5.metric("TP 1:4", fmt(pos.get("target")))
+        t6.metric("Trail", "1R→cost +1/pt" if pos.get("trail_armed") else "wait 1R")
         ohlc = pos.get("option_ohlc") or {}
         st.caption(
             f"{'PAPER' if trade.get('paper') else 'LIVE'} BUY {pos.get('option_side')}{pos.get('strike')} "
+            f"· LTP {fmt(ltp_num)} "
             f"· opt {pos.get('bar_time')} O {fmt(ohlc.get('open'))} H {fmt(ohlc.get('high'))} "
             f"L {fmt(ohlc.get('low'))} C {fmt(ohlc.get('close'))} · R {fmt(pos.get('r_pts'))}"
         )

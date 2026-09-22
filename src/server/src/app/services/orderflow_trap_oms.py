@@ -73,6 +73,7 @@ class OfTrapPosition:
     opened_at: str
     trail_armed: bool = False
     premium_high: float = 0.0
+    ltp: float | None = None
     status: str = "open"
     exit_px: float | None = None
     exit_reason: str = ""
@@ -181,6 +182,7 @@ class OfTrapOms:
             option_ohlc=plan["option_ohlc"],
             opened_at=now.isoformat(),
             premium_high=plan["entry"],
+            ltp=plan["entry"],
             log=[
                 f"{bar_time} {kind} → BUY {plan['option_side']} {plan['strike']} "
                 f"entry {plan['entry']:.2f} SL {plan['sl']:.2f} TP {plan['target']:.2f} (1:{RR_TARGET:.0f})"
@@ -216,6 +218,7 @@ class OfTrapOms:
         if ltp is None:
             self._publish()
             return
+        pos.ltp = round(float(ltp), 2)
         if ltp > pos.premium_high:
             pos.premium_high = ltp
         new_sl, armed = apply_rr_trail(
