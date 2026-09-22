@@ -48,6 +48,19 @@ _INDEX_ALIASES = {
     "SENSEX": "SENSEX",
 }
 
+_COMMODITY_ALIASES = {
+    "CRUDE": "CRUDEOIL",
+    "CRUDEOIL": "CRUDEOIL",
+    "GOLD": "GOLD",
+    "SILVER": "SILVER",
+}
+
+_COMMODITY_MINIS = {
+    "CRUDEOIL": ("CRUDEOILM",),
+    "GOLD": ("GOLDM", "GOLDGUINEA", "GOLDPETAL", "GOLDPTL"),
+    "SILVER": ("SILVERM", "SILVERMIC"),
+}
+
 
 class _WsSend(Protocol):
     async def send_text(self, data: str) -> None: ...
@@ -154,33 +167,72 @@ def _expiry_ymd(raw: object) -> str:
     return text[:10] if text else "9999-99-99"
 
 
-def _pick_nearest_future(rows: list[dict], code: str) -> str | None:
+def _norm_code(raw: str) -> str:
+    return "".join(ch for ch in (raw or "").upper() if ch.isalnum())
+
+
+def _is_mcx_main_fut(name: str, tsym: str, code: str) -> bool:
+    """Nearest-month *main* MCX future (not mini / 10g / 100oz variants)."""
+    t = " ".join((tsym or "").upper().split())
+    if code == "CRUDEOIL":
+        return t.startswith("CRUDEOIL FUT")
+    if code == "GOLD":
+        return t.startswith("GOLD FUT")
+    if code == "SILVER":
+        return t.startswith("SILVER FUT")
+    nn = _norm_code(name)
+    nt = _norm_code(tsym)
+    if nn != code and not nt.startswith(code):
+        return False
+    for mini in _COMMODITY_MINIS.get(code, ()):
+        if nn == mini or nt.startswith(mini):
+            return False
+    return True
+
+
+def _pick_nearest_future(
+    rows: list[dict],
+    code: str,
+    *,
+    segments: tuple[str, ...] = ("NSE_FO", "BSE_FO"),
+) -> str | None:
     today = date.today().isoformat()
     candidates: list[tuple[str, str]] = []
+    mcx = segments == ("MCX_FO",)
     for row in rows:
         if not isinstance(row, dict):
             continue
-        if str(row.get("segment") or "") not in ("NSE_FO", "BSE_FO"):
+        if str(row.get("segment") or "") not in segments:
             continue
         inst = str(row.get("instrument_type") or "").upper()
         if inst in ("CE", "PE", "OPTIDX", "OPTSTK"):
             continue
         name = str(row.get("name") or "").upper()
         tsym = str(row.get("trading_symbol") or "").upper()
-        if name and name != code and not tsym.startswith(code + " "):
-            if not (tsym.startswith(code) and "FUT" in tsym):
+        if mcx:
+            if inst not in ("FUT", "FUTCOM", ""):
                 continue
-        if code == "NIFTY":
-            if name in ("BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "NIFTYNXT50"):
+            if not _is_mcx_main_fut(name, tsym, code):
                 continue
-            if any(x in tsym for x in ("BANKNIFTY", "FINNIFTY", "MIDCP", "NXT50", "NIFTYNXT")):
+        else:
+            if name and name != code and not tsym.startswith(code + " "):
+                if not (tsym.startswith(code) and "FUT" in tsym):
+                    continue
+            if code == "NIFTY":
+                if name in ("BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "NIFTYNXT50"):
+                    continue
+                if any(x in tsym for x in ("BANKNIFTY", "FINNIFTY", "MIDCP", "NXT50", "NIFTYNXT")):
+                    continue
+            if name and name != code:
                 continue
-        if name and name != code:
-            continue
-        if tsym.endswith("CE") or tsym.endswith("PE"):
-            continue
+            if tsym.endswith("CE") or tsym.endswith("PE"):
+                continue
         exp = _expiry_ymd(row.get("expiry") if row.get("expiry") is not None else row.get("expiry_date"))
-        if exp < today:
+        # MCX: on expiry day skip the dying front month (Crude Sep was ~9250 vs Oct ~8900).
+        if mcx:
+            if exp <= today:
+                continue
+        elif exp < today:
             continue
         key = str(row.get("instrument_key") or "")
         if key:
@@ -231,9 +283,12 @@ class InstrumentResolver:
             index = "NIFTY"
         if not index and "BANKNIFTY" in sym:
             index = "BANKNIFTY"
+        commodity = _COMMODITY_ALIASES.get(sym)
 
         key: str | None = None
-        if index:
+        if commodity:
+            key = self._resolve_commodity_future(commodity)
+        if not key and index:
             key = self._resolve_index_future(index)
         if not key:
             key = self._search_symbol(sym, exch)
@@ -292,7 +347,13 @@ class InstrumentResolver:
             return key
         return self._resolve_from_master(code)
 
-    def _resolve_from_master(self, code: str) -> str | None:
+    def _resolve_commodity_future(self, code: str) -> str | None:
+        # Upstox v2 instruments/search rejects MCX queries (HTTP 400); use master.
+        return self._resolve_from_master(code, segments=("MCX_FO",))
+
+    def _resolve_from_master(
+        self, code: str, *, segments: tuple[str, ...] = ("NSE_FO", "BSE_FO")
+    ) -> str | None:
         import gzip
         import time as _time
 
@@ -314,7 +375,7 @@ class InstrumentResolver:
             return None
         if not isinstance(rows, list):
             return None
-        key = _pick_nearest_future(rows, code)
+        key = _pick_nearest_future(rows, code, segments=segments)
         if key:
             self._last_error = ""
             logger.info("Resolved %s from instrument master → %s", code, key)

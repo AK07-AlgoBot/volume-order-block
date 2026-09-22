@@ -14,6 +14,7 @@ import os
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import streamlit as st
 
@@ -440,7 +441,12 @@ def render_oftrap_panel() -> None:
     events = cache_manager.get_json(cache_manager.OFTRAP_EVENTS_KEY) or []
 
     if not states and not events:
-        st.caption("OF Trap engine offline — start the `oftrap_engine` service (profile `oftrap`).")
+        st.info(
+            "No tape in Redis yet — this is not the same as a stopped container. "
+            "After `DEL` / restart, the first write is the next **5m close**. "
+            "If it stays empty, the Upstox feed is 401: refresh today's token and "
+            "`restart oftrap_engine`."
+        )
         return
 
     tabs = st.tabs(list(states.keys())) if len(states) > 1 else None
@@ -460,7 +466,36 @@ def render_oftrap_panel() -> None:
             c4.metric("Buy / Sell vol", f"{s.get('buy_vol', 0):,} / {s.get('sell_vol', 0):,}")
             c5.metric("Signal", flag)
             updated = str(s.get("updated", ""))[:19].replace("T", " ")
+            today = datetime.now(ZoneInfo("Asia/Kolkata")).date().isoformat()
+            stale = str(s.get("updated") or "")[:10] not in ("", today)
+            if stale:
+                st.warning(f"Stale tape — last bar {updated}. Restart `oftrap_engine` (feed died after yesterday's close).")
+            elif s.get("status") == "waiting":
+                st.caption("Waiting for today's first 5m close…")
             st.caption(f"O {fmt(s.get('open'))} · H {fmt(s.get('high'))} · L {fmt(s.get('low'))} · vol {s.get('volume', 0):,} · updated {updated}")
+
+    trade = cache_manager.get_json(cache_manager.OFTRAP_TRADE_KEY) or {}
+    pos = trade.get("position") if isinstance(trade, dict) else None
+    st.markdown("##### OF Trap — Option trade (same 5m candle)")
+    if pos:
+        t1, t2, t3, t4, t5 = st.columns(5)
+        t1.metric("Setup", f"{pos.get('kind')} {pos.get('bar_time')} → {pos.get('option_side')} {pos.get('strike')}")
+        t2.metric("Entry", fmt(pos.get("entry")))
+        t3.metric("SL", fmt(pos.get("sl")))
+        t4.metric("TP 1:4", fmt(pos.get("target")))
+        t5.metric("Trail", "1R→cost +1/pt" if pos.get("trail_armed") else "wait 1R")
+        ohlc = pos.get("option_ohlc") or {}
+        st.caption(
+            f"{'PAPER' if trade.get('paper') else 'LIVE'} BUY {pos.get('option_side')}{pos.get('strike')} "
+            f"· opt {pos.get('bar_time')} O {fmt(ohlc.get('open'))} H {fmt(ohlc.get('high'))} "
+            f"L {fmt(ohlc.get('low'))} C {fmt(ohlc.get('close'))} · R {fmt(pos.get('r_pts'))}"
+        )
+    else:
+        st.caption("Flat — next S/B maps ITM option 5m candle (SL=low, TP=1:4, trail 1R→cost then +1/pt).")
+    closed = (trade.get("closed") or []) if isinstance(trade, dict) else []
+    if closed:
+        last = closed[-1]
+        st.caption(f"Last exit: {last.get('exit_reason')} @ {fmt(last.get('exit_px'))} · {last.get('option_side')}{last.get('strike')}")
 
     if events:
         with st.expander("Recent absorption / trap events", expanded=True):

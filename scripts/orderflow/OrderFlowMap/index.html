@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8" />
-<title>OrderFlowMap · Bookmap-style Visualizer</title>
+<title>OrderFlowMap · Heatmap + Footprint</title>
 <script src="https://cdn.jsdelivr.net/npm/lightweight-charts@5.0.9/dist/lightweight-charts.standalone.production.js"></script>
 <style>
   :root{
@@ -28,6 +28,8 @@
     -webkit-background-clip:text;background-clip:text;color:transparent}
   .sym{padding:4px 9px;background:#1a2433;border:1px solid #263246;border-radius:5px;
     font-weight:700;color:#fff;letter-spacing:.4px}
+  header select.chart-sel{padding:4px 22px 4px 8px;font-size:11px;font-weight:700;
+    background:#1a2433;border:1px solid #263246;border-radius:5px;color:#fff;min-width:148px}
   .mode-badge{padding:3px 7px;border-radius:4px;font-size:9px;font-weight:700;letter-spacing:.6px;text-transform:uppercase}
   .mode-badge.sim{background:#1a2a1a;color:#3acf6f;border:1px solid #2a4a2a}
   .mode-badge.live{background:#2a1a1a;color:#ef5350;border:1px solid #4a2a2a;animation:pulse 1.2s infinite}
@@ -107,8 +109,14 @@
   #livePanel .row{margin:5px 0}
 
   /* ============ CENTER CHART ============ */
-  .center{position:relative;background:#080b10;min-width:0;display:flex;flex-direction:column}
-  #chart{flex:1;min-height:0;position:relative}
+  .center{position:relative;background:#080b10;min-width:0;display:grid;
+    grid-template-rows:1fr 0fr;min-height:0}
+  .center.kind-heatmap{grid-template-rows:1fr 0fr}
+  .center.kind-footprint{grid-template-rows:0fr 1fr}
+  .center.kind-both{grid-template-rows:1.15fr 1fr}
+  #chart,#fpChart{min-height:0;min-width:0;position:relative;overflow:hidden}
+  #fpChart{border-top:1px solid var(--border)}
+  .center.kind-heatmap #fpChart,.center.kind-footprint #chart{border-top:none}
   .legend{position:absolute;top:10px;left:12px;background:rgba(8,11,16,.8);
     border:1px solid var(--border);padding:7px 10px;border-radius:5px;
     backdrop-filter:blur(6px);font-size:11px;z-index:5;line-height:1.7;pointer-events:none}
@@ -118,6 +126,7 @@
     margin-right:4px;vertical-align:middle}
   .legend .ttl{font-weight:700;color:#fff;font-size:10px;
     text-transform:uppercase;letter-spacing:.6px;margin-bottom:3px}
+  .center > .crosshair-info,.center > .alert-banner{grid-area:1/1/-1/-1;z-index:10}
 
   .colorbar-wrap{position:absolute;top:10px;right:14px;z-index:5;display:flex;
     align-items:center;gap:6px;background:rgba(8,11,16,.7);border:1px solid var(--border);
@@ -216,6 +225,19 @@
 <div class="app">
   <header>
     <div class="logo">Order<span>Flow</span>Map</div>
+    <select class="chart-sel" id="chartKind" title="Chart type">
+      <option value="both" selected>Heatmap + Footprint</option>
+      <option value="heatmap">Heatmap</option>
+      <option value="footprint">Footprint</option>
+    </select>
+    <select class="chart-sel" id="chartSymbol" title="Instrument">
+      <option value="NIFTY" selected>NIFTY</option>
+      <option value="BANKNIFTY">BANKNIFTY</option>
+      <option value="SENSEX">SENSEX</option>
+      <option value="CRUDEOIL">CRUDEOIL</option>
+      <option value="GOLD">GOLD</option>
+      <option value="SILVER">SILVER</option>
+    </select>
     <div class="sym" id="symLabel">NIFTY</div>
     <div class="mode-badge sim" id="modeBadge">SIM</div>
     <div class="price" id="lastPrice">—</div>
@@ -259,7 +281,14 @@
             <div class="row"><input type="password" id="apiKey" value="ak07" placeholder="optional on ak07.in" class="conn-input"></div>
             <div class="row">
               <label>Symbol</label>
-              <input type="text" id="wsSymbol" value="NIFTY" class="conn-input" style="width:90px;flex:none">
+              <select class="btn" id="wsSymbol" style="flex:1">
+                <option value="NIFTY" selected>NIFTY</option>
+                <option value="BANKNIFTY">BANKNIFTY</option>
+                <option value="SENSEX">SENSEX</option>
+                <option value="CRUDEOIL">CRUDEOIL</option>
+                <option value="GOLD">GOLD</option>
+                <option value="SILVER">SILVER</option>
+              </select>
             </div>
             <div class="row">
               <label>Exchange</label>
@@ -294,6 +323,47 @@
             <label>History</label>
             <input type="number" id="histLimit" value="600" min="60" max="7200" style="width:62px;background:#0a0f17;border:1px solid #263246;color:var(--text);padding:3px 5px;border-radius:3px;font-size:11px">
             <span style="color:var(--muted);font-size:10px">sec</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="group">
+        <h4>Chart <span style="color:#7c5cff">●</span></h4>
+        <div class="group-body">
+          <div class="row"><label>Type</label>
+            <select class="btn" id="chartKindSide">
+              <option value="both" selected>Heatmap + Footprint</option>
+              <option value="heatmap">Heatmap</option>
+              <option value="footprint">Footprint cluster</option>
+            </select>
+          </div>
+          <div class="row"><label>Instrument</label>
+            <select class="btn" id="chartSymbolSide">
+              <option value="NIFTY">NIFTY</option>
+              <option value="BANKNIFTY">BANKNIFTY</option>
+              <option value="SENSEX">SENSEX</option>
+              <option value="CRUDEOIL">CRUDEOIL</option>
+              <option value="GOLD">GOLD</option>
+              <option value="SILVER">SILVER</option>
+            </select>
+          </div>
+          <div class="row" id="fpTfRow"><label>Footprint TF</label>
+            <select class="btn" id="fpTf">
+              <option value="60">1 minute</option>
+              <option value="180">3 minute</option>
+              <option value="300" selected>5 minute</option>
+            </select>
+          </div>
+          <div class="row" id="fpCellRow"><label>Cell pts</label>
+            <select class="btn" id="fpCell">
+              <option value="0" selected>Auto</option>
+              <option value="1">1</option>
+              <option value="5">5</option>
+              <option value="10">10</option>
+            </select>
+          </div>
+          <div style="color:var(--muted);font-size:10px;line-height:1.45;margin-top:4px">
+            Footprint is reconstructed (Lee-Ready) from the same Upstox live feed — not a 1:1 GoCharting tape.
           </div>
         </div>
       </div>
@@ -364,16 +434,16 @@
             <b style="color:#fff">Shortcuts:</b><br>
             Space → Play/Pause · F → Fit<br>
             H → Heatmap · B → Bubbles<br>
-            V → VWAP · C → CVD
+            P → cycle chart · V → VWAP · C → CVD
           </div>
         </div>
       </div>
     </aside>
 
     <!-- CENTER CHART -->
-    <div class="center">
+    <div class="center kind-both" id="centerPane">
       <div id="chart">
-        <div class="legend">
+        <div class="legend" id="heatmapLegend">
           <div class="ttl">Order Flow</div>
           <div><span class="dot" style="background:#26a69a"></span>Best Bid &nbsp;
                <span class="dot" style="background:#ef5350"></span>Best Ask &nbsp;
@@ -388,9 +458,21 @@
           <div class="lbl"><span>HIGH</span><span>LOW</span></div>
           <canvas class="colorbar" id="cbar" width="14" height="140"></canvas>
         </div>
-        <div class="crosshair-info" id="xinfo"></div>
-        <div class="alert-banner" id="alertBanner"></div>
       </div>
+      <div id="fpChart">
+        <div class="legend" id="fpLegend">
+          <div class="ttl">Footprint cluster</div>
+          <div><span class="sq" style="background:#1e7a4a"></span>Buy vol &nbsp;
+               <span class="sq" style="background:#8b2a2a"></span>Sell vol &nbsp;
+               <span class="sq" style="background:#c47a1a"></span>Mixed</div>
+          <div>COTH / COTL = delta at bar high / low</div>
+          <div style="color:var(--muted);font-size:10px;margin-top:2px">
+            Orange box = stacked imbalance · S/B = absorption
+          </div>
+        </div>
+      </div>
+      <div class="crosshair-info" id="xinfo"></div>
+      <div class="alert-banner" id="alertBanner"></div>
     </div>
 
     <!-- RIGHT: DOM + MICRO + TAPE -->
@@ -465,6 +547,8 @@ let MID          = 24500.00;
 let SIM_DT       = 250;
 let RUNNING      = true;
 let MODE         = 'sim';  // 'sim' | 'live'
+let CHART_KIND   = 'both'; // 'heatmap' | 'footprint' | 'both'
+let liveFollow   = true;
 
 /* ==================== STATE ==================== */
 const bars = [], depth = [], trades = [], cvdBars = [];
@@ -483,7 +567,10 @@ const ui = {
   hollowSmall:true, minTrade:0,
   showBBA:true, showVWAP:true, showVP:true, showCVD:true,
   showLargeMarkers:true, showWalls:true, showSweepFlash:true,
+  fpTf:300, fpCell:0,
 };
+const SYM_EXCHANGE = { NIFTY:'NFO', BANKNIFTY:'NFO', SENSEX:'BFO', CRUDEOIL:'MCX', GOLD:'MCX', SILVER:'MCX' };
+const SYM_TICK = { NIFTY:0.05, BANKNIFTY:0.05, SENSEX:0.05, CRUDEOIL:1, GOLD:1, SILVER:1 };
 
 /* ==================== UTILS ==================== */
 const clamp = (x,a,b) => x<a?a:(x>b?b:x);
@@ -689,6 +776,351 @@ class HeatmapPrimitive{
 }
 const heatmap = new HeatmapPrimitive();
 midSeries.attachPrimitive(heatmap);
+
+/* ==================== FOOTPRINT CLUSTER ==================== */
+function fpTfSec(){
+  return parseInt(document.getElementById('fpTf')?.value, 10) || ui.fpTf || 300;
+}
+function fpCellPts(){
+  const raw = parseFloat(document.getElementById('fpCell')?.value);
+  if(raw > 0) return raw;
+  const px = bars[bars.length-1]?.mid || MID;
+  const sym = (document.getElementById('chartSymbol')?.value || 'NIFTY').toUpperCase();
+  if(sym === 'GOLD' || sym === 'SILVER') return 10;
+  if(sym === 'CRUDEOIL') return 1;
+  if(sym === 'SENSEX' || px > 50000) return 5;
+  if(sym === 'BANKNIFTY' || px > 40000) return 5;
+  return 1;
+}
+function fmtFpVol(n){
+  const a = Math.abs(n);
+  if(a >= 1e6) return (n/1e6).toFixed(1).replace(/\.0$/,'') + 'M';
+  if(a >= 10000) return Math.round(n/1000) + 'K';
+  return String(Math.round(n));
+}
+function buildFootprintBars(){
+  const tf = fpTfSec();
+  const cell = fpCellPts();
+  const out = [];
+  let cur = null;
+  for(const t of trades){
+    if(!t || !t.price || !t.qty) continue;
+    const bucket = Math.floor(t.time / tf) * tf;
+    if(!cur || cur.time !== bucket){
+      if(cur) out.push(cur);
+      cur = {
+        time: bucket, open: t.price, high: t.price, low: t.price, close: t.price,
+        buy: 0, sell: 0, levels: new Map(),
+      };
+    }
+    cur.high = Math.max(cur.high, t.price);
+    cur.low = Math.min(cur.low, t.price);
+    cur.close = t.price;
+    const pk = Math.round(t.price / cell) * cell;
+    let lv = cur.levels.get(pk);
+    if(!lv){ lv = {buy:0, sell:0}; cur.levels.set(pk, lv); }
+    if(t.side === 'B'){ cur.buy += t.qty; lv.buy += t.qty; }
+    else { cur.sell += t.qty; lv.sell += t.qty; }
+  }
+  if(cur) out.push(cur);
+  const wickMin = 0.28, imbRatio = 1.25;
+  for(const b of out){
+    const rng = Math.max(b.high - b.low, cell);
+    const lowerWick = (Math.min(b.open, b.close) - b.low) / rng;
+    const upperWick = (b.high - Math.max(b.open, b.close)) / rng;
+    const sellDom = b.sell >= b.buy * imbRatio || (b.buy - b.sell) < 0;
+    const buyDom  = b.buy  >= b.sell * imbRatio || (b.buy - b.sell) > 0;
+    b.sellAbs = sellDom && lowerWick >= wickMin;
+    b.buyAbs  = buyDom && upperWick >= wickMin;
+    const hiKey = Math.round(b.high / cell) * cell;
+    const loKey = Math.round(b.low / cell) * cell;
+    const hi = b.levels.get(hiKey) || {buy:0, sell:0};
+    const lo = b.levels.get(loKey) || {buy:0, sell:0};
+    b.coth = hi.buy - hi.sell;
+    b.cotl = lo.buy - lo.sell;
+  }
+  return out;
+}
+
+function timeCoordOn(scale, ts){
+  let x = scale.timeToCoordinate(ts);
+  if(x !== null) return x;
+  if(!bars.length) return null;
+  if(ts <= bars[0].time) return scale.timeToCoordinate(bars[0].time);
+  if(ts >= bars[bars.length-1].time) return scale.timeToCoordinate(bars[bars.length-1].time);
+  let lo = 0, hi = bars.length - 1;
+  while(lo < hi){
+    const mid = (lo + hi) >> 1;
+    if(bars[mid].time < ts) lo = mid + 1;
+    else hi = mid;
+  }
+  return scale.timeToCoordinate(bars[lo].time);
+}
+function timeCoord(ts){ return timeCoordOn(chart.timeScale(), ts); }
+function fpTimeCoord(ts){ return timeCoordOn(fpChart.timeScale(), ts); }
+
+class FootprintRenderer{
+  draw(target){
+    target.useBitmapCoordinateSpace(scope => {
+      if(CHART_KIND === 'heatmap') return;
+      const { context:ctx, bitmapSize, horizontalPixelRatio:hpr, verticalPixelRatio:vpr } = scope;
+      const fpBars = buildFootprintBars();
+      if(!fpBars.length) return;
+      const ts = fpChart.timeScale();
+      const tf = fpTfSec();
+      const cell = fpCellPts();
+      ctx.save();
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+
+      let maxTot = 1;
+      for(const b of fpBars){
+        for(const lv of b.levels.values()){
+          const tot = lv.buy + lv.sell;
+          if(tot > maxTot) maxTot = tot;
+        }
+      }
+
+      const visP0 = fpMidSeries.coordinateToPrice(0);
+      const visP1 = fpMidSeries.coordinateToPrice(bitmapSize.height / Math.max(vpr, 1));
+      const visHi = visP0 === null || visP1 === null ? null : Math.max(visP0, visP1);
+      const visLo = visP0 === null || visP1 === null ? null : Math.min(visP0, visP1);
+
+      for(const b of fpBars){
+        const x0 = fpTimeCoord(b.time);
+        const x1 = fpTimeCoord(b.time + tf);
+        if(x0 === null) continue;
+        const xRight = (x1 === null || x1 <= x0) ? x0 + Math.max(18, (ts.options().barSpacing || 6) * 8) : x1;
+        const gap = 2;
+        const colW = Math.max(10, (xRight - x0) - gap);
+        const xPx = Math.round(x0 * hpr);
+        const wPx = Math.max(8, Math.round(colW * hpr));
+        if(xPx + wPx < 0 || xPx > bitmapSize.width) continue;
+
+        const lo = Math.round(b.low / cell) * cell;
+        const hi = Math.round(b.high / cell) * cell;
+        const steps = Math.round((hi - lo) / cell);
+        for(let i = 0; i <= steps; i++){
+          const p = Math.round((hi - i * cell) * 100) / 100;
+          const lv = b.levels.get(Math.round(p / cell) * cell) || {buy:0, sell:0};
+          if(visHi !== null && (p + cell / 2 < visLo || p - cell / 2 > visHi)) continue;
+          const yTop = fpMidSeries.priceToCoordinate(p + cell / 2);
+          const yBot = fpMidSeries.priceToCoordinate(p - cell / 2);
+          if(yTop === null || yBot === null) continue;
+          let y0 = Math.round(Math.min(yTop, yBot) * vpr);
+          let y1 = Math.round(Math.max(yTop, yBot) * vpr);
+          y0 = Math.max(0, y0);
+          y1 = Math.min(bitmapSize.height, y1);
+          const hPx = y1 - y0;
+          if(hPx < 1) continue;
+          const buy = lv.buy, sell = lv.sell, tot = buy + sell;
+          let fill = '#141820';
+          if(tot > 0){
+            if(buy > sell * 1.15) fill = '#1b6b42';
+            else if(sell > buy * 1.15) fill = '#7a2424';
+            else fill = '#8a5a16';
+            const t = tot / maxTot;
+            if(t < 0.15) fill = buy >= sell ? '#163d2a' : '#3d1616';
+          }
+          ctx.fillStyle = fill;
+          ctx.fillRect(xPx, y0, wPx, hPx);
+
+          if(tot > 0 && (buy >= sell * 1.5 || sell >= buy * 1.5)){
+            ctx.strokeStyle = '#e08a2a';
+            ctx.lineWidth = Math.max(1, 1.2 * hpr);
+            ctx.strokeRect(xPx + 0.5, y0 + 0.5, wPx - 1, hPx - 1);
+          }
+
+          if(hPx >= 9 * vpr && wPx >= 28 * hpr && tot > 0){
+            ctx.fillStyle = '#f2f4f8';
+            ctx.font = `${Math.max(8, Math.min(11, hPx * 0.55 / vpr)) * vpr}px ui-sans-serif, system-ui`;
+            ctx.fillText(fmtFpVol(buy) + '×' + fmtFpVol(sell), xPx + wPx / 2, y0 + hPx / 2);
+          } else if(hPx >= 9 * vpr && wPx >= 16 * hpr){
+            ctx.fillStyle = tot > 0 ? '#f2f4f8' : '#4a5564';
+            ctx.font = `${Math.max(8, Math.min(11, hPx * 0.7 / vpr)) * vpr}px ui-sans-serif, system-ui`;
+            ctx.fillText(tot > 0 ? fmtFpVol(tot) : '0', xPx + wPx / 2, y0 + hPx / 2);
+          }
+        }
+
+        const yHi = fpMidSeries.priceToCoordinate(b.high);
+        const yLo = fpMidSeries.priceToCoordinate(b.low);
+        ctx.font = `${10 * vpr}px ui-sans-serif, system-ui`;
+        if(yHi !== null){
+          ctx.fillStyle = b.coth >= 0 ? '#3acf6f' : '#ef5350';
+          ctx.textBaseline = 'bottom';
+          ctx.fillText('COTH:' + fmtFpVol(b.coth), xPx + wPx / 2, Math.round(yHi * vpr) - 3 * vpr);
+        }
+        if(yLo !== null){
+          ctx.fillStyle = b.cotl >= 0 ? '#3acf6f' : '#ef5350';
+          ctx.textBaseline = 'top';
+          ctx.fillText('COTL:' + fmtFpVol(b.cotl), xPx + wPx / 2, Math.round(yLo * vpr) + 3 * vpr);
+        }
+        ctx.textBaseline = 'middle';
+        if(b.sellAbs && yLo !== null){
+          ctx.fillStyle = '#ef5350';
+          ctx.beginPath();
+          ctx.arc(xPx + wPx / 2, Math.round(yLo * vpr) + 16 * vpr, 6 * vpr, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.fillStyle = '#fff';
+          ctx.font = `bold ${8 * vpr}px ui-sans-serif`;
+          ctx.fillText('S', xPx + wPx / 2, Math.round(yLo * vpr) + 16 * vpr);
+        }
+        if(b.buyAbs && yHi !== null){
+          ctx.fillStyle = '#3acf6f';
+          ctx.beginPath();
+          ctx.arc(xPx + wPx / 2, Math.round(yHi * vpr) - 18 * vpr, 6 * vpr, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.fillStyle = '#08100c';
+          ctx.font = `bold ${8 * vpr}px ui-sans-serif`;
+          ctx.fillText('B', xPx + wPx / 2, Math.round(yHi * vpr) - 18 * vpr);
+        }
+      }
+      ctx.restore();
+    });
+  }
+}
+class FootprintView{
+  constructor(){ this._r = new FootprintRenderer(); }
+  zOrder(){ return 'normal'; }
+  renderer(){ return this._r; }
+}
+class FootprintPrimitive{
+  constructor(){ this._views=[new FootprintView()]; }
+  attached(p){ this._req=p.requestUpdate; }
+  detached(){ this._req=null; }
+  updateAllViews(){}
+  paneViews(){ return this._views; }
+  requestUpdate(){ this._req && this._req(); }
+}
+const footprint = new FootprintPrimitive();
+
+const fpChart = createChart(document.getElementById('fpChart'), {
+  layout:{ background:{type:'solid', color:'#080b10'}, textColor:'#aab3c1' },
+  grid:{ vertLines:{color:'rgba(35,45,60,.3)'}, horzLines:{color:'rgba(35,45,60,.3)'} },
+  crosshair:{ mode: CrosshairMode.Normal,
+    vertLine:{color:'#7c5cff',width:1,labelBackgroundColor:'#7c5cff'},
+    horzLine:{color:'#7c5cff',width:1,labelBackgroundColor:'#7c5cff'} },
+  rightPriceScale:{ borderColor:'#1c2533', scaleMargins:{top:0.06, bottom:0.06},
+    entireTextOnly:true, ticksVisible:true },
+  timeScale:{ borderColor:'#1c2533', timeVisible:true, secondsVisible:true,
+    rightOffset:3, barSpacing:6, minBarSpacing:0.5,
+    tickMarkFormatter: (time) => {
+      const date = new Date(time * 1000);
+      return date.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
+    }
+  },
+  localization: {
+    timeFormatter: (time) => new Date(time * 1000).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false }),
+  },
+  autoSize:true,
+});
+const fpMidSeries = fpChart.addSeries(LineSeries, {
+  color:'rgba(255,255,255,0)', lineWidth:1, priceLineVisible:false, lastValueVisible:false,
+  priceFormat:{type:'price', precision:1, minMove:0.1},
+});
+fpMidSeries.attachPrimitive(footprint);
+
+let _syncingRange = false;
+function syncFpFromMain(){
+  if(CHART_KIND !== 'both' || _syncingRange) return;
+  const lr = chart.timeScale().getVisibleLogicalRange();
+  const pr = midSeries.priceScale().getVisibleRange();
+  _syncingRange = true;
+  try{
+    if(lr) fpChart.timeScale().setVisibleLogicalRange(lr);
+    if(pr){ try{ fpMidSeries.priceScale().setVisibleRange(pr); }catch(e){} }
+  } finally { _syncingRange = false; }
+}
+function syncMainFromFp(){
+  if(CHART_KIND !== 'both' || _syncingRange) return;
+  const lr = fpChart.timeScale().getVisibleLogicalRange();
+  const pr = fpMidSeries.priceScale().getVisibleRange();
+  _syncingRange = true;
+  try{
+    if(lr) chart.timeScale().setVisibleLogicalRange(lr);
+    if(pr){ try{ midSeries.priceScale().setVisibleRange(pr); }catch(e){} }
+  } finally { _syncingRange = false; }
+}
+chart.timeScale().subscribeVisibleLogicalRangeChange(syncFpFromMain);
+fpChart.timeScale().subscribeVisibleLogicalRangeChange(syncMainFromFp);
+
+function applyChartKind(kind){
+  if(kind !== 'heatmap' && kind !== 'footprint' && kind !== 'both') return;
+  CHART_KIND = kind;
+  const hdr = document.getElementById('chartKind');
+  const side = document.getElementById('chartKindSide');
+  if(hdr) hdr.value = kind;
+  if(side) side.value = kind;
+  const center = document.getElementById('centerPane');
+  if(center){
+    center.classList.remove('kind-heatmap','kind-footprint','kind-both');
+    center.classList.add('kind-'+kind);
+  }
+  const showHm = kind !== 'footprint';
+  const showFp = kind !== 'heatmap';
+  document.getElementById('heatmapLegend').style.display = showHm ? '' : 'none';
+  document.getElementById('fpLegend').style.display = showFp ? '' : 'none';
+  document.querySelector('.colorbar-wrap').style.display = showHm ? '' : 'none';
+  if(kind === 'footprint'){
+    ui.showHM = false;
+    ui.showBubbles = false;
+    ui.showBBA = false;
+  } else {
+    ui.showHM = true;
+    ui.showBubbles = true;
+    ui.showBBA = true;
+  }
+  const hmEl = document.getElementById('showHM');
+  const bubEl = document.getElementById('showBubbles');
+  const bbaEl = document.getElementById('showBBA');
+  if(hmEl) hmEl.checked = ui.showHM;
+  if(bubEl) bubEl.checked = ui.showBubbles;
+  if(bbaEl) bbaEl.checked = ui.showBBA;
+  if(kind === 'footprint'){
+    HISTORY_SEC = Math.max(HISTORY_SEC, 3600);
+    const hist = document.getElementById('histLimit');
+    if(hist) hist.value = HISTORY_SEC;
+    fpChart.timeScale().applyOptions({ barSpacing: 10, secondsVisible: false });
+  } else {
+    chart.timeScale().applyOptions({ barSpacing: 6, secondsVisible: true });
+    fpChart.timeScale().applyOptions({ barSpacing: 6, secondsVisible: true });
+  }
+  applySeriesData();
+  const relayout = () => {
+    if(showHm) chart.timeScale().fitContent();
+    if(showFp) fpChart.timeScale().fitContent();
+    syncFpFromMain();
+    heatmap.requestUpdate();
+    footprint.requestUpdate();
+  };
+  requestAnimationFrame(() => requestAnimationFrame(() => {
+    relayout();
+    setTimeout(relayout, 80);
+  }));
+}
+
+function applyChartSymbol(sym, {reconnect}={}){
+  const code = String(sym || 'NIFTY').toUpperCase();
+  const hdr = document.getElementById('chartSymbol');
+  const side = document.getElementById('chartSymbolSide');
+  const ws = document.getElementById('wsSymbol');
+  if(hdr) hdr.value = code;
+  if(side) side.value = code;
+  if(ws) ws.value = code;
+  document.getElementById('symLabel').textContent = code;
+  const ex = document.getElementById('wsExchange');
+  if(ex) ex.value = SYM_EXCHANGE[code] || 'NFO';
+  const tick = SYM_TICK[code] || 0.05;
+  const tickEl = document.getElementById('wsTick');
+  if(tickEl) tickEl.value = String(tick);
+  TICK = tick;
+  document.getElementById('tickV').textContent = TICK.toFixed(2);
+  if(reconnect && MODE === 'live' && liveWs && liveWs.readyState === 1){
+    connectLive();
+    document.getElementById('connectBtn').textContent = '⏏ Disconnect';
+    document.getElementById('connectBtn').className = 'btn danger';
+  }
+}
 
 /* ==================== WALLS PRIMITIVE ==================== */
 class WallsRenderer{
@@ -1023,9 +1455,12 @@ function clearAllData(){
   liveVwapNum = 0; liveVwapDen = 0;
   prevTick.volume = null; prevTick.ltp = null; prevTick.lastSide = 'B';
   liveMsgCount = 0;
+  liveFollow = true;
   midSeries.setData([]); bidSeries.setData([]); askSeries.setData([]); vwapSeries.setData([]);
   cvdSeries.setData([]); markers.setMarkers([]);
+  if(typeof fpMidSeries !== 'undefined') fpMidSeries.setData([]);
   heatmap.requestUpdate();
+  footprint.requestUpdate();
 }
 
 function defaultOfmapWsUrl(){
@@ -1064,6 +1499,7 @@ function connectLive(){
   bidSeries.applyOptions({priceFormat:priceOpts});
   askSeries.applyOptions({priceFormat:priceOpts});
   vwapSeries.applyOptions({priceFormat:priceOpts});
+  fpMidSeries.applyOptions({priceFormat:priceOpts});
 
   // Update header
   document.getElementById('symLabel').textContent = symbol;
@@ -1081,11 +1517,13 @@ function connectLive(){
     setConnStatus('err','Connection failed');
     return;
   }
+  const ws = liveWs;
 
   liveWs.onopen = () => {
+    if(liveWs !== ws) return;
     connLog('WebSocket connected, authenticating…','ok');
     setConnStatus('wait','Authenticating…');
-    liveWs.send(JSON.stringify({
+    ws.send(JSON.stringify({
       action: 'authenticate',
       api_key: apiKey
     }));
@@ -1153,6 +1591,7 @@ function connectLive(){
   };
 
   liveWs.onclose = (e) => {
+    if(liveWs !== ws) return;
     connLog(`Disconnected (code ${e.code})`,'err');
     setConnStatus('off','Disconnected');
     document.getElementById('liveDot').className = 'live off';
@@ -1167,6 +1606,44 @@ function disconnectLive(){
     liveWs = null;
   }
   setConnStatus('off','Disconnected');
+}
+
+let _stickLock = false;
+function stickLivePrice(){
+  const last = bars[bars.length-1];
+  if(!last) return;
+  let lo = last.mid, hi = last.mid;
+  const d = depth[depth.length-1];
+  if(d){
+    for(const lv of d.bids) lo = Math.min(lo, lv.p);
+    for(const lv of d.asks) hi = Math.max(hi, lv.p);
+  }
+  const sample = bars.slice(-40);
+  for(const b of sample){
+    lo = Math.min(lo, b.bbid, b.mid, b.vwap);
+    hi = Math.max(hi, b.bask, b.mid, b.vwap);
+  }
+  const pad = Math.max(TICK * 10, (hi - lo) * 0.4, TICK * 4);
+  try{
+    midSeries.priceScale().setVisibleRange({ from: lo - pad, to: hi + pad });
+    fpMidSeries.priceScale().setVisibleRange({ from: lo - pad, to: hi + pad });
+  } catch(e){}
+}
+function stickLiveWindow(){
+  if(!liveFollow || !bars.length) return;
+  _stickLock = true;
+  _syncingRange = true;
+  const last = Math.max(0, bars.length - 1);
+  const from = bars.length < 45 ? -0.2 : Math.max(-0.5, last - 120);
+  const to = last + (bars.length < 45 ? 1.2 : 4);
+  try{
+    chart.timeScale().setVisibleLogicalRange({ from, to });
+    fpChart.timeScale().setVisibleLogicalRange({ from, to });
+    stickLivePrice();
+  } catch(e){}
+  heatmap.requestUpdate();
+  footprint.requestUpdate();
+  setTimeout(() => { _stickLock = false; _syncingRange = false; }, 160);
 }
 
 function processLiveData(data){
@@ -1205,8 +1682,10 @@ function processLiveData(data){
       tradeDetected = true;
       tradeQty = volumeDelta;
 
-      // Determine side: compare current ltp with previous trade ltp
-      if(currentLtp > prevTick.ltp) tradeSide = 'B';
+      // Lee-Ready: lift the ask = buy, hit the bid = sell, else tick test
+      if(bask > 0 && currentLtp >= bask) tradeSide = 'B';
+      else if(bbid > 0 && currentLtp <= bbid) tradeSide = 'S';
+      else if(currentLtp > prevTick.ltp) tradeSide = 'B';
       else if(currentLtp < prevTick.ltp) tradeSide = 'S';
       else tradeSide = prevTick.lastSide || 'B';
 
@@ -1243,6 +1722,7 @@ function processLiveData(data){
 
   // ========== Update bars/depth/cvd arrays ==========
   const lastBar = bars[bars.length-1];
+  let newSecond = false;
 
   if(lastBar && lastBar.time === exchangeTime){
     // Same second — update in place
@@ -1263,7 +1743,19 @@ function processLiveData(data){
       cvdBars[cvdBars.length-1].value = cvd;
     }
   } else {
-    // New second — push new entries
+    // Carry last book across skipped seconds so the heatmap does not punch holes
+    if(lastBar && exchangeTime > lastBar.time + 1 && exchangeTime - lastBar.time <= 60){
+      const lastD = depth[depth.length-1];
+      const lastC = cvdBars[cvdBars.length-1];
+      for(let t = lastBar.time + 1; t < exchangeTime; t++){
+        bars.push({
+          time:t, mid:lastBar.mid, bbid:lastBar.bbid, bask:lastBar.bask,
+          vwap:lastBar.vwap, _vN:lastBar._vN, _vD:lastBar._vD
+        });
+        if(lastD) depth.push({time:t, bids:lastD.bids, asks:lastD.asks});
+        if(lastC) cvdBars.push({time:t, value:lastC.value});
+      }
+    }
     bars.push({
       time: exchangeTime, mid: currentLtp, bbid, bask,
       vwap: Math.round(vwap / TICK) * TICK,
@@ -1271,6 +1763,7 @@ function processLiveData(data){
     });
     depth.push({time: exchangeTime, bids: liveBids, asks: liveAsks});
     cvdBars.push({time: exchangeTime, value: cvd});
+    newSecond = true;
   }
 
   // Trim history
@@ -1279,6 +1772,7 @@ function processLiveData(data){
   // Render
   applySeriesData();
   updateUI();
+  if(newSecond || bars.length <= 8) stickLiveWindow();
 }
 
 /* ==================== MODE SWITCHING ==================== */
@@ -1356,6 +1850,7 @@ function applySeriesData(){
   bidSeries.setData(ui.showBBA? bidData : []);
   askSeries.setData(ui.showBBA? askData : []);
   midSeries.setData(midData);
+  fpMidSeries.setData(midData);
   vwapSeries.setData(ui.showVWAP? vwapData : []);
   cvdSeries.setData(ui.showCVD? cvdBars : []);
 
@@ -1374,6 +1869,7 @@ function applySeriesData(){
   } else markers.setMarkers([]);
 
   heatmap.requestUpdate();
+  footprint.requestUpdate();
 }
 
 function updateUI(){
@@ -1525,11 +2021,11 @@ function flashAlert(msg){
 
 /* ==================== CROSSHAIR INFO ==================== */
 const xinfo = document.getElementById('xinfo');
-chart.subscribeCrosshairMove(param => {
+function updateCrosshairInfo(param, series){
   if(!param.point || !param.time){
     xinfo.style.display='none'; window._crossPx=null; renderDOM(); return;
   }
-  const price = midSeries.coordinateToPrice(param.point.y);
+  const price = series.coordinateToPrice(param.point.y);
   if(price===null){ xinfo.style.display='none'; return; }
   let snap=null;
   for(let i=depth.length-1;i>=0;i--){
@@ -1546,11 +2042,24 @@ chart.subscribeCrosshairMove(param => {
       html += ` · <span style="color:${c}">${best.side.toUpperCase()} ${best.q.toLocaleString()} (${best.o} ord)</span>`;
     }
   }
+  const tf = fpTfSec();
+  const bucket = Math.floor(param.time / tf) * tf;
+  const fpBars = (CHART_KIND !== 'heatmap') ? buildFootprintBars() : [];
+  const fp = fpBars.find(b => b.time === bucket);
+  if(fp){
+    const cell = fpCellPts();
+    const pk = Math.round(price / cell) * cell;
+    const lv = fp.levels.get(pk);
+    html += ` · Δ ${(fp.buy-fp.sell>=0?'+':'')}${fmtFpVol(fp.buy-fp.sell)}`;
+    if(lv && (lv.buy || lv.sell)) html += ` · cell ${fmtFpVol(lv.buy)}×${fmtFpVol(lv.sell)}`;
+  }
   xinfo.innerHTML = html;
   xinfo.style.display='block';
   window._crossPx = roundTick(price);
   renderDOM();
-});
+}
+chart.subscribeCrosshairMove(param => updateCrosshairInfo(param, midSeries));
+fpChart.subscribeCrosshairMove(param => updateCrosshairInfo(param, fpMidSeries));
 
 /* ==================== CONTROLS ==================== */
 function bindRange(id,key,fmt=(v)=>v){
@@ -1562,6 +2071,7 @@ function bindRange(id,key,fmt=(v)=>v){
     if(vEl) vEl.textContent=fmt(ui[key]);
     if(key==='hmGamma') drawColorBar();
     heatmap.requestUpdate();
+    footprint.requestUpdate();
   });
 }
 function bindCheck(id,key){
@@ -1613,7 +2123,15 @@ document.getElementById('playBtn').addEventListener('click',e=>{
 document.getElementById('speed').addEventListener('change',e=>{
   SIM_DT=parseInt(e.target.value,10); restartLoop();
 });
-document.getElementById('fitBtn').addEventListener('click',()=>chart.timeScale().fitContent());
+document.getElementById('fitBtn').addEventListener('click',()=>{
+  liveFollow = true;
+  if(bars.length){
+    stickLiveWindow();
+  } else {
+    chart.timeScale().fitContent();
+    fpChart.timeScale().fitContent();
+  }
+});
 document.getElementById('resetBtn').addEventListener('click',()=>{
   if(MODE === 'live'){
     clearAllData();
@@ -1629,6 +2147,22 @@ document.getElementById('resetBtn').addEventListener('click',()=>{
 document.getElementById('modeSimBtn').addEventListener('click', ()=>switchMode('sim'));
 document.getElementById('modeLiveBtn').addEventListener('click', ()=>switchMode('live'));
 document.getElementById('wsUrl').value = defaultOfmapWsUrl();
+
+document.getElementById('chartKind').addEventListener('change', e => applyChartKind(e.target.value));
+document.getElementById('chartKind').addEventListener('input', e => applyChartKind(e.target.value));
+document.getElementById('chartKindSide').addEventListener('change', e => applyChartKind(e.target.value));
+document.getElementById('chartKindSide').addEventListener('input', e => applyChartKind(e.target.value));
+document.getElementById('chartSymbol').addEventListener('change', e => applyChartSymbol(e.target.value, {reconnect:true}));
+document.getElementById('chartSymbolSide').addEventListener('change', e => applyChartSymbol(e.target.value, {reconnect:true}));
+document.getElementById('wsSymbol').addEventListener('change', e => applyChartSymbol(e.target.value, {reconnect:true}));
+document.getElementById('fpTf').addEventListener('change', () => {
+  ui.fpTf = fpTfSec();
+  footprint.requestUpdate();
+});
+document.getElementById('fpCell').addEventListener('change', () => {
+  ui.fpCell = parseFloat(document.getElementById('fpCell').value) || 0;
+  footprint.requestUpdate();
+});
 
 // Connect/Disconnect
 document.getElementById('connectBtn').addEventListener('click', ()=>{
@@ -1678,6 +2212,12 @@ document.addEventListener('keydown',e=>{
   const map = {' ':'playBtn','f':'fitBtn'};
   const togs = {h:'showHM',b:'showBubbles',v:'showVWAP',c:'showCVD'};
   const k = e.key.toLowerCase();
+  if(k === 'p'){
+    e.preventDefault();
+    const order = ['both','heatmap','footprint'];
+    applyChartKind(order[(order.indexOf(CHART_KIND) + 1) % order.length]);
+    return;
+  }
   if(map[e.key] || map[k]){ e.preventDefault(); document.getElementById(map[e.key]||map[k]).click(); }
   else if(togs[k]){
     const el = document.getElementById(togs[k]); el.checked=!el.checked;
@@ -1688,8 +2228,8 @@ document.addEventListener('keydown',e=>{
 /* ==================== BOOT ==================== */
 function seedHistory(){
   const now = Math.floor(Date.now()/1000);
-  lastTickTime = now - 180;
-  for(let i=0;i<180;i++){ lastTickTime++; simulateTick(lastTickTime); }
+  lastTickTime = now - 600;
+  for(let i=0;i<600;i++){ lastTickTime++; simulateTick(lastTickTime); }
   applySeriesData();
   chart.timeScale().fitContent();
 }
@@ -1700,10 +2240,12 @@ function restartLoop(){
 }
 drawColorBar();
 seedHistory();
+applyChartKind('both');
 restartLoop();
 
-chart.timeScale().subscribeVisibleLogicalRangeChange(()=>heatmap.requestUpdate());
-window.addEventListener('resize',()=>heatmap.requestUpdate());
+chart.timeScale().subscribeVisibleLogicalRangeChange(()=>{ heatmap.requestUpdate(); footprint.requestUpdate(); });
+fpChart.timeScale().subscribeVisibleLogicalRangeChange(()=>{ footprint.requestUpdate(); });
+window.addEventListener('resize',()=>{ heatmap.requestUpdate(); footprint.requestUpdate(); });
 </script>
 </body>
 </html>

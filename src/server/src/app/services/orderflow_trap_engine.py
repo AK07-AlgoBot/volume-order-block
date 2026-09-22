@@ -57,6 +57,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from app.services import cache_manager, telegram_notifier  # noqa: E402
 from app.services.ofmap_bridge import build_feed_and_resolver  # noqa: E402
+from app.services.orderflow_trap_oms import OfTrapOms  # noqa: E402
 
 logger = logging.getLogger("ak07.oftrap")
 
@@ -134,6 +135,9 @@ class OrderflowTrapEngine:
         self.states: dict[str, SymState] = {}
         self.key_to_symbol: dict[str, str] = {}
         self.events: deque[dict[str, Any]] = deque(maxlen=40)
+        self._last_tick_mono: float = time.monotonic()
+        self._published_day: str = ""
+        self.oms = OfTrapOms()
 
     # ---------------------------------------------------------------- helpers
     @staticmethod
@@ -174,6 +178,7 @@ class OrderflowTrapEngine:
         if not sym:
             return
         st = self.states[sym]
+        self._last_tick_mono = time.monotonic()
         try:
             ltp = float(payload.get("ltp"))
         except (TypeError, ValueError):
@@ -370,6 +375,37 @@ class OrderflowTrapEngine:
                 logger.exception("telegram emit failed")
         else:
             logger.info("[%s %s] %s — %s (C=%.2f Δ=%+.0f)", st.symbol, t, kind, detail, bar.close, bar.delta)
+        if kind in ("S", "B"):
+            try:
+                self.oms.on_absorption(st.symbol, kind, t, float(bar.close))
+            except Exception:  # noqa: BLE001
+                logger.exception("OF Trap OMS entry failed")
+
+    def _clear_stale_session(self, today: str) -> None:
+        """Drop yesterday's Redis snapshot so the dashboard cannot look live."""
+        self.events.clear()
+        self._publish_events()
+        for st in self.states.values():
+            self._reset_day(st, today)
+            try:
+                cache_manager.set_json(
+                    cache_manager.OFTRAP_STATE_KEY_TEMPLATE.format(symbol=st.symbol),
+                    {
+                        "symbol": st.symbol,
+                        "time": "—",
+                        "open": None, "high": None, "low": None, "close": None,
+                        "buy_vol": 0, "sell_vol": 0, "delta": 0, "volume": 0,
+                        "sell_abs": False, "buy_abs": False,
+                        "trap_buy": False, "trap_sell": False,
+                        "updated": datetime.now(IST).isoformat(),
+                        "status": "waiting",
+                    },
+                    ttl_seconds=86_400,
+                )
+            except Exception:  # noqa: BLE001
+                pass
+        self._published_day = today
+        logger.info("cleared stale OF Trap session — waiting for %s tape", today)
 
     def _publish_events(self) -> None:
         try:
@@ -399,6 +435,7 @@ class OrderflowTrapEngine:
                     "trap_buy": trap_long,
                     "trap_sell": trap_short,
                     "updated": datetime.now(IST).isoformat(),
+                    "status": "live",
                 },
                 ttl_seconds=86_400,
             )
@@ -457,6 +494,14 @@ class OrderflowTrapEngine:
             return
 
         self._seed_warmup(keys)
+        today = datetime.now(IST).date().isoformat()
+        for st in self.states.values():
+            if st.bars:
+                self._publish(st, st.bars[-1], trap_long=False, trap_short=False)
+                self._published_day = today
+            else:
+                self._clear_stale_session(today)
+                break
 
         queues: dict[str, asyncio.Queue] = {}
         for key in keys.values():
@@ -478,8 +523,27 @@ class OrderflowTrapEngine:
                 await asyncio.sleep(3)
                 try:
                     self.tick_rollover()
+                    self.oms.poll()
                 except Exception:  # noqa: BLE001
                     logger.exception("rollover error")
+
+        async def watchdog() -> None:
+            """Clock day-reset + exit if the Upstox feed is silent in session (docker restarts)."""
+            grace = time.monotonic() + 180
+            while True:
+                await asyncio.sleep(20)
+                now = datetime.now(IST)
+                today = now.date().isoformat()
+                in_session = SESSION_START <= now.time() <= SESSION_END
+                if in_session and self._published_day != today:
+                    self._clear_stale_session(today)
+                silent = time.monotonic() - self._last_tick_mono
+                if in_session and time.monotonic() > grace and silent > 120:
+                    logger.error(
+                        "no live ticks for %.0fs in session — exiting so docker restarts the feed",
+                        silent,
+                    )
+                    os._exit(1)
 
         logger.info(
             "OF Trap engine live | symbols=%s | imb=%.2f wick=%.2f volx=%.2f lookN=%d loc=%.0f away=%.0f",
@@ -488,6 +552,7 @@ class OrderflowTrapEngine:
         )
         tasks = [asyncio.create_task(consume(k, q)) for k, q in queues.items()]
         tasks.append(asyncio.create_task(roller()))
+        tasks.append(asyncio.create_task(watchdog()))
         await asyncio.gather(*tasks)
 
 
