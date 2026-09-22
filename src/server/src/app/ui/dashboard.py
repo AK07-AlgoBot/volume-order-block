@@ -472,7 +472,12 @@ def render_oftrap_panel() -> None:
                 st.warning(f"Stale tape — last bar {updated}. Restart `oftrap_engine` (feed died after yesterday's close).")
             elif s.get("status") == "waiting":
                 st.caption("Waiting for today's first 5m close…")
-            st.caption(f"O {fmt(s.get('open'))} · H {fmt(s.get('high'))} · L {fmt(s.get('low'))} · vol {s.get('volume', 0):,} · updated {updated}")
+            skip = str(s.get("skip") or "").strip()
+            extra = f" · not S/B: {skip}" if skip and flag == "—" else ""
+            st.caption(
+                f"O {fmt(s.get('open'))} · H {fmt(s.get('high'))} · L {fmt(s.get('low'))} · "
+                f"vol {s.get('volume', 0):,} · updated {updated}{extra}"
+            )
 
     trade = cache_manager.get_json(cache_manager.OFTRAP_TRADE_KEY) or {}
     pos = trade.get("position") if isinstance(trade, dict) else None

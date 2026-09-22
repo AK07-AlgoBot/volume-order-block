@@ -292,6 +292,7 @@ class OrderflowTrapEngine:
         vol_sma = sum(b.volume for b in vol_hist) / max(len(vol_hist), 1)
         vol_ok = bar.volume >= vol_sma * p.vol_mult
 
+        sell_dom = buy_dom = mismatch_up = mismatch_dn = False
         if bar.has_delta:
             sell_dom = bar.sell_vol >= bar.buy_vol * p.imb_ratio or bar.delta < 0.0
             buy_dom = bar.buy_vol >= bar.sell_vol * p.imb_ratio or bar.delta > 0.0
@@ -305,6 +306,19 @@ class OrderflowTrapEngine:
                 buy_dom and upper_wick >= p.wick_min and loc_hi and vol_ok
                 and (not p.need_mismatch or mismatch_dn)
             )
+        skip = self._skip_reason(
+            bar,
+            p=p,
+            lower_wick=lower_wick,
+            upper_wick=upper_wick,
+            loc_lo=loc_lo,
+            loc_hi=loc_hi,
+            vol_ok=vol_ok,
+            sell_dom=sell_dom,
+            buy_dom=buy_dom,
+            mismatch_up=mismatch_up,
+            mismatch_dn=mismatch_dn,
+        )
 
         # Trap: opposite absorption after a move to the other extreme (last 12 bars).
         recent12 = recent[-12:]
@@ -324,7 +338,7 @@ class OrderflowTrapEngine:
             trap_short = trap_long = False
 
         strong = abs(bar.delta) >= dfloor or (vol_sma > 0 and bar.volume / vol_sma >= 1.4)
-        self._log_bar(st, bar, strong=strong)
+        self._log_bar(st, bar, strong=strong, skip=skip)
         if bar.sell_abs:
             self._emit(st, bar, "S", "Selling absorption at low")
         if bar.buy_abs:
@@ -334,19 +348,62 @@ class OrderflowTrapEngine:
         if trap_short:
             self._emit(st, bar, "TRAP_SELL", "Selling absorbed earlier → rally → buying now absorbed at high")
 
-        self._publish(st, bar, trap_long=trap_long, trap_short=trap_short)
+        self._publish(st, bar, trap_long=trap_long, trap_short=trap_short, skip=skip)
 
     # -------------------------------------------------------------- reporting
     @staticmethod
     def _bar_time(bar: Bar) -> str:
         return datetime.fromtimestamp(bar.start_ms / 1000.0, tz=IST).strftime("%H:%M")
 
-    def _log_bar(self, st: SymState, bar: Bar, *, strong: bool) -> None:
+    @staticmethod
+    def _skip_reason(
+        bar: Bar,
+        *,
+        p: Params,
+        lower_wick: float,
+        upper_wick: float,
+        loc_lo: bool,
+        loc_hi: bool,
+        vol_ok: bool,
+        sell_dom: bool,
+        buy_dom: bool,
+        mismatch_up: bool,
+        mismatch_dn: bool,
+    ) -> str:
+        if bar.sell_abs or bar.buy_abs:
+            return ""
+        if not bar.has_delta:
+            return "no tape (warmup)"
+        bits: list[str] = []
+        if sell_dom:
+            if lower_wick < p.wick_min:
+                bits.append(f"S wick {lower_wick:.2f}<{p.wick_min:.2f}")
+            if not loc_lo:
+                bits.append("S not local low")
+            if not vol_ok:
+                bits.append("S vol thin")
+            if p.need_mismatch and not mismatch_up:
+                bits.append("S close at low (need recovery)")
+        elif buy_dom:
+            if upper_wick < p.wick_min:
+                bits.append(f"B wick {upper_wick:.2f}<{p.wick_min:.2f}")
+            if not loc_hi:
+                bits.append("B not local high")
+            if not vol_ok:
+                bits.append("B vol thin")
+            if p.need_mismatch and not mismatch_dn:
+                bits.append("B close at high (need rejection)")
+        else:
+            bits.append("no buy/sell dominance")
+        return "; ".join(bits)
+
+    def _log_bar(self, st: SymState, bar: Bar, *, strong: bool, skip: str = "") -> None:
         tag = "S" if bar.sell_abs else ("B" if bar.buy_abs else "·")
+        extra = f"  skip={skip}" if skip else ""
         logger.info(
-            "[%s %s] O%.1f H%.1f L%.1f C%.1f  buy=%.0f sell=%.0f Δ=%+.0f vol=%.0f  %s%s",
+            "[%s %s] O%.1f H%.1f L%.1f C%.1f  buy=%.0f sell=%.0f Δ=%+.0f vol=%.0f  %s%s%s",
             st.symbol, self._bar_time(bar), bar.open, bar.high, bar.low, bar.close,
-            bar.buy_vol, bar.sell_vol, bar.delta, bar.volume, tag, " *" if strong else "",
+            bar.buy_vol, bar.sell_vol, bar.delta, bar.volume, tag, " *" if strong else "", extra,
         )
 
     def _emit(self, st: SymState, bar: Bar, kind: str, detail: str) -> None:
@@ -397,6 +454,7 @@ class OrderflowTrapEngine:
                         "buy_vol": 0, "sell_vol": 0, "delta": 0, "volume": 0,
                         "sell_abs": False, "buy_abs": False,
                         "trap_buy": False, "trap_sell": False,
+                        "skip": "",
                         "updated": datetime.now(IST).isoformat(),
                         "status": "waiting",
                     },
@@ -415,7 +473,7 @@ class OrderflowTrapEngine:
         except Exception:  # noqa: BLE001
             pass
 
-    def _publish(self, st: SymState, bar: Bar, *, trap_long: bool, trap_short: bool) -> None:
+    def _publish(self, st: SymState, bar: Bar, *, trap_long: bool, trap_short: bool, skip: str = "") -> None:
         try:
             cache_manager.set_json(
                 cache_manager.OFTRAP_STATE_KEY_TEMPLATE.format(symbol=st.symbol),
@@ -434,6 +492,7 @@ class OrderflowTrapEngine:
                     "buy_abs": bar.buy_abs,
                     "trap_buy": trap_long,
                     "trap_sell": trap_short,
+                    "skip": skip,
                     "updated": datetime.now(IST).isoformat(),
                     "status": "live",
                 },
