@@ -261,7 +261,7 @@ services:
 
   oftrap_engine:
     # Orderflow Absorption-Trap — live footprint from Upstox full feed.
-    # Paper/compare-vs-GoCharting only (no broker orders). Start with: --profile oftrap
+    # OFTRAP_LIVE=1 fans ITM CE/PE to live users (same OMS as S3/GC). Start with: --profile oftrap
     profiles: ["oftrap"]
     build:
       context: ..
@@ -277,6 +277,7 @@ services:
       PYTHONPATH: /app/src/server/src
       REDIS_HOST: redis
       OFTRAP_SYMBOLS: "NIFTY"
+      OFTRAP_LIVE: "1"
     volumes:
       - ak07_server_data:/app/src/server/data
     depends_on:

@@ -7,7 +7,13 @@ import os
 from dataclasses import dataclass
 from typing import Any, Final
 
-from app.constants import STRATEGY_COPY_KITE, STRATEGY_GC_OF, STRATEGY_S29_ORB, STRATEGY_S3_BREAKOUT
+from app.constants import (
+    STRATEGY_COPY_KITE,
+    STRATEGY_GC_OF,
+    STRATEGY_OFTRAP,
+    STRATEGY_S29_ORB,
+    STRATEGY_S3_BREAKOUT,
+)
 from app.services.groww_engine import GrowwClient
 from app.services.kite_engine import KiteClient
 from app.services.upstox_engine import UpstoxClient, build_upstox_client
@@ -888,6 +894,77 @@ def catchup_gc_legs(
         exclude_usernames=exclude_usernames,
         strategy_id=_gc_fanout_strategy_id(),
         log_tag="GC",
+        force_options=True,
+    )
+
+
+def _oftrap_fanout_strategy_id() -> str:
+    raw = (os.environ.get("AK07_OFTRAP_FANOUT_ALL_LIVE") or "1").strip().lower()
+    if raw in ("0", "false", "no", "off"):
+        return STRATEGY_OFTRAP
+    return FANOUT_ALL_LIVE
+
+
+def place_oftrap_entries(
+    *,
+    index_code: str,
+    direction: str,
+    lot_size: int,
+    lots: int,
+    upstox_market_client: UpstoxClient | None,
+    global_paper: bool,
+    only_usernames: frozenset[str] | None = None,
+    spot: float | None = None,
+) -> list[dict[str, Any]]:
+    """OF Trap absorption — S3 ITM CE/PE fan-out to live users."""
+    return place_s3_entries(
+        index_code=index_code,
+        direction=direction,
+        lot_size=lot_size,
+        lots=lots,
+        upstox_market_client=upstox_market_client,
+        global_paper=global_paper,
+        only_usernames=only_usernames,
+        spot=spot,
+        strategy_id=_oftrap_fanout_strategy_id(),
+        log_tag="OFTRAP",
+        force_options=True,
+    )
+
+
+def place_oftrap_exits(
+    legs: list[dict[str, Any]],
+    direction: str,
+    *,
+    global_paper: bool,
+) -> bool:
+    return place_s3_exits(legs, direction, global_paper=global_paper, log_tag="OFTRAP")
+
+
+def catchup_oftrap_legs(
+    *,
+    index_code: str,
+    direction: str,
+    lot_size: int,
+    lots: int,
+    existing_legs: list[dict[str, Any]],
+    upstox_market_client: UpstoxClient | None,
+    global_paper: bool,
+    spot: float | None = None,
+    exclude_usernames: frozenset[str] | set[str] | None = None,
+) -> list[dict[str, Any]]:
+    return catchup_s3_legs(
+        index_code=index_code,
+        direction=direction,
+        lot_size=lot_size,
+        lots=lots,
+        existing_legs=existing_legs,
+        upstox_market_client=upstox_market_client,
+        global_paper=global_paper,
+        spot=spot,
+        exclude_usernames=exclude_usernames,
+        strategy_id=_oftrap_fanout_strategy_id(),
+        log_tag="OFTRAP",
         force_options=True,
     )
 

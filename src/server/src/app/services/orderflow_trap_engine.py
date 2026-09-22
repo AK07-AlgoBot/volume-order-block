@@ -605,7 +605,8 @@ class OrderflowTrapEngine:
                     os._exit(1)
 
         logger.info(
-            "OF Trap engine live | symbols=%s | imb=%.2f wick=%.2f volx=%.2f lookN=%d loc=%.0f away=%.0f",
+            "OF Trap engine live | oms=%s | symbols=%s | imb=%.2f wick=%.2f volx=%.2f lookN=%d loc=%.0f away=%.0f",
+            "PAPER" if self.oms.paper else "LIVE",
             ",".join(keys), self.params.imb_ratio, self.params.wick_min, self.params.vol_mult,
             self.params.look_n, self.params.loc_tol_pts, self.params.away_pts,
         )

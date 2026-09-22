@@ -16,6 +16,7 @@ from app.constants import (
     ALL_STRATEGIES,
     DASHBOARD_USERNAME,
     STRATEGY_GC_OF,
+    STRATEGY_OFTRAP,
     STRATEGY_S3_BREAKOUT,
     STRATEGY_S29_ORB,
     SUPPORTED_BROKERS,
@@ -36,6 +37,9 @@ def _normalize_enabled_strategies(strategies: list[Any]) -> list[str]:
     if STRATEGY_GC_OF in ALL_STRATEGIES and STRATEGY_GC_OF not in out:
         if STRATEGY_S3_BREAKOUT in out or STRATEGY_S29_ORB in out:
             out.append(STRATEGY_GC_OF)
+    if STRATEGY_OFTRAP in ALL_STRATEGIES and STRATEGY_OFTRAP not in out:
+        if STRATEGY_S3_BREAKOUT in out or STRATEGY_GC_OF in out:
+            out.append(STRATEGY_OFTRAP)
     return out
 
 

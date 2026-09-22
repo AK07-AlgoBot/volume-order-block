@@ -16,6 +16,7 @@ from app.constants import (
     STRATEGY_S8_CHOCH,
     STRATEGY_S29_ORB,
     STRATEGY_GC_OF,
+    STRATEGY_OFTRAP,
     STRATEGY_COPY_KITE,
 )
 from app.services.user_profiles_store import strategy_enabled
@@ -33,6 +34,7 @@ _TRADE_STRATEGY_ID_MAP: dict[str, str] = {
     "s8_choch": STRATEGY_S8_CHOCH,
     "s29_orb": STRATEGY_S29_ORB,
     "gc_of": STRATEGY_GC_OF,
+    "oftrap": STRATEGY_OFTRAP,
     "copy_kite": STRATEGY_COPY_KITE,
     "gamma": STRATEGY_GAMMA,
 }

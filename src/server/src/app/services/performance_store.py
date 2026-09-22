@@ -37,6 +37,7 @@ STRATEGY_S7_ORB: Final[str] = "Strategy 7 — ORB+"
 STRATEGY_CHOCH: Final[str] = "Strategy 8 — CHOCH"
 STRATEGY_S29_ORB: Final[str] = "Strategy 29 — Nifty ORB+"
 STRATEGY_GC_OF: Final[str] = "GoCharting — Orderflow"
+STRATEGY_OFTRAP: Final[str] = "OF Trap — Absorption"
 STRATEGY_COPY_KITE: Final[str] = "Copy Kite — Arun mirror"
 STRATEGY_GAMMA: Final[str] = "Gamma Expiry Observer"
 INDEX_ORDER: Final[tuple[str, ...]] = ("NIFTY", "BANKNIFTY", "SENSEX")
@@ -50,6 +51,7 @@ STRATEGY_ORDER: Final[tuple[str, ...]] = (
     STRATEGY_S7_ORB,
     STRATEGY_S29_ORB,
     STRATEGY_GC_OF,
+    STRATEGY_OFTRAP,
     STRATEGY_COPY_KITE,
     STRATEGY_GAMMA,
 )

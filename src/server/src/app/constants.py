@@ -12,6 +12,7 @@ STRATEGY_S7_ORB = "s7_orb"
 STRATEGY_S8_CHOCH = "s8_choch"
 STRATEGY_S29_ORB = "s29_orb"
 STRATEGY_GC_OF = "gc_of"
+STRATEGY_OFTRAP = "oftrap"
 STRATEGY_COPY_KITE = "copy_kite"
 STRATEGY_GAMMA = "gamma"
 
@@ -34,6 +35,7 @@ ALL_STRATEGIES: tuple[str, ...] = (
     STRATEGY_S3_BREAKOUT,
     STRATEGY_S29_ORB,
     STRATEGY_GC_OF,
+    STRATEGY_OFTRAP,
     STRATEGY_COPY_KITE,
     STRATEGY_GAMMA,
 )
@@ -46,6 +48,7 @@ STRATEGY_LABELS: dict[str, str] = {
     STRATEGY_S8_CHOCH: "Strategy 8 — CHOCH",
     STRATEGY_S29_ORB: "Strategy 29 — Nifty ORB+",
     STRATEGY_GC_OF: "GoCharting — Orderflow",
+    STRATEGY_OFTRAP: "OF Trap — Absorption",
     STRATEGY_COPY_KITE: "Copy Kite — Arun mirror",
     STRATEGY_GAMMA: "Gamma Expiry Observer",
 }
@@ -58,6 +61,7 @@ STRATEGY_PILL_SHORT: dict[str, str] = {
     STRATEGY_S8_CHOCH: "S8 CHOCH",
     STRATEGY_S29_ORB: "S29 ORB",
     STRATEGY_GC_OF: "GC OF",
+    STRATEGY_OFTRAP: "OF Trap",
     STRATEGY_COPY_KITE: "Copy Kite",
     STRATEGY_GAMMA: "Gamma",
 }

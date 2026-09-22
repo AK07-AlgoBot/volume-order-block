@@ -8,12 +8,14 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import sys
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "src" / "server" / "src"))
 sys.path.insert(0, str(REPO / "src" / "lib"))
+os.environ.setdefault("OFTRAP_LIVE", "0")
 
 from app.services.orderflow_trap_oms import OfTrapOms, apply_rr_trail  # noqa: E402
 

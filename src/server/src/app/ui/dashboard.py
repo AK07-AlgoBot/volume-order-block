@@ -30,6 +30,7 @@ from app.constants import (
     STRATEGY_S8_CHOCH,
     STRATEGY_S29_ORB,
     STRATEGY_GC_OF,
+    STRATEGY_OFTRAP,
     STRATEGY_COPY_KITE,
 )
 from app.services import cache_manager
@@ -427,8 +428,12 @@ def render_oftrap_panel() -> None:
     """
     from app.ui.styles import strategy_card_header
 
+    trade_preview = cache_manager.get_json(cache_manager.OFTRAP_TRADE_KEY) or {}
+    mode = "LIVE" if isinstance(trade_preview, dict) and (
+        trade_preview.get("paper") is False or str(trade_preview.get("mode") or "") == "LIVE"
+    ) else "PAPER"
     st.markdown(
-        strategy_card_header("OF Trap · Absorption", "Upstox live footprint · S/B + TRAP · paper vs GoCharting"),
+        strategy_card_header("OF Trap · Absorption", f"Upstox footprint · S/B → ITM option · {mode}"),
         unsafe_allow_html=True,
     )
 
@@ -497,11 +502,18 @@ def render_oftrap_panel() -> None:
         t5.metric("TP 1:4", fmt(pos.get("target")))
         t6.metric("Trail", "1R→cost +1/pt" if pos.get("trail_armed") else "wait 1R")
         ohlc = pos.get("option_ohlc") or {}
+        legs = pos.get("order_legs") or []
+        fans = ", ".join(
+            f"{leg.get('username')}@{leg.get('broker')}"
+            for leg in legs
+            if isinstance(leg, dict) and leg.get("username")
+        )
         st.caption(
             f"{'PAPER' if trade.get('paper') else 'LIVE'} BUY {pos.get('option_side')}{pos.get('strike')} "
             f"· LTP {fmt(ltp_num)} "
             f"· opt {pos.get('bar_time')} O {fmt(ohlc.get('open'))} H {fmt(ohlc.get('high'))} "
             f"L {fmt(ohlc.get('low'))} C {fmt(ohlc.get('close'))} · R {fmt(pos.get('r_pts'))}"
+            f"{f' · {fans}' if fans else ''}"
         )
     else:
         st.caption("Flat — next S/B maps ITM option 5m candle (SL=low, TP=1:4, trail 1R→cost then +1/pt).")
@@ -980,8 +992,7 @@ def _render_strategy_sections() -> None:
         with st.container(border=True, key="ak07_copy_kite"):
             render_copy_kite_panel()
 
-    # Orderflow Absorption-Trap — research/compare tool (admin only, paper).
-    if auth_session.is_admin():
+    if user_can_view_strategy(STRATEGY_OFTRAP):
         with st.container(border=True, key="ak07_oftrap"):
             render_oftrap_panel()
 
