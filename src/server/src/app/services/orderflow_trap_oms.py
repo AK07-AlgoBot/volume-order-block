@@ -241,6 +241,16 @@ class OfTrapOms:
             pos.log.append(f"exit {reason} @ {ltp:.2f}  Δ {pnl:+.2f}")
             self.closed.append(asdict(pos))
             logger.warning("[%s %s] EXIT %s @ %.2f (entry %.2f)", pos.symbol, pos.bar_time, reason, ltp, pos.entry)
+            try:
+                telegram_notifier.send_message(
+                    f"OF TRAP {pos.kind} paper EXIT — {pos.symbol} {pos.bar_time}\n"
+                    f"{pos.option_side} {pos.strike}\n"
+                    f"exit {reason} @ {ltp:.2f}\n"
+                    f"entry {pos.entry:.2f}  SL {pos.sl:.2f}  TP {pos.target:.2f}\n"
+                    f"Δ {pnl:+.2f}"
+                )
+            except Exception:  # noqa: BLE001
+                logger.exception("telegram oftrap exit failed")
             self.position = None
         self._publish()
 
