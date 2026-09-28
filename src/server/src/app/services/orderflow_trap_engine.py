@@ -26,7 +26,7 @@ What it emits (console + Telegram + Redis ``ak07:oftrap_state``)
 
 Run:  python -u src/server/src/app/services/orderflow_trap_engine.py
 Env:
-  OFTRAP_SYMBOLS   comma list, default "NIFTY" (e.g. "NIFTY,BANKNIFTY")
+  OFTRAP_SYMBOLS   comma list, default "NIFTY,BANKNIFTY,SENSEX,GOLD,SILVER,CRUDE"
   OFTRAP_IMB_RATIO 1.25   buy/sell volume dominance
   OFTRAP_WICK_MIN  0.28   min rejection wick fraction
   OFTRAP_VOL_MULT  0.9    min bar volume vs its SMA
@@ -66,6 +66,22 @@ BAR_MS: Final[int] = 5 * 60 * 1000
 SESSION_START: Final[dtime] = dtime(9, 15)
 SESSION_END: Final[dtime] = dtime(15, 30)
 TICK: Final[float] = 0.05
+DEFAULT_SYMBOLS: Final[str] = "NIFTY,BANKNIFTY,SENSEX,GOLD,SILVER,CRUDE"
+
+
+def _scale(symbol: str) -> tuple[float, float, float]:
+    """(loc_tol, away, dfloor) multipliers vs Nifty point defaults.
+
+    Relative gates (wick, ratio, volume vs SMA) are unchanged. Absolute point
+    gates are widened for high-priced names so a 35pt Nifty band is not applied
+    raw to Sensex / gold.
+    """
+    code = symbol.upper()
+    if code in ("BANKNIFTY", "SENSEX", "GOLD", "SILVER"):
+        return 4.0, 2.0, 2.0
+    if code in ("CRUDE", "CRUDEOIL"):
+        return 1.5, 1.5, 1.0
+    return 1.0, 1.0, 1.0
 
 
 def _f(name: str, default: float) -> float:
@@ -118,7 +134,10 @@ class Bar:
 @dataclass
 class SymState:
     symbol: str
-    is_bn: bool
+    loc_mult: float = 1.0
+    away_mult: float = 1.0
+    dfloor_mult: float = 1.0
+    future_key: str = ""
     bars: deque[Bar] = field(default_factory=lambda: deque(maxlen=80))
     current: Bar | None = None
     last_vtt: float | None = None
@@ -270,9 +289,9 @@ class OrderflowTrapEngine:
 
     def _detect(self, st: SymState, bar: Bar) -> None:
         p = self.params
-        loc_tol = p.loc_tol_pts * (4.0 if st.is_bn else 1.0)
-        away = p.away_pts * (2.0 if st.is_bn else 1.0)
-        dfloor = p.dfloor * (2.0 if st.is_bn else 1.0)
+        loc_tol = p.loc_tol_pts * st.loc_mult
+        away = p.away_pts * st.away_mult
+        dfloor = p.dfloor * st.dfloor_mult
 
         rng = max(bar.high - bar.low, TICK)
         mid = (bar.high + bar.low) / 2.0
@@ -433,7 +452,9 @@ class OrderflowTrapEngine:
             logger.info("[%s %s] %s — %s (C=%.2f Δ=%+.0f)", st.symbol, t, kind, detail, bar.close, bar.delta)
         if kind in ("S", "B"):
             try:
-                self.oms.on_absorption(st.symbol, kind, t, float(bar.close))
+                self.oms.on_absorption(
+                    st.symbol, kind, t, float(bar.close), underlying_key=st.future_key,
+                )
             except Exception:  # noqa: BLE001
                 logger.exception("OF Trap OMS entry failed")
 
@@ -545,7 +566,14 @@ class OrderflowTrapEngine:
                 continue
             keys[sym] = key
             self.key_to_symbol[key] = sym
-            self.states[sym] = SymState(symbol=sym, is_bn=("BANK" in sym.upper()))
+            loc_m, away_m, df_m = _scale(sym)
+            self.states[sym] = SymState(
+                symbol=sym,
+                loc_mult=loc_m,
+                away_mult=away_m,
+                dfloor_mult=df_m,
+                future_key=key,
+            )
             logger.info("subscribing %s → %s", sym, key)
         if not keys:
             logger.error("no instruments resolved; exiting")
@@ -621,7 +649,11 @@ def main() -> None:
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
         datefmt="%H:%M:%S",
     )
-    symbols = [s.strip().upper() for s in os.environ.get("OFTRAP_SYMBOLS", "NIFTY").split(",") if s.strip()]
+    symbols = [
+        s.strip().upper()
+        for s in os.environ.get("OFTRAP_SYMBOLS", DEFAULT_SYMBOLS).split(",")
+        if s.strip()
+    ]
     engine = OrderflowTrapEngine(symbols)
     try:
         asyncio.run(engine.run())

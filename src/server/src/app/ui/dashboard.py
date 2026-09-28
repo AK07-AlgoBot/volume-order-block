@@ -435,7 +435,7 @@ def render_oftrap_panel() -> None:
         unsafe_allow_html=True,
     )
 
-    symbols = [s.strip().upper() for s in (os.environ.get("OFTRAP_SYMBOLS") or "NIFTY,BANKNIFTY").split(",") if s.strip()]
+    symbols = [s.strip().upper() for s in (os.environ.get("OFTRAP_SYMBOLS") or "NIFTY,BANKNIFTY,SENSEX,GOLD,SILVER,CRUDE").split(",") if s.strip()]
     states = {}
     for sym in symbols:
         s = cache_manager.get_json(cache_manager.OFTRAP_STATE_KEY_TEMPLATE.format(symbol=sym))
@@ -483,9 +483,16 @@ def render_oftrap_panel() -> None:
             )
 
     trade = cache_manager.get_json(cache_manager.OFTRAP_TRADE_KEY) or {}
-    pos = trade.get("position") if isinstance(trade, dict) else None
+    stored_pos = trade.get("positions") if isinstance(trade, dict) else None
+    if isinstance(stored_pos, dict) and stored_pos:
+        open_rows = [p for p in stored_pos.values() if isinstance(p, dict)]
+    else:
+        one = trade.get("position") if isinstance(trade, dict) else None
+        open_rows = [one] if isinstance(one, dict) else []
     st.markdown("##### OF Trap — Option trade (same 5m candle)")
-    if pos:
+    if not open_rows:
+        st.caption("Flat — next S/B maps ITM option 5m candle (SL=low, TP=1:4, trail 1R→cost then +1/pt). One slot per symbol.")
+    for pos in open_rows:
         t1, t2, t3, t4, t5, t6 = st.columns(6)
         t1.metric("Setup", f"{pos.get('kind')} {pos.get('bar_time')} → {pos.get('option_side')} {pos.get('strike')}")
         t2.metric("Entry", fmt(pos.get("entry")))
@@ -513,8 +520,6 @@ def render_oftrap_panel() -> None:
             f"L {fmt(ohlc.get('low'))} C {fmt(ohlc.get('close'))} · R {fmt(pos.get('r_pts'))}"
             f"{f' · {fans}' if fans else ''}"
         )
-    else:
-        st.caption("Flat — next S/B maps ITM option 5m candle (SL=low, TP=1:4, trail 1R→cost then +1/pt).")
     closed = (trade.get("closed") or []) if isinstance(trade, dict) else []
     if closed:
         last = closed[-1]

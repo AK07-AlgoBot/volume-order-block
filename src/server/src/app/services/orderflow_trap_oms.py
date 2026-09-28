@@ -90,6 +90,7 @@ class OfTrapPosition:
     order_legs: list[dict[str, Any]] = field(default_factory=list)
     lots: int = 1
     lot_size: int = 65
+    tracked_only: bool = False
     log: list[str] = field(default_factory=list)
 
 
@@ -97,7 +98,7 @@ class OfTrapOms:
     def __init__(self) -> None:
         self.paper = bool(MOCK_MODE) or os.environ.get("OFTRAP_LIVE", "1") not in ("1", "true", "True")
         self.client: UpstoxClient | None = None
-        self.position: OfTrapPosition | None = None
+        self.positions: dict[str, OfTrapPosition] = {}
         self.closed: list[dict[str, Any]] = []
         self._last_fanout_catchup_mono = 0.0
         try:
@@ -120,17 +121,25 @@ class OfTrapOms:
         spot: float,
         *,
         client: UpstoxClient | None = None,
+        underlying_key: str = "",
     ) -> dict[str, Any]:
         """Resolve ITM option + same-TF candle → entry/SL/1:4. No order."""
-        code = symbol.upper()
+        code = "CRUDEOIL" if symbol.upper() in ("CRUDE", "CRUDEOIL") else symbol.upper()
         cfg = INDEX_CONFIGS.get(code)
-        if not cfg:
-            raise ValueError(f"unsupported index {symbol}")
+        if cfg:
+            underlying = cfg.spot_instrument_key
+            lot_size = int(cfg.lot_size)
+        elif underlying_key:
+            # MCX: option chain is requested on the subscribed future when there is no index spot.
+            underlying = underlying_key
+            lot_size = {"GOLD": 100, "SILVER": 30, "CRUDEOIL": 100}.get(code, 1)
+        else:
+            raise ValueError(f"unsupported symbol {symbol}")
         if kind not in ("S", "B"):
             raise ValueError(f"trade only on S/B absorption, got {kind}")
         direction = "LONG" if kind == "S" else "SHORT"
         cli = client or self._client()
-        picked = cli.get_itm_option_contract(cfg.spot_instrument_key, spot, direction)
+        picked = cli.get_itm_option_contract(underlying, spot, direction)
         if not picked or not picked.get("instrument_key"):
             raise RuntimeError(f"no ITM option for {code} {direction} @ {spot}")
         candles = cli.get_closed_5min_candles(str(picked["instrument_key"])) or []
@@ -146,7 +155,7 @@ class OfTrapOms:
             raise RuntimeError(f"option risk {risk} < {MIN_RISK} (C={entry} L={sl})")
         target = round(entry + RR_TARGET * risk, 2)
         return {
-            "symbol": code,
+            "symbol": symbol.upper(),
             "kind": kind,
             "direction": direction,
             "option_side": str(picked.get("option_type") or ("CE" if direction == "LONG" else "PE")),
@@ -169,28 +178,40 @@ class OfTrapOms:
                 "close": float(opt["close"]),
             },
             "paper": self.paper,
+            "lot_size": lot_size,
         }
 
-    def on_absorption(self, symbol: str, kind: str, bar_time: str, spot: float) -> OfTrapPosition | None:
+    def on_absorption(
+        self,
+        symbol: str,
+        kind: str,
+        bar_time: str,
+        spot: float,
+        *,
+        underlying_key: str = "",
+    ) -> OfTrapPosition | None:
         if kind not in ("S", "B"):
             return None
+        sym = symbol.upper()
         now = datetime.now(IST)
         if now.time() >= NO_ENTRY_AFTER:
-            logger.info("skip %s %s — past %s", symbol, bar_time, NO_ENTRY_AFTER)
+            logger.info("skip %s %s — past %s", sym, bar_time, NO_ENTRY_AFTER)
             return None
-        if self.position and self.position.status == "open":
-            logger.info("skip %s %s — already in %s %s", symbol, bar_time, self.position.kind, self.position.bar_time)
+        held = self.positions.get(sym)
+        if held and held.status == "open":
+            logger.info("skip %s %s — already in %s %s", sym, bar_time, held.kind, held.bar_time)
             return None
         if entries_globally_blocked() or profit_target_engaged():
             logger.info("skip %s %s — entries blocked (kill / daily target)", symbol, bar_time)
             return None
         try:
-            plan = self.plan_from_absorption(symbol, kind, bar_time, spot)
+            plan = self.plan_from_absorption(
+                symbol, kind, bar_time, spot, underlying_key=underlying_key,
+            )
         except Exception as exc:  # noqa: BLE001
             logger.warning("OF Trap plan failed %s %s %s: %s", symbol, kind, bar_time, exc)
             return None
-        cfg = INDEX_CONFIGS.get(plan["symbol"])
-        lot_size = int(cfg.lot_size) if cfg else 65
+        lot_size = int(plan.get("lot_size") or 65)
         legs = place_oftrap_entries(
             index_code=plan["symbol"],
             direction=plan["direction"],
@@ -200,10 +221,14 @@ class OfTrapOms:
             global_paper=self.paper,
             spot=spot,
         )
-        if not legs and self.paper:
+        tracked_only = False
+        if not legs:
+            # No broker fill (commodity fan-out, or live account with no margin).
+            # Still track the option LTP so the performance log gets the points.
+            tracked_only = not self.paper
             legs = [{
                 "username": "AK07",
-                "broker": "paper",
+                "broker": "track",
                 "trading_symbol": f"{plan['strike']}{plan['option_side']}",
                 "instrument_key": plan["instrument_key"],
                 "quantity": lot_size,
@@ -213,15 +238,15 @@ class OfTrapOms:
                 "option_strike": plan["strike"],
                 "option_type": plan["option_side"],
             }]
-        if not legs:
-            logger.error("OF Trap %s %s %s aborted — no broker legs", symbol, kind, bar_time)
-            return None
+            logger.warning(
+                "OF Trap %s %s %s track-only — no broker legs", symbol, kind, bar_time,
+            )
         primary = next((leg for leg in legs if leg.get("broker") == "upstox"), legs[0])
         fill = next(
             (float(leg["premium_entry"]) for leg in legs if leg.get("premium_entry") is not None),
             plan["entry"],
         )
-        mode = "PAPER" if self.paper else "LIVE"
+        mode = "TRACK" if tracked_only else ("PAPER" if self.paper else "LIVE")
         pos = OfTrapPosition(
             symbol=plan["symbol"],
             kind=kind,
@@ -242,13 +267,14 @@ class OfTrapOms:
             order_legs=legs,
             lots=int(primary.get("lots") or 1),
             lot_size=lot_size,
+            tracked_only=tracked_only,
             log=[
                 f"{bar_time} {kind} → BUY {plan['option_side']} {plan['strike']} "
                 f"entry {plan['entry']:.2f} SL {plan['sl']:.2f} TP {plan['target']:.2f} (1:{RR_TARGET:.0f}) "
                 f"[{legs_summary(legs)}]"
             ],
         )
-        self.position = pos
+        self.positions[sym] = pos
         self._publish()
         logger.warning(
             "[%s %s] %s BUY %s%d  entry=%.2f SL=%.2f TP=%.2f R=%.2f [%s]",
@@ -271,9 +297,13 @@ class OfTrapOms:
         return pos
 
     def poll(self) -> None:
-        pos = self.position
-        if pos is None or pos.status != "open":
-            return
+        for sym in list(self.positions):
+            pos = self.positions.get(sym)
+            if pos is None or pos.status != "open":
+                continue
+            self._poll_one(pos)
+
+    def _poll_one(self, pos: OfTrapPosition) -> None:
         now = datetime.now(IST)
         try:
             ltp = self._client().get_ltp(pos.instrument_key)
@@ -305,11 +335,11 @@ class OfTrapOms:
                 self._publish()
                 return
         else:
-            self._catchup_fanout(spot=ltp)
+            self._catchup_fanout(pos, spot=ltp)
         self._publish()
 
     def _close_position(self, pos: OfTrapPosition, ltp: float, reason: str) -> bool:
-        if not self.paper:
+        if not pos.tracked_only and not self.paper:
             ok = place_oftrap_exits(position_legs(pos), pos.direction, global_paper=False)
             if not ok:
                 logger.error("OF Trap live exit failed — will retry %s", reason)
@@ -320,7 +350,7 @@ class OfTrapOms:
         pnl = round(ltp - pos.entry, 2)
         pos.log.append(f"exit {reason} @ {ltp:.2f}  Δ {pnl:+.2f}")
         self.closed.append(asdict(pos))
-        mode = "PAPER" if self.paper else "LIVE"
+        mode = "TRACK" if pos.tracked_only else ("PAPER" if self.paper else "LIVE")
         logger.warning("[%s %s] %s EXIT %s @ %.2f (entry %.2f)", pos.symbol, pos.bar_time, mode, reason, ltp, pos.entry)
         try:
             performance_store.record_completed_trade(
@@ -333,8 +363,14 @@ class OfTrapOms:
                 pnl_points=pnl,
                 exit_reason=reason,
                 entry_at=pos.opened_at,
-                paper_trading=self.paper,
-                extra={"participants": leg_usernames(pos.order_legs)},
+                paper_trading=self.paper or pos.tracked_only,
+                extra={
+                    "participants": leg_usernames(pos.order_legs),
+                    "kind": pos.kind,
+                    "tracked_only": pos.tracked_only,
+                    "option_side": pos.option_side,
+                    "option_strike": pos.strike,
+                },
             )
         except Exception:  # noqa: BLE001
             logger.exception("OF Trap performance record failed")
@@ -349,12 +385,11 @@ class OfTrapOms:
             )
         except Exception:  # noqa: BLE001
             logger.exception("telegram oftrap exit failed")
-        self.position = None
+        self.positions.pop(pos.symbol, None)
         return True
 
-    def _catchup_fanout(self, *, spot: float | None) -> None:
-        pos = self.position
-        if pos is None or self.paper or pos.status != "open":
+    def _catchup_fanout(self, pos: OfTrapPosition, *, spot: float | None) -> None:
+        if pos.tracked_only or self.paper or pos.status != "open":
             return
         now_mono = time.monotonic()
         if now_mono - self._last_fanout_catchup_mono < 60.0:
@@ -389,60 +424,73 @@ class OfTrapOms:
             return
         closed = raw.get("closed")
         if isinstance(closed, list):
-            self.closed = [c for c in closed if isinstance(c, dict)][-8:]
+            self.closed = [c for c in closed if isinstance(c, dict)][-20:]
         stored_paper = bool(raw.get("paper"))
-        pos_raw = raw.get("position")
-        if stored_paper != self.paper:
-            if isinstance(pos_raw, dict) and pos_raw.get("status") == "open":
-                logger.warning(
-                    "OF Trap drop leftover %s position — OMS is now %s",
-                    "PAPER" if stored_paper else "LIVE",
-                    "PAPER" if self.paper else "LIVE",
-                )
-            return
-        if not isinstance(pos_raw, dict) or pos_raw.get("status") != "open":
-            return
-        try:
-            self.position = OfTrapPosition(
-                symbol=str(pos_raw.get("symbol") or "NIFTY"),
-                kind=str(pos_raw.get("kind") or "S"),
-                direction=str(pos_raw.get("direction") or "LONG"),
-                option_side=str(pos_raw.get("option_side") or "CE"),
-                bar_time=str(pos_raw.get("bar_time") or ""),
-                instrument_key=str(pos_raw.get("instrument_key") or ""),
-                strike=int(pos_raw.get("strike") or 0),
-                expiry=str(pos_raw.get("expiry") or ""),
-                entry=float(pos_raw.get("entry") or 0.0),
-                sl=float(pos_raw.get("sl") or 0.0),
-                target=float(pos_raw.get("target") or 0.0),
-                r_pts=float(pos_raw.get("r_pts") or 0.0),
-                option_ohlc=dict(pos_raw.get("option_ohlc") or {}),
-                opened_at=str(pos_raw.get("opened_at") or ""),
-                trail_armed=bool(pos_raw.get("trail_armed") or False),
-                premium_high=float(pos_raw.get("premium_high") or pos_raw.get("entry") or 0.0),
-                ltp=float(pos_raw["ltp"]) if pos_raw.get("ltp") is not None else None,
-                status="open",
-                order_legs=list(pos_raw.get("order_legs") or []),
-                lots=int(pos_raw.get("lots") or 1),
-                lot_size=int(pos_raw.get("lot_size") or 65),
-                log=list(pos_raw.get("log") or []),
+        blobs: list[dict[str, Any]] = []
+        stored = raw.get("positions")
+        if isinstance(stored, dict):
+            blobs.extend(v for v in stored.values() if isinstance(v, dict))
+        elif isinstance(raw.get("position"), dict):
+            blobs.append(raw["position"])
+        if stored_paper != self.paper and blobs:
+            logger.warning(
+                "OF Trap drop leftover %s position(s) — OMS is now %s",
+                "PAPER" if stored_paper else "LIVE",
+                "PAPER" if self.paper else "LIVE",
             )
+            return
+        for pos_raw in blobs:
+            if pos_raw.get("status") != "open":
+                continue
+            try:
+                pos = self._position_from_raw(pos_raw)
+            except (TypeError, ValueError, KeyError):
+                logger.exception("OF Trap failed to hydrate position")
+                continue
+            self.positions[pos.symbol] = pos
             logger.info(
-                "OF Trap hydrated %s %s %s%d",
-                self.position.kind, self.position.bar_time, self.position.option_side, self.position.strike,
+                "OF Trap hydrated %s %s %s %s%d",
+                pos.symbol, pos.kind, pos.bar_time, pos.option_side, pos.strike,
             )
-        except (TypeError, ValueError, KeyError):
-            logger.exception("OF Trap failed to hydrate position")
-            self.position = None
+
+    @staticmethod
+    def _position_from_raw(pos_raw: dict[str, Any]) -> OfTrapPosition:
+        return OfTrapPosition(
+            symbol=str(pos_raw.get("symbol") or "NIFTY"),
+            kind=str(pos_raw.get("kind") or "S"),
+            direction=str(pos_raw.get("direction") or "LONG"),
+            option_side=str(pos_raw.get("option_side") or "CE"),
+            bar_time=str(pos_raw.get("bar_time") or ""),
+            instrument_key=str(pos_raw.get("instrument_key") or ""),
+            strike=int(pos_raw.get("strike") or 0),
+            expiry=str(pos_raw.get("expiry") or ""),
+            entry=float(pos_raw.get("entry") or 0.0),
+            sl=float(pos_raw.get("sl") or 0.0),
+            target=float(pos_raw.get("target") or 0.0),
+            r_pts=float(pos_raw.get("r_pts") or 0.0),
+            option_ohlc=dict(pos_raw.get("option_ohlc") or {}),
+            opened_at=str(pos_raw.get("opened_at") or ""),
+            trail_armed=bool(pos_raw.get("trail_armed") or False),
+            premium_high=float(pos_raw.get("premium_high") or pos_raw.get("entry") or 0.0),
+            ltp=float(pos_raw["ltp"]) if pos_raw.get("ltp") is not None else None,
+            status="open",
+            order_legs=list(pos_raw.get("order_legs") or []),
+            lots=int(pos_raw.get("lots") or 1),
+            lot_size=int(pos_raw.get("lot_size") or 65),
+            tracked_only=bool(pos_raw.get("tracked_only")),
+            log=list(pos_raw.get("log") or []),
+        )
 
     def _publish(self) -> None:
-        pos = self.position
+        open_pos = {sym: asdict(pos) for sym, pos in self.positions.items() if pos.status == "open"}
+        first = next(iter(open_pos.values()), None)
         payload = {
             "paper": self.paper,
             "mode": "PAPER" if self.paper else "LIVE",
             "updated": datetime.now(IST).isoformat(),
-            "position": asdict(pos) if pos else None,
-            "closed": self.closed[-8:],
+            "position": first,
+            "positions": open_pos,
+            "closed": self.closed[-20:],
         }
         try:
             cache_manager.set_json(cache_manager.OFTRAP_TRADE_KEY, payload, ttl_seconds=86_400)
