@@ -421,12 +421,11 @@ class OrderflowTrapEngine:
             side = "BUY" if kind == "TRAP_BUY" else "SELL"
             logger.warning("[%s %s] *** TRAP %s *** %s | C=%.2f Δ=%+.0f", st.symbol, t, side, detail, bar.close, bar.delta)
             try:
-                telegram_notifier.send_message(
-                    f"\U0001f9f2 *OF TRAP {side}* — {st.symbol}\n"
-                    f"\u2022 Time: {t} (5m close)\n"
-                    f"\u2022 Price: {bar.close:.2f}  Δ: {bar.delta:+.0f}\n"
-                    f"\u2022 {detail}\n"
-                    f"\u2022 Paper/compare-vs-GoCharting only"
+                telegram_notifier.notify_system_event(
+                    f"OF TRAP {side} — {st.symbol}",
+                    f"Time: {t} (5m close)\n"
+                    f"Price: {bar.close:.2f}  Δ: {bar.delta:+.0f}\n"
+                    f"{detail}",
                 )
             except Exception:  # noqa: BLE001 - notifier must never kill the feed
                 logger.exception("telegram emit failed")

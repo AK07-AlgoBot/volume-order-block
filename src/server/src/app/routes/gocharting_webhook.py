@@ -71,5 +71,10 @@ async def receive_gocharting_alert(
     if result.get("reason") == "redis queue failed":
         raise HTTPException(status_code=503, detail="alert queue unavailable")
     if not result.get("ok"):
-        logger.warning("GoCharting alert ignored from %s: %s body=%r", remote, result, raw[:300])
+        logger.warning(
+            "GoCharting alert ignored from %s: %s (%d bytes, body not logged)",
+            remote,
+            result.get("reason") or result,
+            len(raw),
+        )
     return result

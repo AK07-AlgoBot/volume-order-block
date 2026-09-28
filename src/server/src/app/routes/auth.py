@@ -67,6 +67,7 @@ async def profile(user: UserClaims = Depends(require_user)):
         enabled_strategies=prof.get("enabled_strategies") or [],
         broker=str(prof.get("broker") or "upstox"),
         paper_trading=bool(prof.get("paper_trading")),
+        telegram_notifications=bool(prof.get("telegram_notifications")),
     )
 
 

@@ -70,6 +70,7 @@ def _empty_credential_dict() -> dict[str, str]:
         "api_key": "",
         "api_secret": "",
         "base_url": DEFAULT_BASE_URL,
+        "redirect_uri": "",
     }
 
 
@@ -111,16 +112,18 @@ def mask_tail(value: str, tail: int = 4) -> str:
 
 
 def persist_credentials_for_user(username: str, data: dict[str, str]) -> dict[str, str]:
+    safe = sanitize_username(username)
     out = {
         "access_token": normalize_access_token(str(data.get("access_token", ""))),
         "api_key": str(data.get("api_key", "")).strip(),
         "api_secret": str(data.get("api_secret", "")).strip(),
         "base_url": str(data.get("base_url") or "").strip() or DEFAULT_BASE_URL,
+        "redirect_uri": str(data.get("redirect_uri") or "").strip(),
     }
-    redirect_uri = str(data.get("redirect_uri") or "").strip()
-    if redirect_uri:
-        out["redirect_uri"] = redirect_uri
-    path = credentials_file_for_user(username)
+    # Drop empty redirect so callers can omit it; keep when set.
+    if not out["redirect_uri"]:
+        out.pop("redirect_uri", None)
+    path = credentials_file_for_user(safe)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(out, indent=2) + "\n", encoding="utf-8")
     return out

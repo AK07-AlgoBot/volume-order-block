@@ -260,8 +260,12 @@ else:
             f"paper {prof.get('paper_trading')} · {lots_txt} · egress {egress}"
         )
         with st.expander(header, expanded=False):
+            tg_on = bool(prof.get("telegram_notifications"))
             if role == "admin":
-                st.caption("All strategies (admin) · Telegram alerts enabled")
+                st.caption(
+                    "All strategies (admin) · Telegram alerts "
+                    + ("on" if tg_on else "OFF — trade alerts are dropped")
+                )
                 edit_strats = list(ALL_STRATEGIES)
             else:
                 labels = [STRATEGY_LABELS.get(s, s) for s in strategies]
@@ -295,6 +299,15 @@ else:
                         value=bool(prof.get("paper_trading")),
                         key=f"edit_paper_{u}",
                     )
+                    edit_telegram = (
+                        st.checkbox(
+                            "Telegram trade alerts",
+                            value=tg_on,
+                            key=f"edit_telegram_{u}",
+                        )
+                        if role == "admin"
+                        else False
+                    )
                     edit_egress = st.text_input(
                         "Egress IP (blank = primary)",
                         value=str(prof.get("egress_ip") or ""),
@@ -321,6 +334,8 @@ else:
                 }
                 if role != "admin":
                     body["enabled_strategies"] = edit_strats
+                else:
+                    body["telegram_notifications"] = bool(edit_telegram)
                 r = api_request("PATCH", f"/api/admin/users/{u}/profile", json=body)
                 if r.status_code == 200:
                     st.success(f"Updated {u}.")

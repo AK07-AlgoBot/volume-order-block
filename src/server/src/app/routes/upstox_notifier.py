@@ -40,7 +40,12 @@ async def receive_upstox_access_token(request: Request):
     try:
         payload = UpstoxTokenNotifierBody.model_validate_json(raw)
     except Exception as exc:
-        logger.error("Notifier payload parse failed from %s: %s body=%r", remote, exc, raw[:500])
+        logger.error(
+            "Notifier payload parse failed from %s: %s (%d bytes, not logged)",
+            remote,
+            exc,
+            len(raw),
+        )
         raise HTTPException(status_code=400, detail="invalid notifier payload") from exc
 
     ensure_repo_and_lib_on_path()
@@ -54,16 +59,19 @@ async def receive_upstox_access_token(request: Request):
     stored_client_id = (creds.get("api_key") or "").strip()
     incoming_client_id = (payload.client_id or "").strip()
 
-    if stored_client_id and incoming_client_id and incoming_client_id != stored_client_id:
+    if not stored_client_id:
+        logger.error("Upstox notifier rejected — no stored api_key to verify client_id")
+        raise HTTPException(status_code=403, detail="notifier not configured")
+    if not incoming_client_id or incoming_client_id != stored_client_id:
         logger.warning(
-            "Upstox notifier client_id mismatch (stored=%s… incoming=%s…)",
+            "Upstox notifier client_id rejected (stored=%s… incoming=%s…)",
             stored_client_id[:8],
-            incoming_client_id[:8],
+            incoming_client_id[:8] if incoming_client_id else "",
         )
         raise HTTPException(status_code=403, detail="client_id mismatch")
 
     token = (payload.access_token or "").strip()
-    if not token:
+    if len(token) < 32:
         raise HTTPException(status_code=400, detail="access_token required")
 
     if payload.message_type and payload.message_type != "access_token":

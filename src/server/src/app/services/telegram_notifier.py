@@ -23,6 +23,7 @@ import io
 import logging
 import os
 import queue
+import re
 import threading
 import time
 from dataclasses import dataclass, field
@@ -40,6 +41,13 @@ PHOTO_TIMEOUT_SECONDS: Final[float] = 20.0
 MAX_QUEUE_SIZE: Final[int] = 200
 MAX_SEND_ATTEMPTS: Final[int] = 3
 MAX_RATE_LIMIT_WAIT_SECONDS: Final[float] = 30.0
+
+# Bot tokens look like 123456789:AAH... — never send these (or broker secrets) to chat.
+_BOT_TOKEN_RE = re.compile(r"\d{8,}:[A-Za-z0-9_-]{20,}")
+_SECRET_ASSIGN_RE = re.compile(
+    r"(?i)\b(access_token|api_secret|api_key|password|jwt_secret|bot_token|authorization|bearer)\b"
+    r"(\s*[:=]\s*)(\S+)"
+)
 
 
 # ---------------------------------------------------------------------------
@@ -79,21 +87,59 @@ def _env_flag(name: str, *, default: bool = True) -> bool:
     return raw not in ("0", "false", "no", "off")
 
 
+def redact_secrets(text: str) -> str:
+    """Strip bot tokens and credential assignments before a message leaves the box."""
+    if not text:
+        return text
+    text = _BOT_TOKEN_RE.sub("[REDACTED]", text)
+    return _SECRET_ASSIGN_RE.sub(r"\1\2[REDACTED]", text)
+
+
 def _dispatch_enabled() -> bool:
     """Admin-only Telegram policy until per-user delivery is built."""
     if not _env_flag("AK07_TELEGRAM_ENABLED", default=True):
+        logger.warning("Telegram alerts skipped — AK07_TELEGRAM_ENABLED is off")
         return False
     if not _env_flag("AK07_TELEGRAM_ADMIN_ONLY", default=True):
         return True
-    from app.services.user_profiles_store import read_profile, telegram_notifications_enabled
+    try:
+        from app.services.user_profiles_store import read_profile, telegram_notifications_enabled
 
-    profile = read_profile(DASHBOARD_USERNAME, role=ADMIN_ROLE)
-    return telegram_notifications_enabled(profile, role=ADMIN_ROLE)
+        profile = read_profile(DASHBOARD_USERNAME, role=ADMIN_ROLE)
+        enabled = telegram_notifications_enabled(profile, role=ADMIN_ROLE)
+        if not enabled:
+            logger.warning(
+                "Telegram alerts skipped — %s profile telegram_notifications is off",
+                DASHBOARD_USERNAME,
+            )
+        return enabled
+    except Exception:  # noqa: BLE001 — never let a profile read kill every alert
+        logger.exception("Telegram admin profile check failed; allowing alerts")
+        return True
 
 
 # ---------------------------------------------------------------------------
 # Delivery helpers
 # ---------------------------------------------------------------------------
+
+def _text_payload(chat_id: str, text: str, parse_mode: str | None) -> dict[str, str | bool]:
+    payload: dict[str, str | bool] = {
+        "chat_id": chat_id,
+        "text": text,
+        "disable_web_page_preview": True,
+    }
+    if parse_mode:
+        payload["parse_mode"] = parse_mode
+    return payload
+
+
+def _retry_after_seconds(response: httpx.Response) -> float:
+    try:
+        raw = (response.json() or {}).get("parameters", {}).get("retry_after", 1)
+        return min(float(raw), MAX_RATE_LIMIT_WAIT_SECONDS)
+    except (TypeError, ValueError, AttributeError):
+        return 1.0
+
 
 def _deliver_text(client: httpx.Client, text: str) -> None:
     creds = _credentials()
@@ -102,25 +148,30 @@ def _deliver_text(client: httpx.Client, text: str) -> None:
         return
     token, chat_id = creds
     url = f"{TELEGRAM_API_BASE}/bot{token}/sendMessage"
-    payload = {
-        "chat_id": chat_id,
-        "text": text,
-        "parse_mode": "Markdown",
-        "disable_web_page_preview": True,
-    }
+    text = redact_secrets(text)
+    parse_mode: str | None = "Markdown"
     for attempt in range(1, MAX_SEND_ATTEMPTS + 1):
         try:
-            response = client.post(url, json=payload, timeout=SEND_TIMEOUT_SECONDS)
+            response = client.post(
+                url,
+                json=_text_payload(chat_id, text, parse_mode),
+                timeout=SEND_TIMEOUT_SECONDS,
+            )
             if response.status_code == 200:
                 logger.info("Telegram text delivered (%d chars)", len(text))
                 return
             if response.status_code == 429:
-                wait = min(
-                    float((response.json() or {}).get("parameters", {}).get("retry_after", 1)),
-                    MAX_RATE_LIMIT_WAIT_SECONDS,
-                )
+                wait = _retry_after_seconds(response)
                 logger.warning("Telegram rate limit; backing off %.1fs", wait)
                 time.sleep(wait)
+                continue
+            # Legacy Markdown rejects unmatched _ / * (common in NSE_FO keys) with HTTP 400.
+            if response.status_code == 400 and parse_mode:
+                logger.warning(
+                    "Telegram Markdown rejected (%s); retrying as plain text",
+                    response.text[:200],
+                )
+                parse_mode = None
                 continue
             logger.error("Telegram API error: HTTP %d %s", response.status_code, response.text[:300])
             return
@@ -136,11 +187,16 @@ def _deliver_photo(client: httpx.Client, image_bytes: bytes, caption: str) -> No
         return
     token, chat_id = creds
     url = f"{TELEGRAM_API_BASE}/bot{token}/sendPhoto"
+    caption = redact_secrets(caption)
+    parse_mode: str | None = "Markdown"
     for attempt in range(1, MAX_SEND_ATTEMPTS + 1):
         try:
+            data = {"chat_id": chat_id, "caption": caption}
+            if parse_mode:
+                data["parse_mode"] = parse_mode
             response = client.post(
                 url,
-                data={"chat_id": chat_id, "caption": caption, "parse_mode": "Markdown"},
+                data=data,
                 files={"photo": ("chart.png", image_bytes, "image/png")},
                 timeout=PHOTO_TIMEOUT_SECONDS,
             )
@@ -148,11 +204,14 @@ def _deliver_photo(client: httpx.Client, image_bytes: bytes, caption: str) -> No
                 logger.info("Telegram photo delivered (%d bytes)", len(image_bytes))
                 return
             if response.status_code == 429:
-                wait = min(
-                    float((response.json() or {}).get("parameters", {}).get("retry_after", 1)),
-                    MAX_RATE_LIMIT_WAIT_SECONDS,
-                )
+                wait = _retry_after_seconds(response)
                 time.sleep(wait)
+                continue
+            if response.status_code == 400 and parse_mode:
+                logger.warning(
+                    "Telegram photo Markdown rejected; retrying caption as plain text"
+                )
+                parse_mode = None
                 continue
             logger.error("Telegram sendPhoto error: HTTP %d %s", response.status_code, response.text[:300])
             return
@@ -195,8 +254,11 @@ def _ensure_worker() -> None:
 
 def _enqueue(msg: _TextMsg | _PhotoMsg) -> bool:
     if not _dispatch_enabled():
-        logger.debug("Telegram alert skipped (admin-only policy or disabled)")
         return False
+    if isinstance(msg, _TextMsg):
+        msg = _TextMsg(text=redact_secrets(msg.text))
+    else:
+        msg = _PhotoMsg(image_bytes=msg.image_bytes, caption=redact_secrets(msg.caption))
     try:
         _ensure_worker()
         _queue.put_nowait(msg)

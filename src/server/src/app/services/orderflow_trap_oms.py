@@ -104,6 +104,7 @@ class OfTrapOms:
             self._hydrate()
         except Exception:  # noqa: BLE001
             logger.exception("OF Trap hydrate skipped")
+        self._publish()
         logger.info("OF Trap OMS %s | MOCK=%s", "PAPER" if self.paper else "LIVE", MOCK_MODE)
 
     def _client(self) -> UpstoxClient:
@@ -255,13 +256,15 @@ class OfTrapOms:
             legs_summary(legs),
         )
         try:
-            telegram_notifier.send_message(
-                f"OF TRAP {kind} {mode} — {symbol} {bar_time}\n"
-                f"BUY {pos.option_side} {pos.strike}\n"
-                f"Opt {bar_time} C={pos.entry:.2f} L={pos.sl:.2f}\n"
-                f"SL {pos.sl:.2f}  TP {pos.target:.2f} (1:{RR_TARGET:.0f})\n"
-                f"Trail: 1R → cost, then +1/pt\n"
-                f"{legs_summary(legs)}"
+            telegram_notifier.notify_trade_execution(
+                index_name=f"OF TRAP {kind} {mode} {symbol}",
+                trade_type=f"BUY {pos.option_side} {pos.strike}",
+                entry_price=pos.entry,
+                target_price=pos.target,
+                sl_price=pos.sl,
+                component_sentiment=f"{legs_summary(legs)}; trail 1R to cost then +1/pt",
+                timestamp=bar_time,
+                context_label="Legs",
             )
         except Exception:  # noqa: BLE001
             logger.exception("telegram oftrap trade failed")
@@ -336,13 +339,13 @@ class OfTrapOms:
         except Exception:  # noqa: BLE001
             logger.exception("OF Trap performance record failed")
         try:
-            telegram_notifier.send_message(
-                f"OF TRAP {pos.kind} {mode} EXIT — {pos.symbol} {pos.bar_time}\n"
-                f"{pos.option_side} {pos.strike}\n"
-                f"exit {reason} @ {ltp:.2f}\n"
-                f"entry {pos.entry:.2f}  SL {pos.sl:.2f}  TP {pos.target:.2f}\n"
-                f"Δ {pnl:+.2f}\n"
-                f"{legs_summary(pos.order_legs)}"
+            telegram_notifier.notify_trade_exit(
+                index_name=f"OF TRAP {pos.kind} {mode} {pos.symbol}",
+                trade_type=f"{pos.option_side} {pos.strike}",
+                exit_price=ltp,
+                pnl_points=pnl,
+                reason=f"{reason} | {legs_summary(pos.order_legs)}",
+                timestamp=pos.bar_time,
             )
         except Exception:  # noqa: BLE001
             logger.exception("telegram oftrap exit failed")

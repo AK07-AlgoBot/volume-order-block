@@ -429,9 +429,7 @@ def render_oftrap_panel() -> None:
     from app.ui.styles import strategy_card_header
 
     trade_preview = cache_manager.get_json(cache_manager.OFTRAP_TRADE_KEY) or {}
-    mode = "LIVE" if isinstance(trade_preview, dict) and (
-        trade_preview.get("paper") is False or str(trade_preview.get("mode") or "") == "LIVE"
-    ) else "PAPER"
+    mode = "PAPER" if isinstance(trade_preview, dict) and trade_preview.get("paper") is True else "LIVE"
     st.markdown(
         strategy_card_header("OF Trap · Absorption", f"Upstox footprint · S/B → ITM option · {mode}"),
         unsafe_allow_html=True,

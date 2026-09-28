@@ -40,6 +40,7 @@ def _profile_public(username: str, role: str, prof: dict) -> UserProfilePublic:
         lots=fallback,
         strategy_lots=normalize_strategy_lots(prof.get("strategy_lots"), default=fallback),
         egress_ip=str(prof.get("egress_ip") or "").strip(),
+        telegram_notifications=bool(prof.get("telegram_notifications")),
     )
 
 

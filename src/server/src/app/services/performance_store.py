@@ -799,8 +799,8 @@ def format_day_summary_telegram(
     losses = int(summary["losses"])
 
     lines = [
-        f"Session archived to `{archive_path}`",
-        f"All strategies: **{total:+.2f} pts** · **{count}** closed trade(s) ({wins}W/{losses}L)",
+        f"Session archived to {archive_path}",
+        f"All strategies: {total:+.2f} pts · {count} closed trade(s) ({wins}W/{losses}L)",
     ]
 
     s1_total = round(sum((s1_pnl_by_index or {}).values()), 2)

@@ -58,6 +58,7 @@ class UserProfilePublic(BaseModel):
     lots: int = 1
     strategy_lots: dict[str, int] = Field(default_factory=dict)
     egress_ip: str = ""
+    telegram_notifications: bool = False
 
 
 class CreateUserBody(BaseModel):
@@ -79,6 +80,7 @@ class UpdateUserProfileBody(BaseModel):
     lots: int | None = Field(default=None, ge=1, le=20)
     strategy_lots: dict[str, int] | None = None
     egress_ip: str | None = None
+    telegram_notifications: bool | None = None
 
 
 class AdminBlrUpdateBody(BaseModel):
