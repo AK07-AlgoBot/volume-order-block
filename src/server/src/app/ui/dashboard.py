@@ -442,45 +442,46 @@ def render_oftrap_panel() -> None:
         if s:
             states[sym] = s
     events = cache_manager.get_json(cache_manager.OFTRAP_EVENTS_KEY) or []
+    if not isinstance(events, list):
+        events = []
 
-    if not states and not events:
+    picked = st.selectbox(
+        "Index",
+        symbols,
+        index=0,
+        key="ak07_oftrap_symbol",
+        help="Switch the tape, open option, and event list. Names without a 5m bar yet still appear here.",
+    )
+    s = states.get(picked)
+    if not s:
         st.info(
-            "No tape in Redis yet — this is not the same as a stopped container. "
-            "After `DEL` / restart, the first write is the next **5m close**. "
-            "If it stays empty, the Upstox feed is 401: refresh today's token and "
-            "`restart oftrap_engine`."
+            f"No 5m tape for {picked} yet. The engine writes the first bar on the next close "
+            "after it is subscribed. If this stays empty, rebuild oftrap_engine and check the log for "
+            f"'subscribing {picked}'."
         )
-        return
-
-    tabs = st.tabs(list(states.keys())) if len(states) > 1 else None
-    items = list(states.items())
-    for i, (sym, s) in enumerate(items):
-        ctx = tabs[i] if tabs else st.container()
-        with ctx:
-            if not tabs and len(items) == 1:
-                pass
-            delta = s.get("delta", 0)
-            flag = "TRAP SELL" if s.get("trap_sell") else ("TRAP BUY" if s.get("trap_buy") else (
-                "SELL ABS (S)" if s.get("sell_abs") else ("BUY ABS (B)" if s.get("buy_abs") else "—")))
-            c1, c2, c3, c4, c5 = st.columns(5)
-            c1.metric(f"{sym} · last 5m", str(s.get("time") or "—"))
-            c2.metric("Close", fmt(s.get("close")))
-            c3.metric("Delta", f"{delta:+,}")
-            c4.metric("Buy / Sell vol", f"{s.get('buy_vol', 0):,} / {s.get('sell_vol', 0):,}")
-            c5.metric("Signal", flag)
-            updated = str(s.get("updated", ""))[:19].replace("T", " ")
-            today = datetime.now(ZoneInfo("Asia/Kolkata")).date().isoformat()
-            stale = str(s.get("updated") or "")[:10] not in ("", today)
-            if stale:
-                st.warning(f"Stale tape — last bar {updated}. Restart `oftrap_engine` (feed died after yesterday's close).")
-            elif s.get("status") == "waiting":
-                st.caption("Waiting for today's first 5m close…")
-            skip = str(s.get("skip") or "").strip()
-            extra = f" · not S/B: {skip}" if skip and flag == "—" else ""
-            st.caption(
-                f"O {fmt(s.get('open'))} · H {fmt(s.get('high'))} · L {fmt(s.get('low'))} · "
-                f"vol {s.get('volume', 0):,} · updated {updated}{extra}"
-            )
+    else:
+        delta = s.get("delta", 0)
+        flag = "TRAP SELL" if s.get("trap_sell") else ("TRAP BUY" if s.get("trap_buy") else (
+            "SELL ABS (S)" if s.get("sell_abs") else ("BUY ABS (B)" if s.get("buy_abs") else "—")))
+        c1, c2, c3, c4, c5 = st.columns(5)
+        c1.metric(f"{picked} · last 5m", str(s.get("time") or "—"))
+        c2.metric("Close", fmt(s.get("close")))
+        c3.metric("Delta", f"{delta:+,}")
+        c4.metric("Buy / Sell vol", f"{s.get('buy_vol', 0):,} / {s.get('sell_vol', 0):,}")
+        c5.metric("Signal", flag)
+        updated = str(s.get("updated", ""))[:19].replace("T", " ")
+        today = datetime.now(ZoneInfo("Asia/Kolkata")).date().isoformat()
+        stale = str(s.get("updated") or "")[:10] not in ("", today)
+        if stale:
+            st.warning(f"Stale tape — last bar {updated}. Restart `oftrap_engine` (feed died after yesterday's close).")
+        elif s.get("status") == "waiting":
+            st.caption("Waiting for today's first 5m close…")
+        skip = str(s.get("skip") or "").strip()
+        extra = f" · not S/B: {skip}" if skip and flag == "—" else ""
+        st.caption(
+            f"O {fmt(s.get('open'))} · H {fmt(s.get('high'))} · L {fmt(s.get('low'))} · "
+            f"vol {s.get('volume', 0):,} · updated {updated}{extra}"
+        )
 
     trade = cache_manager.get_json(cache_manager.OFTRAP_TRADE_KEY) or {}
     stored_pos = trade.get("positions") if isinstance(trade, dict) else None
@@ -489,9 +490,10 @@ def render_oftrap_panel() -> None:
     else:
         one = trade.get("position") if isinstance(trade, dict) else None
         open_rows = [one] if isinstance(one, dict) else []
-    st.markdown("##### OF Trap — Option trade (same 5m candle)")
+    open_rows = [p for p in open_rows if str(p.get("symbol") or "").upper() in (picked, "CRUDEOIL" if picked == "CRUDE" else picked)]
+    st.markdown(f"##### {picked} — Option trade (same 5m candle)")
     if not open_rows:
-        st.caption("Flat — next S/B maps ITM option 5m candle (SL=low, TP=1:4, trail 1R→cost then +1/pt). One slot per symbol.")
+        st.caption("Flat on this symbol — next S/B maps ITM option 5m candle (SL=low, TP=1:4, trail 1R→cost then +1/pt).")
     for pos in open_rows:
         t1, t2, t3, t4, t5, t6 = st.columns(6)
         t1.metric("Setup", f"{pos.get('kind')} {pos.get('bar_time')} → {pos.get('option_side')} {pos.get('strike')}")
@@ -521,13 +523,24 @@ def render_oftrap_panel() -> None:
             f"{f' · {fans}' if fans else ''}"
         )
     closed = (trade.get("closed") or []) if isinstance(trade, dict) else []
-    if closed:
-        last = closed[-1]
-        st.caption(f"Last exit: {last.get('exit_reason')} @ {fmt(last.get('exit_px'))} · {last.get('option_side')}{last.get('strike')}")
+    closed_here = [
+        row for row in closed
+        if isinstance(row, dict) and str(row.get("symbol") or "").upper() in (picked, "CRUDEOIL" if picked == "CRUDE" else picked)
+    ]
+    if closed_here:
+        last = closed_here[-1]
+        st.caption(
+            f"Last {picked} exit: {last.get('exit_reason')} @ {fmt(last.get('exit_px'))} · "
+            f"{last.get('option_side')}{last.get('strike')}"
+        )
 
-    if events:
-        with st.expander("Recent absorption / trap events", expanded=True):
-            for ev in reversed(events[-15:]):
+    sym_events = [
+        ev for ev in events
+        if isinstance(ev, dict) and str(ev.get("symbol") or "").upper() in (picked, "CRUDEOIL" if picked == "CRUDE" else picked)
+    ]
+    if sym_events:
+        with st.expander(f"Recent {picked} absorption / trap events", expanded=True):
+            for ev in reversed(sym_events[-15:]):
                 kind = str(ev.get("kind") or "")
                 label = {
                     "TRAP_BUY": "🟢 TRAP BUY",
