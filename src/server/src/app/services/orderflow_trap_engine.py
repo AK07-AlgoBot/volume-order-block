@@ -65,8 +65,21 @@ IST: Final = ZoneInfo("Asia/Kolkata")
 BAR_MS: Final[int] = 5 * 60 * 1000
 SESSION_START: Final[dtime] = dtime(9, 15)
 SESSION_END: Final[dtime] = dtime(15, 30)
+MCX_SESSION_START: Final[dtime] = dtime(9, 0)
+MCX_SESSION_END: Final[dtime] = dtime(23, 30)
+MCX_SYMBOLS: Final[frozenset[str]] = frozenset({"GOLD", "SILVER", "CRUDE", "CRUDEOIL"})
 TICK: Final[float] = 0.05
 DEFAULT_SYMBOLS: Final[str] = "NIFTY,BANKNIFTY,SENSEX,GOLD,SILVER,CRUDE"
+
+
+def _is_mcx(symbol: str) -> bool:
+    return symbol.upper() in MCX_SYMBOLS
+
+
+def _session_bounds(symbol: str) -> tuple[dtime, dtime]:
+    if _is_mcx(symbol):
+        return MCX_SESSION_START, MCX_SESSION_END
+    return SESSION_START, SESSION_END
 
 
 def _scale(symbol: str) -> tuple[float, float, float]:
@@ -163,10 +176,19 @@ class OrderflowTrapEngine:
     def _bucket_ms(ts_ms: int) -> int:
         return (ts_ms // BAR_MS) * BAR_MS
 
-    @staticmethod
-    def _in_session(ts_ms: int) -> bool:
+    def _in_session(self, ts_ms: int, symbol: str) -> bool:
         t = datetime.fromtimestamp(ts_ms / 1000.0, tz=IST).time()
-        return SESSION_START <= t <= SESSION_END
+        start, end = _session_bounds(symbol)
+        return start <= t <= end
+
+    def _any_open(self, now: datetime) -> bool:
+        t = now.time()
+        names = list(self.states) or list(self.symbols)
+        for sym in names:
+            start, end = _session_bounds(sym)
+            if start <= t <= end:
+                return True
+        return False
 
     def _classify(self, st: SymState, ltp: float, bid: float, ask: float) -> str:
         """Lee-Ready: at/above ask = buy, at/below bid = sell, else tick test."""
@@ -225,7 +247,7 @@ class OrderflowTrapEngine:
         day = datetime.fromtimestamp(ts_ms / 1000.0, tz=IST).date().isoformat()
         if st.day != day:
             self._reset_day(st, day)
-        if not self._in_session(ts_ms):
+        if not self._in_session(ts_ms, st.symbol):
             st.last_ltp = ltp
             st.last_vtt = vtt if vtt is not None else st.last_vtt
             return
@@ -274,7 +296,7 @@ class OrderflowTrapEngine:
         cur_bucket = self._bucket_ms(now_ms)
         for st in self.states.values():
             if st.current is not None and cur_bucket > st.current.start_ms:
-                if self._in_session(st.current.start_ms):
+                if self._in_session(st.current.start_ms, st.symbol):
                     self._finalize(st)
                 st.current = None
 
@@ -546,7 +568,7 @@ class OrderflowTrapEngine:
                     ts_ms = int(datetime.fromisoformat(str(ts)).timestamp() * 1000) if ts else 0
                 except (KeyError, TypeError, ValueError):
                     continue
-                if ts_ms and not self._in_session(ts_ms):
+                if ts_ms and not self._in_session(ts_ms, sym):
                     continue
                 bar = Bar(start_ms=self._bucket_ms(ts_ms), open=o, high=h, low=l, close=cl, volume=v, has_delta=False)
                 st.bars.append(bar)
@@ -620,7 +642,7 @@ class OrderflowTrapEngine:
                 await asyncio.sleep(20)
                 now = datetime.now(IST)
                 today = now.date().isoformat()
-                in_session = SESSION_START <= now.time() <= SESSION_END
+                in_session = self._any_open(now)
                 if in_session and self._published_day != today:
                     self._clear_stale_session(today)
                 silent = time.monotonic() - self._last_tick_mono

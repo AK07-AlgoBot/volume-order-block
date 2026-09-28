@@ -42,7 +42,24 @@ IST = ZoneInfo("Asia/Kolkata")
 RR_TARGET = float(os.environ.get("OFTRAP_RR", "4"))
 FORCE_EXIT = dtime(15, 20)
 NO_ENTRY_AFTER = dtime(15, 10)
+MCX_FORCE_EXIT = dtime(23, 20)
+MCX_NO_ENTRY_AFTER = dtime(23, 10)
+MCX_SYMBOLS = frozenset({"GOLD", "SILVER", "CRUDE", "CRUDEOIL"})
 MIN_RISK = float(os.environ.get("OFTRAP_MIN_OPT_RISK", "1.0"))
+
+
+def _is_mcx(symbol: str) -> bool:
+    return symbol.upper() in MCX_SYMBOLS
+
+
+def _entry_cutoff(symbol: str) -> dtime:
+    return MCX_NO_ENTRY_AFTER if _is_mcx(symbol) else NO_ENTRY_AFTER
+
+
+def _flat_time(symbol: str) -> tuple[dtime, str]:
+    if _is_mcx(symbol):
+        return MCX_FORCE_EXIT, "TIME EXIT 23:20"
+    return FORCE_EXIT, "TIME EXIT 15:20"
 
 
 def _hhmm(ts: str) -> str:
@@ -194,8 +211,8 @@ class OfTrapOms:
             return None
         sym = symbol.upper()
         now = datetime.now(IST)
-        if now.time() >= NO_ENTRY_AFTER:
-            logger.info("skip %s %s — past %s", sym, bar_time, NO_ENTRY_AFTER)
+        if now.time() >= _entry_cutoff(sym):
+            logger.info("skip %s %s — past %s", sym, bar_time, _entry_cutoff(sym))
             return None
         held = self.positions.get(sym)
         if held and held.status == "open":
@@ -324,12 +341,13 @@ class OfTrapOms:
                 pos.log.append(f"trail SL {pos.sl:.2f} → {new_sl:.2f} (peak {pos.premium_high:.2f})")
                 pos.sl = new_sl
         reason = ""
+        flat_at, flat_reason = _flat_time(pos.symbol)
         if ltp <= pos.sl:
             reason = "SL" if not pos.trail_armed else ("COST" if abs(pos.sl - pos.entry) < 0.05 else "TRAIL SL")
         elif ltp >= pos.target:
             reason = "TARGET 1:4"
-        elif now.time() >= FORCE_EXIT:
-            reason = "TIME EXIT 15:20"
+        elif now.time() >= flat_at:
+            reason = flat_reason
         if reason:
             if not self._close_position(pos, ltp, reason):
                 self._publish()
