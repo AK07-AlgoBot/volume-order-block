@@ -430,12 +430,49 @@ def render_oftrap_panel() -> None:
 
     trade_preview = cache_manager.get_json(cache_manager.OFTRAP_TRADE_KEY) or {}
     mode = "PAPER" if isinstance(trade_preview, dict) and trade_preview.get("paper") is True else "LIVE"
-    st.markdown(
-        strategy_card_header("OF Trap · Absorption", f"Upstox footprint · S/B → ITM option · {mode}"),
-        unsafe_allow_html=True,
-    )
-
     symbols = [s.strip().upper() for s in (os.environ.get("OFTRAP_SYMBOLS") or "NIFTY,BANKNIFTY,SENSEX,GOLD,SILVER,CRUDE").split(",") if s.strip()]
+    if st.session_state.get("ak07_oftrap_symbol") not in symbols:
+        st.session_state.ak07_oftrap_symbol = symbols[0] if symbols else "NIFTY"
+
+    title_col, picks_col = st.columns([1.15, 2.6], vertical_alignment="center")
+    with title_col:
+        st.markdown(
+            strategy_card_header("OF Trap · Absorption", f"Upstox footprint · S/B → ITM option · {mode}"),
+            unsafe_allow_html=True,
+        )
+    with picks_col:
+        st.markdown(
+            """
+            <style>
+            div[class*="st-key-ak07_oftrap_picks"] [data-testid="stHorizontalBlock"] {
+              gap: 0.35rem;
+              align-items: center;
+            }
+            div[class*="st-key-ak07_oftrap_picks"] button {
+              border-radius: 999px !important;
+              min-height: 2rem !important;
+              padding: 0.1rem 0.45rem !important;
+              font-size: 0.78rem !important;
+              font-weight: 700 !important;
+              letter-spacing: 0.02em;
+            }
+            </style>
+            """,
+            unsafe_allow_html=True,
+        )
+        with st.container(key="ak07_oftrap_picks"):
+            pick_cols = st.columns(len(symbols) or 1)
+            for col, sym in zip(pick_cols, symbols):
+                active = st.session_state.ak07_oftrap_symbol == sym
+                if col.button(
+                    sym,
+                    key=f"oftrap_pick_{sym}",
+                    type="primary" if active else "secondary",
+                    use_container_width=True,
+                ):
+                    st.session_state.ak07_oftrap_symbol = sym
+                    st.rerun()
+
     states = {}
     for sym in symbols:
         s = cache_manager.get_json(cache_manager.OFTRAP_STATE_KEY_TEMPLATE.format(symbol=sym))
@@ -445,13 +482,7 @@ def render_oftrap_panel() -> None:
     if not isinstance(events, list):
         events = []
 
-    picked = st.selectbox(
-        "Index",
-        symbols,
-        index=0,
-        key="ak07_oftrap_symbol",
-        help="Switch the tape, open option, and event list. Names without a 5m bar yet still appear here.",
-    )
+    picked = st.session_state.ak07_oftrap_symbol
     s = states.get(picked)
     if not s:
         st.info(
