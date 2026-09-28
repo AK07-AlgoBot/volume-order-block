@@ -1,0 +1,43 @@
+indicator("OFS S2 Exhaustion", overlay = true)
+
+// Strategy 2 - Exhaustion reversal.
+// A new price extreme while EFFORT fades (volume AND |delta| declining) = the
+// move is running out of steam -> reversal.
+//   BUY  = new low  + fading volume/delta + green close = sellers exhausted.
+//   SELL = new high + fading volume/delta + red close   = buyers exhausted.
+// 5m NIFTY-I / BANKNIFTY-I footprint. Confirms on bar close. No broker orders.
+
+nBars = input(3, title = "Declining window (bars)")
+volDeclPct = input(0.15, title = "Min volume fade over window (0.15 = 15%)")
+useSess = input(true, title = "Only signal 09:15-15:30")
+
+d = orderflow.delta
+bull = close > open
+bear = close < open
+tick = 0.05
+isBN = close > 40000
+inSess = not useSess or (hour == 9 and minute >= 15) or (hour > 9 and hour < 15) or (hour == 15 and minute <= 30)
+
+// Price making a fresh extreme over the window (non-decreasing/-increasing run).
+hhRun = high >= high[1] and high[1] >= high[2] and high > high[nBars]
+llRun = low <= low[1] and low[1] <= low[2] and low < low[nBars]
+
+// Effort fading: volume lower across the window AND aggression (|delta|) shrinking.
+volFade = (volume[nBars] - volume) / math.max(volume[nBars], 1.0) >= volDeclPct and volume < volume[1]
+dFade = math.abs(d) < math.abs(d[1]) and math.abs(d[1]) < math.abs(d[2])
+
+buyExh = inSess and llRun and volFade and dFade and bull
+sellExh = inSess and hhRun and volFade and dFade and bear
+
+buyClose = buyExh[1]
+sellClose = sellExh[1]
+buyPulse = buyClose and not buyClose[1]
+sellPulse = sellClose and not sellClose[1]
+
+plotshape(buyClose, title = "Buy", shape = shape.triangleup, location = location.belowbar, color = color.lime, offset = -1, size = size.large, text = "BUY")
+plotshape(sellClose, title = "Sell", shape = shape.triangledown, location = location.abovebar, color = color.red, offset = -1, size = size.large, text = "SELL")
+
+alertcondition(buyPulse and isBN, title = "S2 Buy BN", message = "OFS|S2|BUY|BANKNIFTY-I|5")
+alertcondition(buyPulse and not isBN, title = "S2 Buy Nifty", message = "OFS|S2|BUY|NIFTY-I|5")
+alertcondition(sellPulse and isBN, title = "S2 Sell BN", message = "OFS|S2|SELL|BANKNIFTY-I|5")
+alertcondition(sellPulse and not isBN, title = "S2 Sell Nifty", message = "OFS|S2|SELL|NIFTY-I|5")

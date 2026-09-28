@@ -1,0 +1,254 @@
+indicator("OFS Reversal v1", overlay = true)
+
+// Orderflow REVERSAL engine — GoCharting Lipi overlay (builds on the DD work).
+// Idea: catch the exact turn by comparing the CURRENT swing's delta to the
+// PREVIOUS swing's delta (absorption / delta divergence), confirmed by which
+// side (buy vs sell pressure) is actually in control right now.
+//
+//  BUY  = price prints a LOWER (or equal) swing low than the prior swing low,
+//         but delta at the new low is HIGHER (less selling) -> sellers trapped,
+//         and the current bar closes up with buy pressure > sell pressure.
+//  SELL = price prints a HIGHER swing high than the prior swing high,
+//         but delta is LOWER (less buying) -> buyers trapped,
+//         and the current bar closes down with sell pressure > buy pressure.
+//
+// Plots Entry / Stop / Target so entry AND exit are defined. No broker orders.
+
+pivotLen = input(3, title = "Swing pivot length (bars each side)")
+maxBack = input(80, title = "History scan depth (bars)")
+freshMax = input(8, title = "Signal only if new swing <= N bars old")
+tolPts = input(5.0, title = "Price equality tol (Nifty pts; BN x4)")
+pressRatio = input(1.2, title = "Buy/Sell pressure ratio to confirm")
+needClimax = input(true, title = "Require prior swing to be a delta climax")
+climaxAbs = input(300.0, title = "Prior-swing climax |delta| (Nifty; BN x2)")
+requireFlip = input(true, title = "Require current-bar delta to flip in trade dir")
+entryMaxPts = input(40.0, title = "Do not chase: entry within N pts of swing")
+stopBufPts = input(5.0, title = "Stop buffer beyond swing (Nifty pts; BN x4)")
+targetR = input(2.0, title = "Target = R multiple of risk")
+useSess = input(true, title = "Only signal 09:15-15:30")
+useDayCtx = input(true, title = "Confirm with day pressure + prior candles")
+trendBars = input(3, title = "Prior candles to read the flow")
+flowMinAbs = input(150.0, title = "Prior flow must oppose trade by |delta| (BN x2)")
+needDayBias = input(false, title = "Also require day cumulative delta to agree")
+showFlipsOnly = input(true, title = "Declutter: show only side-flip signals")
+showAnticipate = input(true, title = "Anticipate swings early via orderflow (?)")
+antiLen = input(5, title = "Anticipate: local-extreme lookback")
+antiWick = input(0.4, title = "Anticipate: min rejection wick fraction")
+
+d = orderflow.delta
+maxD = orderflow.maxdelta
+minD = orderflow.mindelta
+buyV = orderflow.buyvolume
+sellV = orderflow.sellvolume
+
+bull = close > open
+bear = close < open
+doji = close == open
+tick = 0.05
+isBN = close > 40000
+tol = isBN ? tolPts * 4.0 : tolPts
+buff = isBN ? stopBufPts * 4.0 : stopBufPts
+entryMax = isBN ? entryMaxPts * 4.0 : entryMaxPts
+climax = isBN ? climaxAbs * 2.0 : climaxAbs
+
+inSess = not useSess or (hour == 9 and minute >= 15) or (hour > 9 and hour < 15) or (hour == 15 and minute <= 30)
+
+// --- Pivot detection (FAST: rolling min/max, no nested loops) ---
+// A pivot low is CONFIRMED `pivotLen` bars ago when the centre bar of the trailing
+// (2*pivotLen+1) window is the lowest of that window. talib.lowest gives that min
+// in O(1) per bar, so we avoid the per-bar inner loop that caused the timeout.
+// Swing delta "energy" = the pivot bar plus its two neighbours.
+winLen = 2 * pivotLen + 1
+llWin = talib.lowest(low, winLen)
+hhWin = talib.highest(high, winLen)
+isPivLo = low[pivotLen] <= llWin
+isPivHi = high[pivotLen] >= hhWin
+pivLoPx = low[pivotLen]
+pivHiPx = high[pivotLen]
+pivDsum = orderflow.delta[pivotLen] + orderflow.delta[pivotLen - 1] + orderflow.delta[pivotLen + 1]
+
+// --- One single-pass scan for the two most recent swing lows AND highs ---
+lo1p = 0.0
+lo1d = 0.0
+lo1i = -1.0
+lo2p = 0.0
+lo2d = 0.0
+loFound = 0.0
+loLast = -1000.0
+hi1p = 0.0
+hi1d = 0.0
+hi1i = -1.0
+hi2p = 0.0
+hi2d = 0.0
+hiFound = 0.0
+hiLast = -1000.0
+for i = 0 to maxBack {
+    if isPivLo[i] and loFound < 2.0 and (i - loLast) >= pivotLen {
+        if loFound < 1.0 {
+            lo1p := pivLoPx[i]
+            lo1d := pivDsum[i]
+            lo1i := i + pivotLen
+        }
+        if loFound >= 1.0 and loFound < 2.0 {
+            lo2p := pivLoPx[i]
+            lo2d := pivDsum[i]
+        }
+        loFound := loFound + 1.0
+        loLast := i
+    }
+    if isPivHi[i] and hiFound < 2.0 and (i - hiLast) >= pivotLen {
+        if hiFound < 1.0 {
+            hi1p := pivHiPx[i]
+            hi1d := pivDsum[i]
+            hi1i := i + pivotLen
+        }
+        if hiFound >= 1.0 and hiFound < 2.0 {
+            hi2p := pivHiPx[i]
+            hi2d := pivDsum[i]
+        }
+        hiFound := hiFound + 1.0
+        hiLast := i
+    }
+}
+
+haveLo2 = loFound >= 2.0
+haveHi2 = hiFound >= 2.0
+
+// --- Day pressure context: how flow has built from the first candle of the day,
+//     and whether the LAST few candles were still pushing the old way (continuation)
+//     or have started to change (reversal). ---
+flowMin = isBN ? flowMinAbs * 2.0 : flowMinAbs
+cumD = d
+for i = 1 to maxBack {
+    if dayofweek[i] != dayofweek {
+        break
+    }
+    cumD := cumD + orderflow.delta[i]
+}
+priorFlow = 0.0
+for i = 1 to trendBars {
+    priorFlow := priorFlow + orderflow.delta[i]
+}
+// Reversal requires the prior candles to have been pressing the OTHER way, then a
+// change now. If prior flow was already with us it is continuation, not a reversal.
+changeUp = not useDayCtx or (priorFlow <= -flowMin and (not needDayBias or cumD <= 0.0))
+changeDn = not useDayCtx or (priorFlow >= flowMin and (not needDayBias or cumD >= 0.0))
+
+// --- Delta divergence between the two swings ---
+// Bull: price lower/equal low, delta higher low (absorption). Prior low was real selling.
+lowerLow = haveLo2 and lo1p <= lo2p + tol
+deltaHigherLo = haveLo2 and lo1d > lo2d
+priorSellClimax = not needClimax or (haveLo2 and lo2d <= -climax)
+bullDiv = lowerLow and deltaHigherLo and priorSellClimax
+
+// Bear: price higher/equal high, delta lower high. Prior high was real buying.
+higherHigh = haveHi2 and hi1p >= hi2p - tol
+deltaLowerHi = haveHi2 and hi1d < hi2d
+priorBuyClimax = not needClimax or (haveHi2 and hi2d >= climax)
+bearDiv = higherHigh and deltaLowerHi and priorBuyClimax
+
+// --- Right-now confirmation: pressure + fresh swing + not chasing ---
+buyPress = sellV <= 0.0 ? buyV > 0.0 : buyV >= sellV * pressRatio
+sellPress = buyV <= 0.0 ? sellV > 0.0 : sellV >= buyV * pressRatio
+flipUp = not requireFlip or d > 0.0
+flipDn = not requireFlip or d < 0.0
+freshLong = lo1i >= 0.0 and lo1i <= freshMax
+freshShort = hi1i >= 0.0 and hi1i <= freshMax
+nearLong = lo1p >= 0.0 and close <= lo1p + entryMax
+nearShort = hi1p >= 0.0 and close >= hi1p - entryMax
+
+// --- ANTICIPATED swing (EARLY, orderflow-based, lower reliability) ---
+// Fires LIVE on the forming bar, before the pivot confirms, when the tape shows a
+// climax + absorption + delta flip at a fresh local extreme. It is a "maybe forming"
+// heads-up only; the confirmed pivot/BOS still governs actual signals.
+rngA = math.max(high - low, tick)
+lowerWick = (math.min(open, close) - low) / rngA
+upperWick = (high - math.max(open, close)) / rngA
+freshLocalLo = low <= talib.lowest(low, antiLen)
+freshLocalHi = high >= talib.highest(high, antiLen)
+antiSwingLo = showAnticipate and inSess and freshLocalLo and lowerWick >= antiWick and d > 0.0 and buyPress
+antiSwingHi = showAnticipate and inSess and freshLocalHi and upperWick >= antiWick and d < 0.0 and sellPress
+
+buyRev = inSess and bullDiv and freshLong and bull and buyPress and flipUp and nearLong and changeUp and not doji
+sellRev = inSess and bearDiv and freshShort and bear and sellPress and flipDn and nearShort and changeDn and not doji
+conflict = buyRev and sellRev
+buySig = buyRev and not conflict
+sellSig = sellRev and not conflict
+
+// --- TREND via market structure: the "moment" is a Break of Structure (BOS) ---
+// The trend/color flips ONLY when price CLOSES beyond the opposing swing, NOT on
+// every candle's colour:
+//    close > last swing high  -> trend UP     (uptrend confirmed)
+//    close < last swing low   -> trend DOWN   (downtrend confirmed)
+// So a red->green->red chop does NOT flip the trend; a swing must actually break.
+// This is the trend confirmation - we are no longer reacting to single candles.
+bosUp = hiFound >= 1.0 and close > hi1p
+bosDn = loFound >= 1.0 and close < lo1p
+trend = 0.0
+for i = 0 to maxBack {
+    if trend == 0.0 {
+        if bosUp[i] {
+            trend := 1.0
+        }
+        if bosDn[i] {
+            trend := -1.0
+        }
+    }
+}
+// Reversal triangle = EARLY entry at exhaustion, shown only when it OPPOSES the
+// current trend (the actual turning point). Once BOS confirms the flip, further
+// same-side signals are hidden so you are not re-entering mid-trend.
+buyFlip = buySig and trend <= 0.0
+sellFlip = sellSig and trend >= 0.0
+// Background = the CONFIRMED trend. Before any BOS, lean by day cumulative delta.
+bias = trend != 0.0 ? trend : (cumD > 0.0 ? 1.0 : cumD < 0.0 ? -1.0 : 0.0)
+buyShow = showFlipsOnly ? buyFlip : buySig
+sellShow = showFlipsOnly ? sellFlip : sellSig
+// Mark the exact BOS bar where the trend was confirmed (the "moment").
+bosUpFirst = bosUp and trend[1] <= 0.0
+bosDnFirst = bosDn and trend[1] >= 0.0
+
+// --- Entry / Stop / Target (stop = the swing that must hold; target = R multiple) ---
+buyEntry = close
+buyStop = lo1p - buff
+buyRisk = math.max(buyEntry - buyStop, tick)
+buyTgt = buyEntry + buyRisk * targetR
+
+sellEntry = close
+sellStop = hi1p + buff
+sellRisk = math.max(sellStop - sellEntry, tick)
+sellTgt = sellEntry - sellRisk * targetR
+
+// Confirm on close of the 5m bar (offset back one).
+buyClose = buyShow[1]
+sellClose = sellShow[1]
+buyPulse = buyClose and not buyClose[1]
+sellPulse = sellClose and not sellClose[1]
+
+plotshape(buyClose, title = "Buy", shape = shape.triangleup, location = location.belowbar, color = color.lime, offset = -1, size = size.large, text = "BUY")
+plotshape(sellClose, title = "Sell", shape = shape.triangledown, location = location.abovebar, color = color.red, offset = -1, size = size.large, text = "SELL")
+
+// The "moment": trend confirmed by a Break of Structure (close beyond the swing).
+plotshape(bosUpFirst, title = "BOS up", shape = shape.triangleup, location = location.belowbar, color = color.green, size = size.small, text = "BOS")
+plotshape(bosDnFirst, title = "BOS down", shape = shape.triangledown, location = location.abovebar, color = color.red, size = size.small, text = "BOS")
+
+// EARLY heads-up: swing MAYBE forming now (orderflow), before pivot confirms.
+plotshape(antiSwingLo, title = "Anticipated low", shape = shape.triangleup, location = location.belowbar, color = color.aqua, size = size.tiny, text = "?")
+plotshape(antiSwingHi, title = "Anticipated high", shape = shape.triangledown, location = location.abovebar, color = color.orange, size = size.tiny, text = "?")
+
+// Structure lines: the live swing low/high the trade leans on.
+plot(loFound >= 1.0 ? lo1p : na, title = "Swing low", color = color.green)
+plot(hiFound >= 1.0 ? hi1p : na, title = "Swing high", color = color.red)
+
+// Entry / Stop / Target markers on the signal bar (aligns with the triangle).
+plot(buyShow ? buyEntry : na, title = "Buy entry", color = color.aqua)
+plot(buyShow ? buyStop : na, title = "Buy stop", color = color.red)
+plot(buyShow ? buyTgt : na, title = "Buy target", color = color.lime)
+plot(sellShow ? sellEntry : na, title = "Sell entry", color = color.aqua)
+plot(sellShow ? sellStop : na, title = "Sell stop", color = color.red)
+plot(sellShow ? sellTgt : na, title = "Sell target", color = color.lime)
+
+alertcondition(buyPulse and isBN, title = "OFS Rev Buy BN", message = "OFS|REV|BUY|BANKNIFTY-I|5")
+alertcondition(buyPulse and not isBN, title = "OFS Rev Buy Nifty", message = "OFS|REV|BUY|NIFTY-I|5")
+alertcondition(sellPulse and isBN, title = "OFS Rev Sell BN", message = "OFS|REV|SELL|BANKNIFTY-I|5")
+alertcondition(sellPulse and not isBN, title = "OFS Rev Sell Nifty", message = "OFS|REV|SELL|NIFTY-I|5")
